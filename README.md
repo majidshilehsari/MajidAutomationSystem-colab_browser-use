@@ -67,7 +67,7 @@ GitHub account or organization that hosts it:
 
 ```bash
 cd /content
-git clone https://github.com/YOUR_USERNAME/colab_browser-computer-use.git
+git clone https://github.com/HoussemMouradi/colab_browser-computer-use.git
 cd colab_browser-computer-use
 chmod +x *.sh
 ./install.sh
