@@ -14,13 +14,22 @@ import re
 import secrets
 import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
+from urllib.parse import unquote
 
 from . import schema
 
 API_PREFIX = "/automation/api"
 
-_NAME_RE = re.compile(r"^[A-Za-z0-9_.-]{1,80}$")
+# A flow name becomes one file under <data>/flows, so it must stay a single
+# filename component: no separators, no control characters, no angle brackets.
+# Spaces and Persian are ordinary user input and must be accepted.
+_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f/\\<>]{1,80}$", re.UNICODE)
 _SAFE_SEGMENT = re.compile(r"^[A-Za-z0-9_.:-]{1,120}$")
+# Percent-escaped form of the same segment, for names like "Untitled flow" that
+# the browser encodes as "Untitled%20flow".
+_SAFE_SEGMENT_ENCODED = re.compile(r"^[A-Za-z0-9_.:~%-]{1,200}$")
+# What a decoded segment must never contain, whatever the charset.
+_UNSAFE_SEGMENT = re.compile(r"[/\\\x00-\x1f\x7f]")
 
 Response = Tuple[int, Dict[str, str], bytes]
 
@@ -48,7 +57,8 @@ class FlowStore:
         os.makedirs(self.dir, exist_ok=True)
 
     def path_for(self, name: str) -> str:
-        if not _NAME_RE.match(name or ""):
+        name = name or ""
+        if not _NAME_RE.match(name) or name.strip() in ("", ".", "..") or name.startswith("."):
             raise ValueError("invalid flow name")
         return os.path.join(self.dir, name + ".json")
 
@@ -370,9 +380,13 @@ class AutomationApi:
         if page_id and self.detector is not None:
             snapshot = self.detector.load(page_id)
         flow = payload.get("flow")
+        request = payload.get("request")
+        public_base = str(payload.get("publicBase") or "").rstrip("/")
         parts = [guide]
+        if isinstance(request, str) and request.strip():
+            parts.append(_request_section(request))
         if snapshot:
-            parts.append(_snapshot_section(snapshot))
+            parts.append(_snapshot_section(snapshot, public_base))
         if flow:
             normalized, errors = schema.validate_flow(flow)
             parts.append(_flow_section(normalized if not errors else flow, errors))
@@ -400,26 +414,67 @@ def _match(pattern: str, path: str) -> Optional[Dict[str, str]]:
     if pattern.endswith(suffix):
         literal = pattern[:-len(suffix)]
         if path.startswith(literal + "/") and path.endswith("/log"):
-            captured = path[len(literal) + 1:-len("/log")]
-            if captured and "/" not in captured and _SAFE_SEGMENT.match(captured):
+            captured = _capture(path[len(literal) + 1:-len("/log")])
+            if captured is not None:
                 return {"*": captured}
         return None
 
     if pattern.endswith("/*"):
         literal = pattern[:-2]
         if path.startswith(literal + "/"):
-            captured = path[len(literal) + 1:]
-            if captured and "/" not in captured and _SAFE_SEGMENT.match(captured):
+            captured = _capture(path[len(literal) + 1:])
+            if captured is not None:
                 return {"*": captured}
     return None
+
+
+def _capture(raw: str) -> Optional[str]:
+    """Validate one path segment, accepting percent-escaped input.
+
+    A name such as ``Untitled flow`` arrives as ``Untitled%20flow``, so the
+    escaped text is decoded and checked again: no separators, no control
+    characters, never ``.`` or ``..``. An escape that would smuggle a separator
+    (``%2F`` -> ``/``) therefore still fails, while spaces and non-ASCII flow
+    names survive.
+    """
+    if not raw or "/" in raw or raw in (".", ".."):
+        return None
+    if _SAFE_SEGMENT.match(raw):
+        return raw
+    if not _SAFE_SEGMENT_ENCODED.match(raw):
+        return None
+    decoded = unquote(raw)
+    if not decoded or len(decoded) > 120:
+        return None
+    if decoded in (".", ".."):
+        return None
+    if _UNSAFE_SEGMENT.search(decoded):
+        return None
+    return decoded
 
 
 def new_token() -> str:
     return secrets.token_hex(8)
 
 
-def _snapshot_section(snapshot: Dict[str, Any]) -> str:
-    lines = ["## صفحه‌ی شناسایی‌شده", "", "```json"]
+def _request_section(request: str) -> str:
+    return "\n".join([
+        "## درخواست کاربر",
+        "",
+        "کاربر از تو این را می‌خواهد:",
+        "",
+        "> " + request.strip().replace("\n", "\n> "),
+    ])
+
+
+def _snapshot_section(snapshot: Dict[str, Any], public_base: str = "") -> str:
+    lines = ["## صفحه‌ی شناسایی‌شده"]
+    shot = snapshot.get("publicShot")
+    if shot:
+        if public_base:
+            shot = "%s%s/public/shot/%s" % (public_base, API_PREFIX, shot)
+        lines += ["", "لینک عمومی اسکرین‌شات (بدون توکن قابل خواندن است):", "", shot]
+    lines += ["", "```json"]
     lines.append(json.dumps(snapshot, ensure_ascii=False, indent=2)[:20000])
     lines.append("```")
     return "\n".join(lines)

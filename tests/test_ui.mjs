@@ -23,10 +23,13 @@ const NOVNC_HTML = `<!doctype html><html><head><style>${CSS}</style></head><body
 const VALID_TOKEN = 'tok123';
 
 /** Stands in for the server: /info is open, everything else needs the token. */
-function fakeApi(requests) {
+function fakeApi(requests, posts = []) {
   return async (url, options = {}) => {
     const path = String(url);
     requests.push(path);
+    if ((options.method || 'GET').toUpperCase() === 'POST') {
+      posts.push({ url: path, body: options.body });
+    }
     const token = (options.headers || {})['X-Automation-Token'];
     const json = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
     if (path.endsWith('/info')) {
@@ -47,6 +50,7 @@ function fakeApi(requests) {
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
 async function mount({ readyStateComplete = true } = {}) {
   const requests = [];
+  const posts = [];
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', (e) => errors.push(String(e.message || e)));
@@ -69,7 +73,7 @@ async function mount({ readyStateComplete = true } = {}) {
     CustomEvent: window.CustomEvent, getComputedStyle: window.getComputedStyle.bind(window),
     requestAnimationFrame: window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window) : (fn) => setTimeout(fn, 0),
-    fetch: fakeApi(requests),
+    fetch: fakeApi(requests, posts),
     // Tracked so cleanup() can stop the sidebar's poll loops, otherwise the
     // test process never exits. Bound to the originals: referencing the global
     // here would recurse into this very wrapper.
@@ -98,7 +102,7 @@ async function mount({ readyStateComplete = true } = {}) {
   }
 
   return {
-    dom, window, errors, importError, requests,
+    dom, window, errors, importError, requests, posts,
     doc: window.document,
     wait: (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms)),
     display: (selector) => window.getComputedStyle(window.document.querySelector(selector)).display,
@@ -340,6 +344,45 @@ test('recording ASCII keystrokes still becomes a type step', async () => {
     const types = Array.from(page.doc.querySelectorAll('.mas-step .mas-type'))
       .map((n) => n.textContent);
     assert.deepEqual(types, ['type', 'key']);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the AI tab sends the user request and an absolute origin', async () => {
+  const page = await mount();
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+
+    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[3];
+    aiTab.dispatchEvent(new page.window.Event('click'));
+    await page.wait(10);
+
+    const box = page.doc.getElementById('mas-ai-request');
+    assert.ok(box, 'the request box is missing');
+    box.value = 'روی اولین نتیجه کلیک کن';
+    box.dispatchEvent(new page.window.Event('input'));
+
+    // Switching tabs and back must not lose what the human typed.
+    page.doc.querySelectorAll('.mas-tab')[0].dispatchEvent(new page.window.Event('click'));
+    aiTab.dispatchEvent(new page.window.Event('click'));
+    await page.wait(10);
+    assert.equal(page.doc.getElementById('mas-ai-request').value, 'روی اولین نتیجه کلیک کن');
+
+    const build = Array.from(page.doc.querySelectorAll('#mas-tab-ai button'))
+      .find((b) => b.textContent.includes('🧩'));
+    build.dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+
+    const sent = page.posts.find((p) => p.url.endsWith('/prompt'));
+    assert.ok(sent, '/prompt was never called');
+    const body = JSON.parse(sent.body);
+    assert.equal(body.request, 'روی اولین نتیجه کلیک کن');
+    assert.equal(body.publicBase, 'https://example.trycloudflare.com');
   } finally {
     await page.cleanup();
   }

@@ -116,6 +116,21 @@ class ValidateFlowTest(unittest.TestCase):
         _, errors = schema.validate_flow(flow(steps=[{"type": "wait", "ms": 1, "enabled": "yes"}]))
         self.assertTrue(any("'enabled' must be true or false" in e for e in errors))
 
+    def test_labels_accept_double_quotes_and_persian(self):
+        # Regression: labelFor() renders paste steps as: paste "سلام"
+        normalized, errors = schema.validate_flow(flow(steps=[
+            {"type": "paste", "text": "سلام", "label": 'paste "سلام"'},
+            {"type": "type", "text": "hi", "label": 'type "hi"'},
+        ]))
+        self.assertEqual(errors, [])
+        self.assertEqual(len(normalized["steps"]), 2)
+
+    def test_flow_names_accept_persian_and_spaces(self):
+        _, errors = schema.validate_flow(flow(name="جریان من"))
+        self.assertEqual(errors, [])
+        _, errors = schema.validate_flow(flow(name="bad/name"))
+        self.assertTrue(any("name" in e for e in errors))
+
     def test_labels_reject_control_characters(self):
         _, errors = schema.validate_flow(flow(steps=[{"type": "wait", "ms": 1, "label": "<script>x"}]))
         self.assertTrue(any("must be plain text" in e for e in errors))

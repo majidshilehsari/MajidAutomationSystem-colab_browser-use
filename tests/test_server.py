@@ -217,6 +217,55 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"Step types", body)
 
+    def test_a_flow_name_with_a_space_can_be_saved(self):
+        # Regression: the browser sends "Untitled flow" as "Untitled%20flow" and
+        # the router used to reject the escape, answering "no such endpoint".
+        flow = {"name": "Untitled flow", "steps": [{"type": "click", "x": 5, "y": 6}]}
+        status, body = http_request(self.url("/automation/api/flows/Untitled%20flow"),
+                                    method="PUT", body=flow)
+        self.assertEqual(status, 200, body)
+        status, body = http_request(self.url("/automation/api/flows"))
+        self.assertIn("Untitled flow", body.decode("utf-8"))
+
+        # A percent-encoded separator must still be refused, not decoded.
+        status, _ = http_request(self.url("/automation/api/flows/a%2F..%2F..%2Fx"),
+                                 method="PUT", body=flow)
+        self.assertEqual(status, 404)
+
+    def test_paste_step_with_a_quoted_label_runs(self):
+        # Regression: generated labels look like: paste "سلام" and the old
+        # plain-text rule rejected the double quote, so the run failed with 422.
+        flow = {"name": "farsi", "steps": [
+            {"type": "click", "x": 5, "y": 6},
+            {"type": "paste", "text": "سلام", "label": 'paste "سلام"'},
+        ]}
+        status, body = http_request(self.url("/automation/api/flows/paste-check"),
+                                    method="PUT", body=flow)
+        self.assertNotEqual(status, 422, body)
+        # The reported failure came from actually running the flow.
+        status, body = http_request(self.url("/automation/api/run"),
+                                    method="POST", body={"flow": flow})
+        self.assertNotEqual(status, 422, "the flow was rejected: %s" % body)
+
+    def test_prompt_carries_the_user_request_and_the_shot_link(self):
+        pages = os.path.join(self.data_dir, "pages")
+        os.makedirs(pages, exist_ok=True)
+        snapshot = {"id": "p1", "title": "گوگل", "url": "https://example.com/",
+                    "capturedAt": 1, "publicShot": "shot-1.png", "text": "سلام",
+                    "elements": [], "viewport": {"width": 1366, "height": 768}}
+        with open(os.path.join(pages, "p1.json"), "w", encoding="utf-8") as handle:
+            json.dump(snapshot, handle, ensure_ascii=False)
+
+        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
+                                    body={"pageId": "p1", "request": "روی اولین نتیجه کلیک کن",
+                                          "publicBase": "https://abc.trycloudflare.com",
+                                          "flow": {"name": "f", "steps": []}})
+        self.assertEqual(status, 200, body)
+        text = body.decode("utf-8")
+        self.assertIn("درخواست کاربر", text)
+        self.assertIn("روی اولین نتیجه کلیک کن", text)
+        self.assertIn("https://abc.trycloudflare.com/automation/api/public/shot/shot-1.png", text)
+
     def test_public_shot_is_reachable_without_a_token(self):
         pub = os.path.join(self.data_dir, "public")
         os.makedirs(pub, exist_ok=True)

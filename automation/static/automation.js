@@ -15,6 +15,7 @@ import {
 
 const LS = {
   token: 'mas.token', lang: 'mas.lang', flow: 'mas.flow', panel: 'mas.panelOpen',
+  request: 'mas.userRequest',
 };
 
 const state = {
@@ -34,6 +35,7 @@ const state = {
   logOffset: 0,
   lastRenderedIndex: -1,
   tokenRejected: false,
+  userRequest: localStorage.getItem(LS.request) || '',
 };
 
 function loadFlow() {
@@ -1021,6 +1023,16 @@ async function openPage(id) {
 function renderAi() {
   const pane = document.getElementById('mas-tab-ai');
   const importBox = el('textarea', { class: 'mas-input mas-area', rows: '8', placeholder: t('importHint') });
+  // What the human wants done on this page. Kept in state so switching tabs
+  // does not lose it, and sent to /prompt as part of the prompt.
+  const requestBox = el('textarea', {
+    id: 'mas-ai-request', class: 'mas-input mas-area', rows: '4',
+    value: state.userRequest, placeholder: t('aiRequestHint'),
+    onInput: (event) => {
+      state.userRequest = event.target.value;
+      try { localStorage.setItem(LS.request, state.userRequest); } catch (_) { /* quota */ }
+    },
+  });
 
   replace(pane,
     el('label', { class: 'mas-field mas-wide' }, [
@@ -1030,6 +1042,10 @@ function renderAi() {
         value: state.token, placeholder: t('tokenHint'),
         onInput: (event) => setToken(event.target.value),
       }),
+    ]),
+    el('label', { class: 'mas-field mas-wide' }, [
+      el('span', { text: t('aiRequest') }),
+      requestBox,
     ]),
     el('div', { class: 'mas-row mas-wrap' }, [
       button('📄 ' + t('copyGuide'), () => copyFrom('/guide')),
@@ -1067,8 +1083,14 @@ async function copyFrom(path) {
 }
 
 async function buildPrompt() {
-  const body = { flow: state.flow };
-  if (state.activePage) body.pageId = state.activePage.id;
+  // The copied prompt must be self-contained, so it carries the user's request,
+  // the detected page, and an absolute link to its screenshot. Fall back to the
+  // most recent detection when no page is selected.
+  const page = state.activePage || (state.pages || [])[0] || null;
+  const body = { flow: state.flow, publicBase: window.location.origin };
+  if (page) body.pageId = page.id;
+  if (state.userRequest && state.userRequest.trim()) body.request = state.userRequest;
+  if (!page) toast(t('aiRequestNone'), 'warn');
   try {
     const response = await fetch(API_PREFIX + '/prompt', {
       method: 'POST',

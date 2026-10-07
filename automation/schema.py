@@ -22,7 +22,10 @@ DEFAULT_VIEWPORT = {"width": 1366, "height": 768}
 BUTTONS = {"left": "1", "middle": "2", "right": "3", "1": "1", "2": "2", "3": "3", "4": "4", "5": "5"}
 
 _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
-_NAME_RE = re.compile(r"^[\w .,:'\-+/()]{0,120}$", re.UNICODE)
+# Plain text: reject control characters, path separators and angle brackets,
+# allow everything else. Double quotes must pass because generated labels look
+# like: paste "سلام" and Persian names/labels are ordinary user input.
+_NAME_RE = re.compile(r"^[^\x00-\x1f\x7f/\\<>]{0,120}$", re.UNICODE)
 
 # Every step type, its required keys and the optional keys it accepts.
 STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
