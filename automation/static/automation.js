@@ -333,7 +333,7 @@ function renderFlow() {
   ]);
 
   const ioRow = el('div', { class: 'mas-row mas-wrap' }, [
-    button(t('save'), saveFlow, { class: 'mas-btn mas-primary' }),
+    button(t('save'), () => saveFlow(), { class: 'mas-btn mas-primary' }),
     button(t('saveAs'), () => {
       const name = window.prompt(t('saveAs'), state.flow.name);
       if (name) saveFlow(name);
@@ -839,14 +839,21 @@ function keyName(key) {
   return key;
 }
 
+function isAscii(text) {
+  return /^[\x00-\x7F]*$/.test(text);
+}
+
 function appendToKeyBuffer(char) {
   const buffer = state.keyBuffer;
   if (buffer.timer) clearTimeout(buffer.timer);
   if (!buffer.step) {
-    buffer.step = createStep('type', { text: '' });
+    buffer.step = createStep(isAscii(char) ? 'type' : 'paste', { text: '' });
     state.flow.steps.push(buffer.step);
   }
   buffer.step.text += char;
+  // xdotool type cannot produce non-ASCII glyphs, so Persian and the like must
+  // go through the clipboard paste path or they arrive as keyboard garbage.
+  if (!isAscii(buffer.step.text)) buffer.step.type = 'paste';
   buffer.step.label = labelFor(buffer.step);
   buffer.timer = setTimeout(flushKeyBuffer, 1500);
   persistFlow();
@@ -855,6 +862,17 @@ function appendToKeyBuffer(char) {
 
 function flushKeyBuffer() {
   if (state.keyBuffer.timer) clearTimeout(state.keyBuffer.timer);
+  const step = state.keyBuffer.step;
+  // A buffer that never received a real character must not survive as a
+  // "text must not be empty" error waiting to happen.
+  if (step && !(step.text || '').trim()) {
+    const index = state.flow.steps.indexOf(step);
+    if (index >= 0) {
+      state.flow.steps.splice(index, 1);
+      persistFlow();
+      renderFlow();
+    }
+  }
   state.keyBuffer = { step: null, timer: null };
 }
 
@@ -898,6 +916,7 @@ async function renderPages() {
 
   const head = el('div', { class: 'mas-row' }, [
     button('🔍 ' + t('detect'), detectNow, { class: 'mas-btn mas-primary' }),
+    button('📋 ' + t('copyDetected'), copyDetected),
     el('span', { class: 'mas-hint', text: `${pages.length}` }),
   ]);
 
@@ -964,6 +983,25 @@ function renderPageDetail(container, page) {
       el('pre', { class: 'mas-pre', text: (page.text || '').slice(0, 4000) }),
     ]),
   );
+}
+
+/** One text block an AI can read: page info, the public screenshot link, the
+ * visible text, and the strongest elements. Copied to the clipboard. */
+async function copyDetected() {
+  const page = state.activePage;
+  if (!page) { toast(t('pagesEmpty'), 'info'); return; }
+  const lines = [];
+  lines.push(`${t('elementText')}: ${page.title || ''}`);
+  if (page.url) lines.push(`URL: ${page.url}`);
+  if (page.pageKey) lines.push(`pageKey: ${page.pageKey}`);
+  if (page.publicShot) {
+    lines.push(`${t('shotLink')}: ${location.origin}${API_PREFIX}/public/shot/${page.publicShot}`);
+  }
+  if (page.text) lines.push(`\n${t('text')}:\n${page.text.slice(0, 3000)}`);
+  const elements = (page.elements || []).slice(0, 40)
+    .map((e) => `- ${e.tag} "${(e.text || e.href || '').slice(0, 40)}" desktop:${e.desktop.x},${e.desktop.y}`);
+  if (elements.length) lines.push(`\n${t('elements')}:\n${elements.join('\n')}`);
+  await copyText(lines.join('\n'));
 }
 
 async function openPage(id) {

@@ -217,6 +217,38 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn(b"Step types", body)
 
+    def test_public_shot_is_reachable_without_a_token(self):
+        pub = os.path.join(self.data_dir, "public")
+        os.makedirs(pub, exist_ok=True)
+        with open(os.path.join(pub, "shot.png"), "wb") as handle:
+            handle.write(b"\x89PNG\r\n\x1a\n")
+
+        status, body = http_request(self.url("/automation/api/public/shot/shot.png"),
+                                    token="")  # no token on purpose
+        self.assertEqual(status, 200)
+        self.assertEqual(body, b"\x89PNG\r\n\x1a\n")
+
+    def test_public_shot_blocks_traversal_and_missing_files(self):
+        for bad in ("/automation/api/public/shot/..%2F..%2Fx.png",
+                    "/automation/api/public/shot/note.txt",
+                    "/automation/api/public/shot/absent.png"):
+            status, _ = http_request(self.url(bad), token="")
+            self.assertEqual(status, 404, bad)
+
+    def test_detect_stores_a_public_screenshot(self):
+        from automation.detect import Detector
+        det = Detector(ControlBackend("/nonexistent"), self.data_dir,
+                       {"width": 1366, "height": 768})
+        # share() copies into data/public and returns just the basename
+        src = os.path.join(self.data_dir, "shots", "s.png")
+        os.makedirs(os.path.dirname(src), exist_ok=True)
+        with open(src, "wb") as handle:
+            handle.write(b"png")
+        self.assertEqual(det.share(src), "s.png")
+        self.assertTrue(os.path.exists(os.path.join(self.data_dir, "public", "s.png")))
+        self.assertIsNone(det.share(None))
+        self.assertIsNone(det.share("/no/such/file.png"))
+
     def test_post_outside_the_api_prefix_is_refused(self):
         status, _ = http_request(self.url("/vnc.html"), method="POST", body={})
         self.assertEqual(status, 405)

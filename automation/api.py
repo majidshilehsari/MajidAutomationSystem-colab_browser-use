@@ -138,6 +138,7 @@ class AutomationApi:
             ("GET", "/runs/*/log", self.route_run_log),
             ("POST", "/screenshot", self.route_screenshot),
             ("GET", "/artifact", self.route_artifact),
+            ("GET", "/public/shot/*", self.route_public_shot),
             ("POST", "/detect", self.route_detect),
             ("GET", "/pages", self.route_pages),
             ("GET", "/pages/*", self.route_page_get),
@@ -147,7 +148,10 @@ class AutomationApi:
 
     # -- helpers --------------------------------------------------------
     def requires_auth(self, path: str) -> bool:
-        return bool(self.token) and path != "/info"
+        # /public/shot/* is deliberately open: it is the one thing an AI can
+        # fetch without the token, and the tunnel URL that reaches it is
+        # unguessable.
+        return bool(self.token) and path != "/info" and not path.startswith("/public/")
 
     def authorized(self, path: str, headers: Dict[str, str]) -> bool:
         if not self.requires_auth(path):
@@ -283,11 +287,27 @@ class AutomationApi:
         shot = self.detector.screenshot_now()
         if not shot:
             raise ApiError(500, "screenshot failed; is the desktop running?")
-        return json_response(200, {"path": shot, "url": self._artifact_url(shot)})
+        public_name = self.detector.share(shot)
+        return json_response(200, {
+            "path": shot,
+            "url": self._artifact_url(shot),
+            "publicUrl": "%s/public/shot/%s" % (API_PREFIX, public_name) if public_name else None,
+        })
 
     def _artifact_url(self, path: str) -> str:
         rel = os.path.relpath(path, self.data_dir)
         return "%s/artifact?path=%s" % (API_PREFIX, rel)
+
+    def route_public_shot(self, *, params: Dict[str, str], **_: Any) -> Response:
+        name = params["*"]
+        if not name.endswith(".png") or not _SAFE_SEGMENT.match(name):
+            raise ApiError(404, "no such screenshot")
+        path = os.path.join(self.data_dir, "public", name)
+        if not os.path.isfile(path):
+            raise ApiError(404, "no such screenshot")
+        with open(path, "rb") as handle:
+            data = handle.read()
+        return 200, {"Content-Type": "image/png", "Cache-Control": "no-store"}, data
 
     def route_artifact(self, *, query: Dict[str, List[str]], **_: Any) -> Response:
         rel = (query.get("path") or [""])[0]
@@ -399,38 +419,38 @@ def new_token() -> str:
 
 
 def _snapshot_section(snapshot: Dict[str, Any]) -> str:
-    lines = ["## Detected page", "", "```json"]
+    lines = ["## صفحه‌ی شناسایی‌شده", "", "```json"]
     lines.append(json.dumps(snapshot, ensure_ascii=False, indent=2)[:20000])
     lines.append("```")
     return "\n".join(lines)
 
 
 def _flow_section(flow: Dict[str, Any], errors: List[str]) -> str:
-    lines = ["## Current flow", "", "```json"]
+    lines = ["## جریان فعلی", "", "```json"]
     lines.append(json.dumps({"name": flow.get("name"), "settings": flow.get("settings"),
                              "steps": schema.flow_to_prompt_steps(flow)},
                             ensure_ascii=False, indent=2))
     lines.append("```")
     if errors:
         lines.append("")
-        lines.append("Validation problems in the current flow:")
+        lines.append("ایرادهای اعتبارسنجی جریان فعلی:")
         lines.extend("- %s" % e for e in errors)
     return "\n".join(lines)
 
 
 def _reply_instructions() -> str:
     return "\n".join([
-        "## How to answer",
+        "## چطور جواب بدهی",
         "",
-        "Reply with a single JSON object and nothing else, using this shape:",
+        "فقط یک شیء JSON و هیچ چیز دیگر برگردان، با این شکل:",
         "",
         "```json",
-        '{"name": "short name", "steps": [{"type": "click", "x": 0, "y": 0}]}',
+        '{"name": "نام کوتاه", "steps": [{"type": "click", "x": 0, "y": 0}]}',
         "```",
         "",
-        "Rules: coordinates are desktop pixels in the viewport above, never",
-        "percentages. Use `paste` for text. Put `\"requiresConfirmation\": true`",
-        "on any step that submits, buys, sends or deletes. Do not invent fields.",
+        "قانون‌ها: مختصات، پیکسلِ دسکتاپ در viewport بالا است، نه درصد. برای متن",
+        "از `paste` استفاده کن. روی هر گامی که ثبت/خرید/ارسال/حذف می‌کند",
+        '`"requiresConfirmation": true` بگذار. فیلد جدید اختراع نکن.',
     ])
 
 

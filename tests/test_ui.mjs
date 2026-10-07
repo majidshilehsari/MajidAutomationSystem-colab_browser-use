@@ -292,6 +292,59 @@ test('step list shows no numbering and options are styled dark', async () => {
   }
 });
 
+async function enableRecording(page) {
+  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+  const recordTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[1];
+  recordTab.dispatchEvent(new page.window.Event('click'));
+  const toggle = Array.from(page.doc.querySelectorAll('#mas-tab-record button'))[0];
+  toggle.dispatchEvent(new page.window.Event('click'));
+  await page.wait(10);
+  assert.equal(page.display('#mas-record-layer'), 'block', 'record layer did not open');
+}
+
+test('recording Persian keystrokes becomes a paste step, not type', async () => {
+  const page = await mount();
+  try {
+    await enableRecording(page);
+    const layer = page.doc.getElementById('mas-record-layer');
+    const key = (k) => layer.dispatchEvent(
+      new page.window.KeyboardEvent('keydown', { key: k, bubbles: true }));
+    key('س'); key('ل'); key('ا'); key('م');
+    key('Enter');  // non-printable: flushes the buffer into one step
+    await page.wait(10);
+
+    page.doc.querySelectorAll('.mas-tab')[0].dispatchEvent(new page.window.Event('click'));
+    const types = Array.from(page.doc.querySelectorAll('.mas-step .mas-type'))
+      .map((n) => n.textContent);
+    assert.deepEqual(types, ['paste', 'key'],
+      'Persian must use the clipboard path: ' + types.join(','));
+    const label = page.doc.querySelector('.mas-step .mas-step-label').textContent;
+    assert.ok(label.includes('سلام'), 'the recorded text was lost: ' + label);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('recording ASCII keystrokes still becomes a type step', async () => {
+  const page = await mount();
+  try {
+    await enableRecording(page);
+    const layer = page.doc.getElementById('mas-record-layer');
+    const key = (k) => layer.dispatchEvent(
+      new page.window.KeyboardEvent('keydown', { key: k, bubbles: true }));
+    key('h'); key('i');
+    key('Enter');
+    await page.wait(10);
+
+    page.doc.querySelectorAll('.mas-tab')[0].dispatchEvent(new page.window.Event('click'));
+    const types = Array.from(page.doc.querySelectorAll('.mas-step .mas-type'))
+      .map((n) => n.textContent);
+    assert.deepEqual(types, ['type', 'key']);
+  } finally {
+    await page.cleanup();
+  }
+});
+
 test('record layer stays hidden until recording starts', async () => {
   const page = await mount();
   try {

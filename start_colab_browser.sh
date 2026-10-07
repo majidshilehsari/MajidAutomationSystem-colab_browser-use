@@ -44,10 +44,24 @@ start_chrome() {
     --remote-debugging-port="$CDP_PORT" \
     --user-data-dir="$PROFILE_DIR" \
     --window-size=1366,768 \
-    --start-maximized \
     https://www.google.com/ \
     >"$LOG_DIR/chrome.log" 2>&1 &
   printf '%s\n' "$!" >"$STATE_DIR/chrome.pid"
+  fix_chrome_geometry &
+}
+
+# Chrome plus a window-manager title bar is taller than the 1366x768 display, so
+# the browser's own tab strip can end up above the visible top edge. Once the WM
+# has mapped the window, pin its frame to the top-left, leaving room at the
+# bottom for the fluxbox toolbar. Best effort; the desktop is disposable.
+fix_chrome_geometry() {
+  for _ in {1..40}; do
+    env DISPLAY="$DISPLAY_ID" wmctrl -lx 2>/dev/null | grep -qi 'chrome' && break
+    sleep 0.25
+  done
+  env DISPLAY="$DISPLAY_ID" wmctrl -r 'Google Chrome' \
+    -b remove,maximized_vert,maximized_horz 2>/dev/null || true
+  env DISPLAY="$DISPLAY_ID" wmctrl -r 'Google Chrome' -e 0,0,0,1366,744 2>/dev/null || true
 }
 
 stop_owned_process() {

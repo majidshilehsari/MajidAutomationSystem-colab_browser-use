@@ -317,6 +317,13 @@ Another VNC/noVNC stack is running. Stop it before starting this project.
 
 Run `./start_colab_browser.sh --wait` and keep that process alive.
 
+### The top of the browser is cut off
+
+`start_colab_browser.sh` pins the Chrome window to the top-left corner after the
+window manager maps it (`fix_chrome_geometry`), leaving room for the fluxbox
+toolbar. It is best effort: if your window manager still clips the tab strip,
+adjust the `-e 0,0,0,1366,744` line in that function.
+
 ### A click lands in the wrong place
 
 Capture a fresh screenshot and confirm the active window. noVNC scaling does

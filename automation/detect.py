@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import threading
 import time
 from typing import Any, Dict, List, Optional
@@ -118,9 +119,11 @@ class Detector:
         self.cdp = cdp_module
         self.pages_dir = os.path.join(data_dir, "pages")
         self.shots_dir = os.path.join(data_dir, "shots")
+        self.public_dir = os.path.join(data_dir, "public")
         self.index_path = os.path.join(self.pages_dir, "index.json")
         os.makedirs(self.pages_dir, exist_ok=True)
         os.makedirs(self.shots_dir, exist_ok=True)
+        os.makedirs(self.public_dir, exist_ok=True)
         self._lock = threading.Lock()
 
     # -- primitives -----------------------------------------------------
@@ -136,6 +139,24 @@ class Detector:
             return None
         path = out.strip() or os.path.join(self.shots_dir, name)
         return path if os.path.exists(path) else os.path.join(self.shots_dir, name)
+
+    def share(self, path: Optional[str]) -> Optional[str]:
+        """Copy a screenshot into the public share directory.
+
+        The tunnel URL is unguessable but public, so a file under data/public is
+        the one thing an AI can fetch without the automation token, which is the
+        whole point of the feature the human asked for.
+        """
+        if not path or not os.path.exists(path):
+            return None
+        name = os.path.basename(path)
+        dst = os.path.join(self.public_dir, name)
+        if not os.path.exists(dst):
+            try:
+                shutil.copy2(path, dst)
+            except OSError:
+                return None
+        return name
 
     def cdp_available(self) -> bool:
         try:
@@ -214,6 +235,8 @@ class Detector:
             if not snapshot["url"]:
                 snapshot["url"] = _url_from_title(snapshot["title"])
 
+        public_name = self.share(shot)
+        snapshot["publicShot"] = public_name
         snapshot["pageKey"] = page_key(snapshot.get("url"), snapshot.get("title"))
         snapshot["id"] = "%s-%d" % (slugify(snapshot["pageKey"], 30), int(captured_at))
         self._save(snapshot)
