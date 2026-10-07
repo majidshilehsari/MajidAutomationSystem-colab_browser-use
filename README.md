@@ -15,6 +15,11 @@ agent-browser sessions. It is not a production remote-desktop service.
   Quick Tunnel
 - Mouse, keyboard, clipboard, scrolling, window, and drag controls
 - A screenshot directory for visual agent feedback
+- An automation sidebar inside the noVNC page: record clicks and keystrokes,
+  build a step list, and run it on the server so it keeps going after you close
+  your own browser
+- Page detection with a memory of every page you detected, plus copy-paste
+  prompts for handing that state to an AI assistant
 - A supervisor that keeps the desktop services running and relaunches Chrome
   if it closes
 - A detailed [agent operating guide](agent.md)
@@ -29,8 +34,8 @@ Human browser
 Cloudflare Quick Tunnel
     |
     v
-noVNC / websockify (localhost:6080)
-    |
+automation/server.py (localhost:6080)
+    |  serves noVNC + the sidebar, answers /automation/api, proxies /websockify
     v
 x11vnc (localhost:5901)
     |
@@ -41,8 +46,13 @@ Xvfb display :1  --->  Fluxbox  --->  Google Chrome
 browser_control.sh
     ^
     |
-Agent screenshot -> inspect -> act -> verify loop
+    +-- Agent screenshot -> inspect -> act -> verify loop
+    +-- automation/engine.py runs saved flows here, in the Colab runtime
 ```
+
+Chrome is also started with `--remote-debugging-port=9222` on localhost, which
+is how the detector reads the page URL, title, visible text, and the interactive
+elements with their coordinates.
 
 VNC and noVNC listen only on localhost. The temporary Cloudflare tunnel is the
 external transport used by a human observer. An agent running in the same
@@ -84,12 +94,13 @@ Keep that command running. It prints values similar to:
 ```text
 BROWSER_URL=https://example.trycloudflare.com/vnc.html?autoconnect=true&resize=scale&path=websockify
 VNC_PASSWORD=temporary-password
+AUTOMATION_TOKEN=temporary-token
 STATE_DIR=/content/colab_browser-computer-use/.runtime
 ```
 
 Open `BROWSER_URL` on another computer and enter `VNC_PASSWORD` when prompted.
-Both values are temporary. A new tunnel URL and password are generated on each
-start.
+All three values are temporary. A new tunnel URL, VNC password, and automation
+token are generated on each start. Share none of them.
 
 ## Agent control
 
@@ -139,6 +150,87 @@ Common commands:
 See [agent.md](agent.md) for command behavior, safety rules, coordinate
 guidance, troubleshooting, and a complete agent workflow.
 
+## Automation sidebar
+
+The noVNC page carries a collapsible panel on the right edge, mirroring the
+noVNC control bar on the left. Open it with the arrow on the right, then paste
+`AUTOMATION_TOKEN` into the AI tab once; the panel remembers it in your browser.
+
+The panel has five tabs:
+
+| tab | what it does |
+| --- | --- |
+| Flow | the step list: add, edit, reorder, enable, duplicate, delete, save, load |
+| Record | capture real clicks and keystrokes into steps |
+| Pages | detect the current page and browse the pages you already detected |
+| AI | copy the guide, copy a full prompt, paste back what the AI returned |
+| Log | the live log of the running flow |
+
+### Step types
+
+`click`, `double_click`, `drag`, `move`, `scroll`, `type`, `paste`, `key`,
+`wait`, `wait_for_text`, `goto_url`, `focus_window`, `screenshot`. Every step
+also accepts `label`, `note`, `enabled`, `delayAfterMs`, `requiresConfirmation`,
+and `continueOnError`.
+
+Coordinates are desktop pixels of the fixed 1366x768 display, so a recorded
+click stays valid no matter how your noVNC window is scaled.
+
+### Running without your browser
+
+Steps execute on the Colab runtime through `browser_control.sh`, not in your
+tab. Once a flow is running you can close the noVNC page, or your whole browser,
+and it continues to the end as long as the Colab cell that started the stack
+stays alive.
+
+A step marked `requiresConfirmation` pauses the run and waits for a human. If
+nobody is watching, it waits until the run is stopped. Use it before anything
+that submits, sends, buys, or deletes.
+
+### Detecting a page for an AI
+
+`Pages > Detect page` stores a screenshot, the window list, the page URL and
+title, the visible text, and up to 250 interactive elements with a CSS selector
+and desktop coordinates. Every detection is remembered under the page's host and
+path, so you can come back to it later.
+
+The AI tab turns that into two things you paste into a chat:
+
+1. **Copy general guide** — a standalone document explaining the environment,
+   the coordinate system, every step type, and the rules the AI must follow.
+   Send this first. It is also `automation/ai_guide.md`.
+2. **Copy full prompt** — the guide plus the detected page plus your current
+   flow, with instructions to answer in JSON.
+
+Paste the AI's answer into **Import AI output**. The JSON is validated against
+the same schema the runner uses, unknown step types are dropped with a warning,
+and the result becomes a normal flow you can edit before running.
+
+### API
+
+The panel is a thin client over a JSON API on the same port as noVNC:
+
+```text
+GET    /automation/api/info            capabilities and viewport
+GET    /automation/api/status          current run, index, log tail
+POST   /automation/api/run             validate a flow, then start it
+POST   /automation/api/control         pause, resume, stop, confirm
+GET    /automation/api/flows           list saved flows
+GET    /automation/api/flows/NAME      read one flow
+PUT    /automation/api/flows/NAME      save one flow
+DELETE /automation/api/flows/NAME      delete one flow
+GET    /automation/api/runs/ID/log     replay the log of a finished run
+POST   /automation/api/screenshot      capture the desktop now
+GET    /automation/api/artifact?path=  read a PNG from the runtime directory
+POST   /automation/api/detect          detect the current page
+GET    /automation/api/pages           detected page memory
+GET    /automation/api/pages/ID        one detection in full
+GET    /automation/api/guide           the AI guide as markdown
+POST   /automation/api/prompt          assemble the full AI prompt
+```
+
+Every route except `info` needs the `X-Automation-Token` header.
+
 ## Stopping the environment
 
 Press `Ctrl+C` in the terminal running the supervisor, or run:
@@ -160,9 +252,23 @@ colab_browser-computer-use/
 ├── start_colab_browser.sh    # Desktop, browser, VNC, and tunnel launcher
 ├── stop_colab_browser.sh     # Safe workflow shutdown
 ├── browser_control.sh        # Screenshot and input controls
+├── run_tests.sh              # Runs every check in this repository
+├── automation/
+│   ├── server.py             # noVNC + sidebar + API + VNC proxy on one port
+│   ├── engine.py             # Runs flows on the server through browser_control.sh
+│   ├── api.py                # JSON routes, independent of the transport
+│   ├── detect.py             # Page detection and the detected page memory
+│   ├── cdp.py                # Minimal Chrome DevTools Protocol client
+│   ├── schema.py             # Flow validation, shared by UI, API, and AI
+│   ├── ai_guide.md           # The guide you paste into an AI first
+│   └── static/               # Sidebar: automation.js, core.mjs, automation.css
+├── tests/                    # Python unittest and node --test suites
 ├── screen_shots/             # Generated screenshots, ignored by Git
-└── .runtime/                 # Generated profile, logs, PIDs, and VNC data
+└── .runtime/                 # Profile, logs, PIDs, VNC data, flows, runs, pages
 ```
+
+`.runtime/automation/` holds the flows you saved, one directory per finished run
+with its log and screenshots, and the detected page memory.
 
 `.runtime/` is created only after startup and is ignored by Git.
 
@@ -174,6 +280,9 @@ colab_browser-computer-use/
 - Do not use the environment for sensitive personal, financial, medical, or
   production accounts.
 - Treat the noVNC URL as public and share neither it nor the VNC password.
+- Treat `AUTOMATION_TOKEN` the same way. It is what authorizes the automation
+  API, and that API can drive the browser. The token is never embedded in the
+  served page: you paste it into the panel yourself.
 - Never commit `.runtime/`, screenshots containing private data, browser
   profiles, cookies, or credentials.
 - Let a human enter passwords and complete CAPTCHAs. An agent should not ask
@@ -226,6 +335,22 @@ Runtime logs are written to:
 Issues and pull requests are welcome. Useful contributions include improved
 browser lifecycle handling, additional input primitives, tests, alternative
 tunnel providers, and support for more Linux architectures.
+
+## Tests
+
+```bash
+./run_tests.sh
+```
+
+This runs the Python unit and integration tests, the JavaScript unit tests for
+the sidebar logic, and syntax checks for the shell scripts, the Python package,
+and the sidebar script.
+
+The Python integration tests start the real server against a stand-in RFB server
+and drive it with a real HTTP client and a real WebSocket client, so the VNC
+proxy path is covered too. They need the websockify Python module and the Node
+`ws` package (`npm install`); when either is missing those tests report as
+skipped instead of failing.
 
 Before publishing the repository, choose and add an open-source license that
 matches how you want others to use and contribute to the project.

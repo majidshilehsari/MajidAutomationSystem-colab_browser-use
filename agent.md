@@ -14,6 +14,10 @@ keyboard input.
   temporary Cloudflare tunnel.
 - `stop_colab_browser.sh` stops only processes recorded by this workflow.
 - `browser_control.sh` captures screenshots and controls the browser desktop.
+- `automation/` holds the automation sidebar: its server, the flow runner, the
+  JSON API, page detection, and the browser assets.
+- `automation/ai_guide.md` is the document a human pastes into an AI before
+  asking it to write a flow.
 - `screen_shots/` receives every screenshot made by `browser_control.sh` when
   commands are run from this folder.
 - `.runtime/` is created at runtime for logs, PID files, the VNC credential,
@@ -45,7 +49,12 @@ Keep that terminal or notebook cell running. The command prints:
 
 - `BROWSER_URL`: a temporary public noVNC URL for the human observer.
 - `VNC_PASSWORD`: the password the human enters in noVNC.
+- `AUTOMATION_TOKEN`: the token the human pastes into the automation sidebar.
 - `STATE_DIR`: the private runtime directory used by the scripts.
+
+`AUTOMATION_TOKEN=unavailable (plain noVNC mode)` means the automation server
+could not start and the stack fell back to plain websockify. The browser still
+works; the sidebar does not. Read `.runtime/logs/automation.log` to see why.
 
 The agent controls the desktop locally through `DISPLAY=:1`; it does **not**
 need the noVNC URL or VNC password. The public link exists only so a human can
@@ -120,6 +129,51 @@ Notes:
 - Set `BROWSER_SCREENSHOT_DIR` to override the screenshot directory, or
   `COLAB_BROWSER_STATE_DIR` to override the private runtime directory.
 
+## The automation sidebar
+
+The human does not have to drive the browser by hand. The noVNC page carries a
+panel on the right edge that records clicks and keystrokes into a step list and
+runs it. Steps are executed by `automation/engine.py` in the Colab runtime
+through `browser_control.sh`, so a flow keeps running after the human closes
+their browser.
+
+An agent should treat a running flow as the owner of the mouse and keyboard:
+
+```bash
+curl -s -H "X-Automation-Token: $AUTOMATION_TOKEN" \
+  http://127.0.0.1:6080/automation/api/status
+```
+
+`status` is `idle`, `running`, `paused`, `waiting`, `done`, `error`, or
+`stopped`. While it is anything but `idle`, `done`, `error`, or `stopped`, do not
+send your own mouse or keyboard commands: there is one pointer and one focus.
+
+A flow is a JSON document validated by `automation/schema.py`. The same schema
+is enforced in the browser, in the API, and for anything an AI produces, so an
+invalid flow is refused with HTTP 422 and a list of problems instead of running
+halfway.
+
+Useful routes, all needing the `X-Automation-Token` header except `info`:
+
+```text
+GET  /automation/api/info      viewport, whether CDP is reachable, engine state
+GET  /automation/api/status    the current run, its step index, and its log tail
+POST /automation/api/run       {"flow": {...}} validate then start
+POST /automation/api/control   {"action": "pause" | "resume" | "stop" | "confirm"}
+POST /automation/api/detect    screenshot, windows, page text, DOM elements
+GET  /automation/api/pages     every page detected so far
+GET  /automation/api/guide     the AI guide as markdown
+```
+
+A step with `"requiresConfirmation": true` stops the run in the `waiting` state
+until a human approves it. An agent must never approve it by calling
+`confirm` itself: that confirmation exists precisely so a person decides.
+
+`automation/cdp.py` reads the page through Chrome's debugging port (9222, bound
+to localhost). When that port is unreachable, detection degrades to a screenshot
+plus the window list plus the clipboard text, and `cdp` is `false` in the
+snapshot.
+
 ## Stop the browser
 
 Press `Ctrl+C` in the supervising terminal, or run this in another terminal:
@@ -139,7 +193,13 @@ cd /content/colab_browser-computer-use
   deletions, permission changes, or other consequential actions.
 - Do not solve or bypass CAPTCHAs. Ask the human to take over when one appears.
 - Avoid simultaneous human and agent mouse/keyboard use because both share one
-  pointer and focused window.
+  pointer and focused window. The same applies to a flow started from the
+  automation sidebar: check `/automation/api/status` before driving the desktop
+  yourself.
+- Never call the `confirm` action on a paused flow. That pause is a human
+  decision point.
+- Keep `AUTOMATION_TOKEN` private. It authorizes an API that can drive the
+  browser without the VNC password.
 - Keep VNC and noVNC bound to localhost. Public access should go through the
   generated HTTPS tunnel and its VNC password.
 

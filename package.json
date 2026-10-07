@@ -1,0 +1,13 @@
+{
+  "name": "colab-browser-use-tests",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Test-only Node dependencies for the Colab browser automation sidebar. The runtime itself needs no Node.",
+  "scripts": {
+    "test": "node --test tests/test_core.mjs",
+    "test:python": "python3 -m unittest discover -s tests -p 'test_*.py' -v"
+  },
+  "devDependencies": {
+    "ws": "^8.22.0"
+  }
+}

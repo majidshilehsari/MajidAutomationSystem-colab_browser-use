@@ -1,0 +1,22 @@
+# Runtime state created by start_colab_browser.sh: logs, pids, the VNC
+# credential, the Chrome profile, the copied noVNC web root and everything the
+# automation server writes (flows, runs, detected pages, screenshots).
+.runtime/
+
+# Screenshots taken by browser_control.sh, which may contain private data.
+screen_shots/
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# Node (only used by the JavaScript tests)
+node_modules/
+
+# Editors and OS noise
+.DS_Store
+.idea/
+.vscode/
+*.swp

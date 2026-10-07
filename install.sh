@@ -36,6 +36,19 @@ if ! command -v google-chrome >/dev/null 2>&1; then
   rm -f "$chrome_deb"
 fi
 
+# The automation sidebar server serves noVNC, its JSON API and the VNC
+# WebSocket from one port, which needs websockify as a Python module and not
+# only as a command.
+if ! python3 -c 'import websockify.websocketproxy' >/dev/null 2>&1; then
+  printf 'websockify Python module missing; installing it with pip.\n'
+  apt-get install -y -qq --no-install-recommends python3-pip || true
+  python3 -m pip install --quiet websockify \
+    || python3 -m pip install --quiet --break-system-packages websockify \
+    || printf 'Warning: websockify module still missing; the sidebar will be off.\n' >&2
+fi
+printf 'websockify module: '
+python3 -c 'import websockify; print("ok")' 2>/dev/null || printf 'MISSING\n'
+
 if ! command -v cloudflared >/dev/null 2>&1; then
   curl -fsSL -o /usr/local/bin/cloudflared \
     https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64

@@ -8,10 +8,17 @@ PROFILE_DIR="$STATE_DIR/chrome-profile"
 DISPLAY_ID=:1
 VNC_PORT=5901
 NOVNC_PORT=6080
+CDP_PORT=9222
+WEB_ROOT="$STATE_DIR/www"
+AUTOMATION_DIR="$SCRIPT_DIR/automation"
+
+# The sidebar API is served from the same port as noVNC, because the Cloudflare
+# tunnel exposes only one URL. When it runs, this name is also the pid file.
+WEB_MODE=automation
 
 required_commands=(
   Xvfb cloudflared curl dbus-launch fluxbox google-chrome openssl
-  pgrep ss websockify x11vnc
+  pgrep python3 ss websockify x11vnc
 )
 missing_commands=()
 for required_command in "${required_commands[@]}"; do
@@ -23,7 +30,7 @@ if (( ${#missing_commands[@]} > 0 )); then
   exit 1
 fi
 
-mkdir -p "$LOG_DIR" "$PROFILE_DIR"
+mkdir -p "$LOG_DIR" "$PROFILE_DIR" "$WEB_ROOT"
 chmod 700 "$STATE_DIR" "$LOG_DIR" "$PROFILE_DIR"
 
 start_chrome() {
@@ -34,6 +41,7 @@ start_chrome() {
     --enable-unsafe-swiftshader \
     --no-first-run \
     --no-default-browser-check \
+    --remote-debugging-port="$CDP_PORT" \
     --user-data-dir="$PROFILE_DIR" \
     --window-size=1366,768 \
     --start-maximized \
@@ -66,6 +74,7 @@ stop_owned_process() {
 
 # Repeated runs replace only processes previously recorded by this workflow.
 stop_owned_process cloudflared cloudflared
+stop_owned_process automation "automation/server.py"
 stop_owned_process websockify websockify
 stop_owned_process x11vnc x11vnc
 stop_owned_process chrome google-chrome
@@ -107,18 +116,51 @@ printf '%s\n' "$!" >"$STATE_DIR/x11vnc.pid"
 
 start_chrome
 
-nohup websockify --web=/usr/share/novnc \
-  "127.0.0.1:$NOVNC_PORT" "127.0.0.1:$VNC_PORT" \
-  >"$LOG_DIR/websockify.log" 2>&1 &
-printf '%s\n' "$!" >"$STATE_DIR/websockify.pid"
+start_automation_server() {
+  nohup python3 "$AUTOMATION_DIR/server.py" \
+    --listen-host 127.0.0.1 --listen-port "$NOVNC_PORT" \
+    --vnc-host 127.0.0.1 --vnc-port "$VNC_PORT" \
+    --web-root "$WEB_ROOT" --novnc-dir /usr/share/novnc \
+    --data-dir "$STATE_DIR/automation" \
+    --control-script "$SCRIPT_DIR/browser_control.sh" \
+    --display "$DISPLAY_ID" --cdp-port "$CDP_PORT" \
+    --token "$AUTOMATION_TOKEN" \
+    >"$LOG_DIR/automation.log" 2>&1 &
+  printf '%s\n' "$!" >"$STATE_DIR/automation.pid"
+}
 
-for _ in {1..30}; do
-  curl -fsS "http://127.0.0.1:$NOVNC_PORT/vnc.html" >/dev/null 2>&1 && break
-  sleep 0.2
-done
-if ! curl -fsS "http://127.0.0.1:$NOVNC_PORT/vnc.html" >/dev/null; then
-  printf 'noVNC did not start. See %s.\n' "$LOG_DIR/websockify.log" >&2
-  exit 1
+start_plain_websockify() {
+  nohup websockify --web="$WEB_ROOT" \
+    "127.0.0.1:$NOVNC_PORT" "127.0.0.1:$VNC_PORT" \
+    >"$LOG_DIR/websockify.log" 2>&1 &
+  printf '%s\n' "$!" >"$STATE_DIR/websockify.pid"
+}
+
+wait_for_vnc_html() {
+  local attempts=${1:-60}
+  for _ in $(seq 1 "$attempts"); do
+    curl -fsS "http://127.0.0.1:$NOVNC_PORT/vnc.html" >/dev/null 2>&1 && return 0
+    sleep 0.25
+  done
+  return 1
+}
+
+# The automation server serves noVNC, the sidebar and the API on one port. If it
+# cannot start, fall back to plain websockify so the browser still works and
+# only the sidebar is missing.
+AUTOMATION_TOKEN=$(openssl rand -hex 8)
+start_automation_server
+if ! wait_for_vnc_html 40; then
+  printf 'Automation server did not answer; falling back to plain noVNC.\n' >&2
+  printf 'See %s. The automation sidebar will be unavailable.\n' \
+    "$LOG_DIR/automation.log" >&2
+  stop_owned_process automation "automation/server.py"
+  WEB_MODE=websockify
+  start_plain_websockify
+  if ! wait_for_vnc_html 40; then
+    printf 'noVNC did not start. See %s.\n' "$LOG_DIR/websockify.log" >&2
+    exit 1
+  fi
 fi
 
 nohup cloudflared tunnel --url "http://127.0.0.1:$NOVNC_PORT" \
@@ -141,6 +183,11 @@ fi
 
 printf 'BROWSER_URL=%s/vnc.html?autoconnect=true&resize=scale&path=websockify\n' "$PUBLIC_URL"
 printf 'VNC_PASSWORD=%s\n' "$VNC_PASSWORD"
+if [[ "$WEB_MODE" == automation ]]; then
+  printf 'AUTOMATION_TOKEN=%s\n' "$AUTOMATION_TOKEN"
+else
+  printf 'AUTOMATION_TOKEN=unavailable (plain noVNC mode)\n'
+fi
 printf 'STATE_DIR=%s\n' "$STATE_DIR"
 
 if [[ "${1:-}" == "--wait" ]]; then
@@ -150,7 +197,7 @@ if [[ "${1:-}" == "--wait" ]]; then
   trap cleanup EXIT INT TERM
   printf 'Supervisor is running; keep this terminal session open.\n'
   while true; do
-    for service in xvfb fluxbox x11vnc websockify cloudflared; do
+    for service in xvfb fluxbox x11vnc "$WEB_MODE" cloudflared; do
       service_pid=$(<"$STATE_DIR/$service.pid")
       if ! kill -0 "$service_pid" 2>/dev/null; then
         printf '%s stopped unexpectedly; shutting down the stack.\n' "$service" >&2

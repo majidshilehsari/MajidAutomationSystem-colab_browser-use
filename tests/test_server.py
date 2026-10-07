@@ -1,0 +1,292 @@
+"""End-to-end test for automation/server.py.
+
+Starts the real server (websockify's handler plus our API and threaded accept
+loop) against a stand-in RFB server, then drives it with a real HTTP client and
+a real WebSocket client (node + ws). Skipped when websockify is not installed.
+"""
+
+import json
+import os
+import shutil
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import unittest
+import urllib.error
+import urllib.request
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+sys.path.insert(0, REPO_ROOT)
+
+from automation import server as srv  # noqa: E402
+from automation.api import AutomationApi, FlowStore  # noqa: E402
+from automation.detect import Detector  # noqa: E402
+from automation.engine import AutomationEngine, ControlBackend  # noqa: E402
+
+try:
+    srv.load_websockify()
+    HAVE_WEBSOCKIFY = True
+    IMPORT_ERROR = ""
+except Exception as exc:  # pragma: no cover - environment dependent
+    HAVE_WEBSOCKIFY = False
+    IMPORT_ERROR = str(exc)
+
+WS_PROBE = os.path.join(REPO_ROOT, "tests", "ws_client_probe.mjs")
+TOKEN = "test-token-1234"
+
+
+def http_request(url, method="GET", body=None, token=TOKEN, timeout=5.0):
+    data = json.dumps(body).encode("utf-8") if body is not None else None
+    request = urllib.request.Request(url, data=data, method=method)
+    request.add_header("X-Automation-Token", token)
+    if data:
+        request.add_header("Content-Type", "application/json")
+    try:
+        with urllib.request.urlopen(request, timeout=timeout) as response:
+            return response.status, response.read()
+    except urllib.error.HTTPError as exc:
+        return exc.code, exc.read()
+
+
+class FakeVncServer(threading.Thread):
+    """Stands in for x11vnc: sends a banner, then echoes."""
+
+    def __init__(self):
+        super().__init__(daemon=True)
+        self.listener = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.listener.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        self.listener.bind(("127.0.0.1", 0))
+        self.listener.listen(5)
+        self.port = self.listener.getsockname()[1]
+        self.stop = threading.Event()
+        self.received = []
+
+    def run(self):
+        self.listener.settimeout(0.2)
+        while not self.stop.is_set():
+            try:
+                conn, _ = self.listener.accept()
+            except socket.timeout:
+                continue
+            except OSError:
+                break
+            threading.Thread(target=self._serve, args=(conn,), daemon=True).start()
+        self.listener.close()
+
+    def _serve(self, conn):
+        try:
+            conn.sendall(b"RFB 003.008\n")
+            while not self.stop.is_set():
+                data = conn.recv(1024)
+                if not data:
+                    break
+                self.received.append(data)
+                conn.sendall(data)
+        except OSError:
+            pass
+        finally:
+            conn.close()
+
+
+@unittest.skipUnless(HAVE_WEBSOCKIFY, "websockify is not importable: %s" % IMPORT_ERROR)
+class ServerIntegrationTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.tmp = tempfile.mkdtemp(prefix="automation-server-")
+        cls.data_dir = os.path.join(cls.tmp, "data")
+        cls.web_root = os.path.join(cls.tmp, "www")
+        os.makedirs(cls.web_root, exist_ok=True)
+        os.makedirs(cls.data_dir, exist_ok=True)
+
+        # A minimal stand-in for the noVNC tree.
+        with open(os.path.join(cls.web_root, "vnc.html"), "w", encoding="utf-8") as handle:
+            handle.write("<html><body><div id='screen'>noVNC</div></body></html>\n")
+        with open(os.path.join(cls.web_root, "app.js"), "w", encoding="utf-8") as handle:
+            handle.write("// novnc\n")
+
+        cls.vnc = FakeVncServer()
+        cls.vnc.start()
+
+        proxy_class, base_handler = srv.load_websockify()
+        backend = ControlBackend(script_path="/nonexistent/browser_control.sh")
+        cls.engine = AutomationEngine(backend, cls.data_dir)
+        detector = Detector(backend, cls.data_dir, {"width": 1366, "height": 768})
+        cls.api = AutomationApi(cls.engine, FlowStore(cls.data_dir), detector,
+                                data_dir=cls.data_dir, token=TOKEN,
+                                control_script="/nonexistent/browser_control.sh")
+        cls.proxy = proxy_class(
+            RequestHandlerClass=srv.make_handler_class(cls.api, base_handler),
+            listen_host="127.0.0.1", listen_port=0,
+            target_host="127.0.0.1", target_port=cls.vnc.port,
+            web=cls.web_root, file_only=True, timeout=0, idle_timeout=0)
+
+        cls.front = srv.ThreadedFrontServer(cls.proxy, "127.0.0.1", 0)
+        cls.front_thread = threading.Thread(target=cls.front.serve_forever, daemon=True)
+        cls.front_thread.start()
+
+        cls.cwd = os.getcwd()
+        os.chdir(cls.web_root)  # websockify resolves the document root from cwd
+
+        deadline = time.time() + 5
+        while time.time() < deadline:
+            if cls.front.port:
+                try:
+                    with socket.create_connection(("127.0.0.1", cls.front.port), 0.2):
+                        break
+                except OSError:
+                    pass
+            time.sleep(0.05)
+        cls.base = "http://127.0.0.1:%d" % cls.front.port
+
+    @classmethod
+    def tearDownClass(cls):
+        os.chdir(cls.cwd)
+        cls.front.stop()
+        cls.vnc.stop.set()
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def url(self, path):
+        return self.base + path
+
+    # -- API ------------------------------------------------------------
+    def test_info_is_reachable_and_reports_the_viewport(self):
+        status, body = http_request(self.url("/automation/api/info"))
+        self.assertEqual(status, 200)
+        payload = json.loads(body)
+        self.assertEqual(payload["viewport"], {"width": 1366, "height": 768})
+        self.assertTrue(payload["authRequired"])
+
+    def test_api_requires_the_token(self):
+        status, body = http_request(self.url("/automation/api/status"), token="wrong")
+        self.assertEqual(status, 401)
+        self.assertIn("X-Automation-Token", body.decode())
+
+    def test_status_endpoint_answers(self):
+        status, body = http_request(self.url("/automation/api/status"))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["status"], "idle")
+
+    def test_unknown_endpoint_is_404(self):
+        status, _ = http_request(self.url("/automation/api/nope"))
+        self.assertEqual(status, 404)
+
+    def test_flow_round_trip(self):
+        flow = {"schema": 1, "name": "saved", "steps": [{"type": "wait", "ms": 5}]}
+        status, body = http_request(self.url("/automation/api/flows/saved"),
+                                    method="PUT", body={"flow": flow})
+        self.assertEqual(status, 200, body)
+        self.assertTrue(json.loads(body)["ok"])
+
+        status, body = http_request(self.url("/automation/api/flows"))
+        names = [item["name"] for item in json.loads(body)["flows"]]
+        self.assertIn("saved", names)
+
+        status, body = http_request(self.url("/automation/api/flows/saved"))
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(body)["flow"]["steps"][0]["type"], "wait")
+
+        status, _ = http_request(self.url("/automation/api/flows/saved"), method="DELETE")
+        self.assertEqual(status, 200)
+        status, _ = http_request(self.url("/automation/api/flows/saved"))
+        self.assertEqual(status, 404)
+
+    def test_invalid_flow_is_rejected_with_422(self):
+        status, body = http_request(self.url("/automation/api/flows/bad"), method="PUT",
+                                    body={"flow": {"steps": [{"type": "nope"}]}})
+        self.assertEqual(status, 422)
+        self.assertTrue(json.loads(body)["errors"])
+
+    def test_run_endpoint_rejects_a_broken_flow_before_touching_the_engine(self):
+        status, body = http_request(self.url("/automation/api/run"), method="POST",
+                                    body={"flow": {"steps": [{"type": "nope"}]}})
+        self.assertEqual(status, 422)
+        self.assertTrue(json.loads(body)["errors"])
+        self.assertFalse(self.engine.busy())
+
+    def test_artifact_refuses_to_escape_the_data_dir(self):
+        status, _ = http_request(self.url("/automation/api/artifact?path=../../../../etc/passwd"))
+        self.assertEqual(status, 404)
+        status, _ = http_request(self.url("/automation/api/artifact?path="))
+        self.assertEqual(status, 404)
+
+    def test_guide_is_served(self):
+        status, body = http_request(self.url("/automation/api/guide"))
+        self.assertEqual(status, 200)
+        self.assertIn(b"Step types", body)
+
+    def test_post_outside_the_api_prefix_is_refused(self):
+        status, _ = http_request(self.url("/vnc.html"), method="POST", body={})
+        self.assertEqual(status, 405)
+
+    # -- static ---------------------------------------------------------
+    def test_static_files_are_served(self):
+        status, body = http_request(self.url("/vnc.html"))
+        self.assertEqual(status, 200)
+        self.assertIn(b"noVNC", body)
+
+    def test_directory_listing_is_disabled(self):
+        status, _ = http_request(self.url("/"))
+        self.assertEqual(status, 404)
+
+    def test_path_traversal_is_blocked(self):
+        status, _ = http_request(self.url("/../../etc/passwd"))
+        self.assertIn(status, (400, 404))
+
+    # -- WebSocket proxy ------------------------------------------------
+    @unittest.skipUnless(os.path.exists(WS_PROBE), "ws probe missing")
+    def test_websocket_path_still_reaches_the_vnc_server(self):
+        result = subprocess.run(
+            ["node", WS_PROBE, "ws://127.0.0.1:%d/websockify" % self.front.port],
+            cwd=REPO_ROOT, capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn("OPEN", result.stdout)
+        self.assertIn("MSG:RFB 003.008", result.stdout)
+        self.assertIn("MSG:PING", result.stdout)
+        self.assertIn("DONE", result.stdout)
+        self.assertIn(b"PING", b"".join(self.vnc.received))
+
+
+class WebRootTest(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="automation-webroot-")
+        self.novnc = os.path.join(self.tmp, "novnc")
+        self.static = os.path.join(self.tmp, "static")
+        self.web = os.path.join(self.tmp, "www")
+        os.makedirs(self.novnc)
+        os.makedirs(self.static)
+        with open(os.path.join(self.novnc, "vnc.html"), "w", encoding="utf-8") as handle:
+            handle.write("<html><body>noVNC</body></html>")
+        with open(os.path.join(self.static, "automation.js"), "w", encoding="utf-8") as handle:
+            handle.write("// sidebar\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_copies_novnc_static_and_patches_vnc_html_once(self):
+        report = srv.prepare_web_root(self.web, self.novnc, self.static)
+        self.assertTrue(report["novncCopied"])
+        self.assertIn("automation.js", report["staticCopied"])
+        self.assertTrue(report["patched"])
+        with open(os.path.join(self.web, "vnc.html"), encoding="utf-8") as handle:
+            html = handle.read()
+        self.assertIn("automation/automation.js", html)
+        self.assertIn("</body>", html)
+        self.assertTrue(html.index("automation/automation.js") < html.index("</body>"))
+
+        again = srv.prepare_web_root(self.web, self.novnc, self.static)
+        self.assertFalse(again["novncCopied"], "a second run must not recopy noVNC")
+        self.assertFalse(again["patched"], "the marker must not be injected twice")
+        with open(os.path.join(self.web, "vnc.html"), encoding="utf-8") as handle:
+            self.assertEqual(handle.read().count(srv.MARKER), 1)
+
+    def test_missing_novnc_is_reported_clearly(self):
+        with self.assertRaises(FileNotFoundError):
+            srv.prepare_web_root(os.path.join(self.tmp, "www2"),
+                                 os.path.join(self.tmp, "nope"), self.static)
+
+
+if __name__ == "__main__":
+    unittest.main(verbosity=2)

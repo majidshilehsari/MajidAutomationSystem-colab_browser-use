@@ -23,6 +23,7 @@ stop_owned_process() {
 }
 
 stop_owned_process cloudflared cloudflared
+stop_owned_process automation "automation/server.py"
 stop_owned_process websockify websockify
 stop_owned_process x11vnc x11vnc
 stop_owned_process chrome google-chrome
