@@ -118,7 +118,10 @@ case "$command" in
     ;;
   paste)
     [[ $# -ge 1 ]] || { usage >&2; exit 2; }
-    printf '%s' "$*" | xclip -selection clipboard
+    # xclip forks a helper that stays alive to serve the clipboard. If it keeps
+    # the caller's stdout/stderr, the parent never sees EOF and the step sits
+    # until its timeout, so its output is thrown away here.
+    printf '%s' "$*" | xclip -selection clipboard >/dev/null 2>&1
     xdotool key --clearmodifiers ctrl+v
     ;;
   key)

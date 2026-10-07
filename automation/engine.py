@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import os
 import shlex
+import signal
 import subprocess
 import threading
 import time
@@ -34,6 +35,8 @@ class ControlBackend:
         self.display = display
         self.screenshot_dir = screenshot_dir
         self.timeout = timeout
+        self._proc_lock = threading.Lock()
+        self._proc: Optional[subprocess.Popen] = None
 
     def env(self) -> Dict[str, str]:
         env = dict(os.environ)
@@ -44,20 +47,69 @@ class ControlBackend:
 
     def control(self, args: List[str], timeout: Optional[float] = None) -> Tuple[int, str, str]:
         command = [self.script_path] + [str(a) for a in args]
+        limit = timeout or self.timeout
         try:
-            proc = subprocess.run(
+            # stdin is DEVNULL so a helper that reads it cannot block forever,
+            # and the child is kept so terminate() can kill a hung step.
+            proc = subprocess.Popen(
                 command,
                 env=self.env(),
-                capture_output=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
-                timeout=timeout or self.timeout,
-                check=False,
+                # Its own process group, so terminate() can take the script and
+                # every helper it spawned (xdotool, xclip, sleep) with it.
+                start_new_session=True,
             )
-        except subprocess.TimeoutExpired as exc:
-            return 124, "", "timed out after %.0fs: %s" % (timeout or self.timeout, " ".join(command))
         except FileNotFoundError:
             return 127, "", "control script not found: %s" % self.script_path
-        return proc.returncode, proc.stdout.strip(), proc.stderr.strip()
+        with self._proc_lock:
+            self._proc = proc
+        try:
+            out, err = proc.communicate(timeout=limit)
+        except subprocess.TimeoutExpired:
+            self._kill(proc)
+            return 124, "", "timed out after %.0fs: %s" % (limit, " ".join(command))
+        finally:
+            with self._proc_lock:
+                if self._proc is proc:
+                    self._proc = None
+        return proc.returncode, (out or "").strip(), (err or "").strip()
+
+    def terminate(self) -> None:
+        """Kill the control script that is running right now, if any.
+
+        Without this, Stop only takes effect between steps: a step blocked in a
+        60 second subprocess would ignore the request until it timed out.
+        """
+        with self._proc_lock:
+            proc = self._proc
+        if proc is not None:
+            self._kill(proc)
+
+    @staticmethod
+    def _kill(proc: "subprocess.Popen") -> None:
+        """Stop the script and its whole process group.
+
+        Killing only the shell leaves its children holding the pipes, so the
+        caller would still block until the step timeout.
+        """
+        if proc.poll() is not None:
+            return
+        for signo in (signal.SIGTERM, signal.SIGKILL):
+            try:
+                os.killpg(os.getpgid(proc.pid), signo)
+            except (ProcessLookupError, PermissionError, OSError):
+                try:
+                    proc.send_signal(signo)
+                except (ProcessLookupError, OSError):
+                    return
+            try:
+                proc.wait(timeout=2)
+                return
+            except subprocess.TimeoutExpired:
+                continue
 
     # -- primitives -----------------------------------------------------
     def click(self, x: int, y: int, button: str = "left", clicks: int = 1) -> Tuple[int, str, str]:
@@ -256,7 +308,12 @@ class AutomationEngine:
                 raise RuntimeError("no flow is running")
             self._stop_requested = True
             self._wakeup.set()
-            return self._state.snapshot()
+            snapshot = self._state.snapshot()
+        # Outside the lock: the running step may be blocked in a subprocess.
+        kill = getattr(self.backend, "terminate", None)
+        if callable(kill):
+            kill()
+        return snapshot
 
     def confirm(self, approve: bool) -> Dict[str, Any]:
         with self._lock:

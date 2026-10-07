@@ -462,11 +462,15 @@ function stepEditor(step) {
     ]));
   }
 
+  // A label is derived from the step's fields. It used to be kept as soon as one
+  // existed, so a step created empty stayed: paste "" for ever, even after the
+  // text was typed. Only a label the user typed by hand survives from now on.
+  let customLabel = false;
   fields.push(el('label', { class: 'mas-field mas-wide' }, [
     el('span', { text: 'label' }),
     el('input', {
       class: 'mas-input', value: step.label || '',
-      onInput: (event) => { step.label = event.target.value; },
+      onInput: (event) => { step.label = event.target.value; customLabel = true; },
     }),
   ]));
   fields.push(el('label', { class: 'mas-field' }, [
@@ -498,10 +502,12 @@ function stepEditor(step) {
     el('div', { class: 'mas-grid' }, fields),
     el('div', { class: 'mas-row' }, [
       button('OK', () => {
-        step.label = step.label || labelFor(step);
+        if (!customLabel) step.label = labelFor(step);
         persistFlow(); state.openStepId = null; renderFlow();
       }, { class: 'mas-btn mas-primary' }),
-      button('↺ ' + labelFor(step), () => { step.label = labelFor(step); renderFlow(); }),
+      button('↺ ' + labelFor(step), () => {
+        step.label = labelFor(step); customLabel = false; renderFlow();
+      }),
     ]),
   ]);
 }

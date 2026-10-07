@@ -349,6 +349,62 @@ test('recording ASCII keystrokes still becomes a type step', async () => {
   }
 });
 
+test('editing a step refreshes its label instead of keeping paste ""', async () => {
+  const page = await mount();
+  try {
+    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+    const pane = page.doc.getElementById('mas-tab-flow');
+    const select = pane.querySelector('select');
+    select.value = 'paste';
+    page.byText('button', 'افزودن گام').dispatchEvent(new page.window.Event('click'));
+
+    const row = pane.querySelector('.mas-step');
+    assert.ok(row.textContent.includes('paste ""'), 'expected an empty label first');
+
+    // Open the editor and type the text the user actually wants pasted.
+    row.querySelector('.mas-step-label').dispatchEvent(new page.window.Event('click'));
+    const field = (name) => Array.from(pane.querySelectorAll('.mas-editor label'))
+      .find((l) => l.querySelector('span') && l.querySelector('span').textContent === name)
+      .querySelector('input, textarea, select');
+    const text = field('text');
+    assert.ok(text, 'the text field is missing');
+    text.value = 'سلام دنیا';
+    text.dispatchEvent(new page.window.Event('input'));
+    page.byText('button', 'OK').dispatchEvent(new page.window.Event('click'));
+
+    const label = pane.querySelector('.mas-step .mas-step-label').textContent;
+    assert.ok(label.includes('سلام دنیا'), 'the label stayed stale: ' + label);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('a hand written label survives editing the step', async () => {
+  const page = await mount();
+  try {
+    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+    const pane = page.doc.getElementById('mas-tab-flow');
+    pane.querySelector('select').value = 'paste';
+    page.byText('button', 'افزودن گام').dispatchEvent(new page.window.Event('click'));
+    pane.querySelector('.mas-step .mas-step-label').dispatchEvent(new page.window.Event('click'));
+
+    const field = (name) => Array.from(pane.querySelectorAll('.mas-editor label'))
+      .find((l) => l.querySelector('span') && l.querySelector('span').textContent === name)
+      .querySelector('input, textarea, select');
+    const label = field('label');
+    label.value = 'نوشتن در گوگل';
+    label.dispatchEvent(new page.window.Event('input'));
+    const text = field('text');
+    text.value = 'hello';
+    text.dispatchEvent(new page.window.Event('input'));
+    page.byText('button', 'OK').dispatchEvent(new page.window.Event('click'));
+
+    assert.equal(pane.querySelector('.mas-step .mas-step-label').textContent, 'نوشتن در گوگل');
+  } finally {
+    await page.cleanup();
+  }
+});
+
 test('the AI tab sends the user request and an absolute origin', async () => {
   const page = await mount();
   try {

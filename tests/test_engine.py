@@ -17,7 +17,9 @@ import unittest
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from automation import schema  # noqa: E402
-from automation.engine import AutomationEngine, ControlBackend  # noqa: E402
+from automation.engine import (  # noqa: E402
+    TERMINAL_STATES, AutomationEngine, ControlBackend,
+)
 
 
 class FakeClock:
@@ -456,3 +458,95 @@ class BackendCommandTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class RealProcessTest(unittest.TestCase):
+    """Runs the real ControlBackend against real scripts, no fakes.
+
+    These cover the two ways a step used to hang: a helper that blocks reading
+    stdin, and a helper that forks a survivor holding the captured pipes.
+    """
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.script = os.path.join(self.tmp, "control.sh")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _backend(self, body, timeout=20.0):
+        with open(self.script, "w") as handle:
+            handle.write("#!/bin/sh\n" + body)
+        os.chmod(self.script, 0o755)
+        return ControlBackend(self.script, timeout=timeout)
+
+    def test_stdin_is_closed_so_a_helper_cannot_block_on_it(self):
+        backend = self._backend("read line || true; printf 'done\\n'")
+        started = time.time()
+        rc, out, _ = backend.control(["anything"])
+        self.assertLess(time.time() - started, 10, "control() blocked on stdin")
+        self.assertEqual(rc, 0)
+        self.assertEqual(out, "done")
+
+    def test_paste_returns_without_waiting_for_the_clipboard_owner(self):
+        # xclip forks a process that stays alive to serve the clipboard. When it
+        # inherited the captured stdout/stderr the caller never saw EOF, so the
+        # step sat until its 60s timeout and reported rc=124 even though the
+        # paste itself had already happened.
+        bin_dir = os.path.join(self.tmp, "bin")
+        os.makedirs(bin_dir)
+        stubs = {
+            "xdpyinfo": "#!/bin/sh\nexit 0\n",
+            # The survivor must inherit stdout/stderr, exactly like the real
+            # xclip clipboard owner does.
+            "xclip": "#!/bin/sh\ncat >/dev/null\nsleep 20 &\nexit 0\n",
+            "xdotool": "#!/bin/sh\nexit 0\n",
+        }
+        for name, body in stubs.items():
+            path = os.path.join(bin_dir, name)
+            with open(path, "w") as handle:
+                handle.write(body)
+            os.chmod(path, 0o755)
+
+        old_path = os.environ.get("PATH", "")
+        os.environ["PATH"] = bin_dir + os.pathsep + old_path
+        try:
+            backend = ControlBackend(os.path.join(REPO_ROOT, "browser_control.sh"),
+                                     timeout=15.0)
+            started = time.time()
+            rc, _, err = backend.paste("سلام")
+            elapsed = time.time() - started
+        finally:
+            os.environ["PATH"] = old_path
+
+        self.assertEqual(rc, 0, err)
+        self.assertLess(elapsed, 10, "paste blocked for %.1fs" % elapsed)
+
+    def test_stop_kills_a_step_that_is_stuck_in_a_subprocess(self):
+        # Regression: the stop button only set a flag, so a step blocked in a
+        # subprocess ignored it until the step timed out.
+        backend = self._backend("sleep 30")
+        engine = AutomationEngine(backend, self.tmp)
+        flow, errors = schema.validate_flow(
+            {"name": "stuck", "steps": [{"type": "click", "x": 1, "y": 1}]})
+        self.assertEqual(errors, [])
+        engine.start(flow)
+        for _ in range(100):
+            if backend._proc is not None:
+                break
+            time.sleep(0.02)
+        self.assertIsNotNone(backend._proc, "the step never reached the script")
+
+        started = time.time()
+        engine.stop()
+        deadline = time.time() + 10
+        status = engine.status()["status"]
+        while time.time() < deadline and status not in TERMINAL_STATES:
+            time.sleep(0.05)
+            status = engine.status()["status"]
+        elapsed = time.time() - started
+        self.assertIn(status, TERMINAL_STATES, "stop did not interrupt the running step")
+        self.assertLess(elapsed, 8, "stop took %.1fs" % elapsed)
