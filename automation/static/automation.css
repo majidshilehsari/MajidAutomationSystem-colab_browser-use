@@ -30,6 +30,12 @@
 
 /* ---------------------------------------------------------------- toggle */
 
+/* Several panels below set `display: flex`, which has higher specificity than
+ * the user agent's [hidden] { display: none }. Without this rule a hidden panel
+ * stays on screen, and the full-screen confirmation overlay would sit on top of
+ * the noVNC password prompt forever. */
+#mas-root [hidden] { display: none !important; }
+
 #mas-root .mas-toggle {
   position: fixed;
   top: 50%;

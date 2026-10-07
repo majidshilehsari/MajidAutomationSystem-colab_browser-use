@@ -5,7 +5,7 @@ import assert from 'node:assert/strict';
 import {
   mapToDesktop, clamp, createStep, labelFor, validateFlow, emptyFlow,
   keysFromText, keysToText, moveStep, promptSteps, flowAsJson, extractJson,
-  normaliseImportedFlow, formatElapsed, translate, stepDef, STEP_DEFS,
+  normaliseImportedFlow, formatElapsed, translate, stepDef, STEP_DEFS, compact,
 } from '../automation/static/core.mjs';
 
 const VP = { width: 1366, height: 768 };
@@ -63,6 +63,18 @@ test('labels are readable', () => {
                'open https://example.com');
   const long = labelFor(createStep('paste', { text: 'x'.repeat(60) }));
   assert.ok(long.length < 40, `label should be truncated: ${long}`);
+});
+
+test('compact drops the values that must not reach appendChild', () => {
+  const node = { tag: 'div' };
+  assert.deepEqual(compact([node, null, undefined, false, true]), [node]);
+  assert.deepEqual(compact([node, [null, node]]), [node, node], 'nested arrays flatten');
+  assert.deepEqual(compact(node), [node], 'a bare node is wrapped');
+  assert.deepEqual(compact([]), []);
+  assert.deepEqual(compact([0, '', 'text']), [0, '', 'text'], 'falsy but real values survive');
+  // This is the exact shape that crashed the sidebar: a conditional child.
+  const errors = [];
+  assert.deepEqual(compact([node, errors.length ? node : null]), [node]);
 });
 
 test('validateFlow accepts a good flow and rejects a bad one', () => {

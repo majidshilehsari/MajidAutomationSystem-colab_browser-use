@@ -25,6 +25,12 @@ printf '== Python tests (%s) ==\n' "$PYTHON"
 printf '\n== JavaScript tests ==\n'
 if command -v node >/dev/null 2>&1; then
   node --test tests/test_core.mjs || status=1
+  if [[ -d node_modules/jsdom ]]; then
+    printf '\n-- sidebar DOM tests (jsdom) --\n'
+    node --test tests/test_ui.mjs || status=1
+  else
+    printf 'jsdom: MISSING (sidebar DOM tests skipped; run npm install)\n'
+  fi
 else
   printf 'node: MISSING (javascript tests skipped)\n'
 fi

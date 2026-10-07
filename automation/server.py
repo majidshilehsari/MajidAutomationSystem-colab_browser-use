@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import argparse
 import logging
+import hashlib
 import os
+import re
 import shutil
 import signal
 import socket
@@ -40,11 +42,27 @@ from automation.engine import AutomationEngine, ControlBackend  # noqa: E402
 
 LOG = logging.getLogger("automation.server")
 MARKER = "<!-- automation-ui -->"
-INJECT = (
-    MARKER + "\n"
-    '<link rel="stylesheet" href="automation/automation.css">\n'
-    '<script type="module" src="automation/automation.js"></script>\n'
-)
+END_MARKER = "<!-- /automation-ui -->"
+INJECT_BLOCK = re.compile(
+    re.escape(MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?", re.DOTALL)
+
+
+def inject_block(static_dir: str) -> str:
+    """The sidebar tags, with a content hash so a new build cannot be served
+    from the browser's cache. Rewritten on every start, so it never goes stale.
+    """
+    digest = ""
+    main_script = os.path.join(static_dir, "automation.js")
+    if os.path.exists(main_script):
+        with open(main_script, "rb") as handle:
+            digest = hashlib.sha256(handle.read()).hexdigest()[:10]
+    query = "?v=%s" % digest if digest else ""
+    return (
+        MARKER + "\n"
+        '<link rel="stylesheet" href="automation/automation.css%s">\n'
+        '<script type="module" src="automation/automation.js%s"></script>\n'
+        "%s\n" % (query, query, END_MARKER)
+    )
 
 
 class WebsockifyMissing(RuntimeError):
@@ -100,15 +118,21 @@ def prepare_web_root(web_root: str, novnc_dir: str, static_dir: str) -> Dict[str
     if os.path.exists(target_vnc):
         with open(target_vnc, encoding="utf-8") as handle:
             html = handle.read()
-        if MARKER not in html:
-            if "</body>" in html:
-                html = html.replace("</body>", INJECT + "</body>", 1)
-            else:
-                html += "\n" + INJECT
+        block = inject_block(static_dir)
+        if INJECT_BLOCK.search(html):
+            # Replace rather than skip: the hash may have changed since the last
+            # start, and a stale hash means the browser keeps the old sidebar.
+            updated = INJECT_BLOCK.sub(lambda _: block, html, count=1)
+        elif "</body>" in html:
+            updated = html.replace("</body>", block + "</body>", 1)
+        else:
+            updated = html + "\n" + block
+        if updated != html:
             with open(target_vnc, "w", encoding="utf-8") as handle:
-                handle.write(html)
+                handle.write(updated)
             report["patched"] = True
         report["vncHtml"] = True
+        report["cacheKey"] = block.split("?v=")[1].split('"')[0] if "?v=" in block else ""
     return report
 
 

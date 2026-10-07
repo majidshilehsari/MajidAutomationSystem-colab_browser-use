@@ -10,7 +10,7 @@ import {
   API_PREFIX, STEP_DEFS, createStep, labelFor, validateFlow, emptyFlow,
   mapToDesktop, keysFromText, keysToText, moveStep, extractJson,
   normaliseImportedFlow, promptSteps, translate, formatElapsed, formatTime,
-  stepDef, truncate, structuredCloneSafe,
+  stepDef, truncate, structuredCloneSafe, compact,
 } from './core.mjs';
 
 const LS = {
@@ -97,8 +97,7 @@ function el(tag, props = {}, children = []) {
     } else if (key === 'dataset') Object.assign(node.dataset, value);
     else node.setAttribute(key, value === true ? '' : String(value));
   }
-  for (const child of [].concat(children)) {
-    if (child === null || child === undefined || child === false) continue;
+  for (const child of compact(children)) {
     node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
   }
   return node;
@@ -110,7 +109,10 @@ function button(label, onClick, extra = {}) {
 
 function replace(node, ...children) {
   node.textContent = '';
-  for (const child of children) node.appendChild(child);
+  for (const child of compact(children)) {
+    node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
+  }
+  return node;
 }
 
 function toast(message, kind = 'info') {
@@ -1027,8 +1029,21 @@ function start() {
   setInterval(() => { if (state.recording) positionRecordLayer(); }, 1000);
 }
 
+/* The sidebar is a guest in noVNC's page. If it throws, noVNC shows its own
+ * error dialog and the human cannot even reach the password prompt, so nothing
+ * here is allowed to escape. */
+function boot() {
+  try {
+    start();
+  } catch (error) {
+    if (window.console && window.console.error) {
+      window.console.error('[automation] sidebar failed to start:', error);
+    }
+  }
+}
+
 if (document.readyState === 'loading') {
-  document.addEventListener('DOMContentLoaded', start);
+  document.addEventListener('DOMContentLoaded', boot);
 } else {
-  start();
+  boot();
 }

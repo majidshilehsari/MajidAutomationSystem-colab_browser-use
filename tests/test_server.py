@@ -282,6 +282,29 @@ class WebRootTest(unittest.TestCase):
         with open(os.path.join(self.web, "vnc.html"), encoding="utf-8") as handle:
             self.assertEqual(handle.read().count(srv.MARKER), 1)
 
+    def test_a_changed_sidebar_invalidates_the_browser_cache_key(self):
+        srv.prepare_web_root(self.web, self.novnc, self.static)
+        vnc_html = os.path.join(self.web, "vnc.html")
+        with open(vnc_html, encoding="utf-8") as handle:
+            first = handle.read()
+        self.assertIn("?v=", first)
+        self.assertIn(srv.END_MARKER, first)
+        self.assertEqual(first.count(srv.MARKER), 1)
+
+        # Ship a new build of the sidebar: the tag must be rewritten in place so
+        # the browser cannot keep serving the old script.
+        with open(os.path.join(self.static, "automation.js"), "w", encoding="utf-8") as handle:
+            handle.write("// sidebar v2\n")
+        report = srv.prepare_web_root(self.web, self.novnc, self.static)
+        self.assertTrue(report["patched"], "a new build must rewrite the injected tags")
+
+        with open(vnc_html, encoding="utf-8") as handle:
+            second = handle.read()
+        self.assertEqual(second.count(srv.MARKER), 1, "the block must be replaced, not appended")
+        self.assertEqual(second.count(srv.END_MARKER), 1)
+        self.assertNotEqual(first, second)
+        self.assertTrue(second.index("automation/automation.js") < second.index("</body>"))
+
     def test_missing_novnc_is_reported_clearly(self):
         with self.assertRaises(FileNotFoundError):
             srv.prepare_web_root(os.path.join(self.tmp, "www2"),

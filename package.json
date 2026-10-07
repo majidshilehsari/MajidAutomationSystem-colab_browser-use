@@ -5,9 +5,11 @@
   "description": "Test-only Node dependencies for the Colab browser automation sidebar. The runtime itself needs no Node.",
   "scripts": {
     "test": "node --test tests/test_core.mjs",
+    "test:ui": "node --test tests/test_ui.mjs",
     "test:python": "python3 -m unittest discover -s tests -p 'test_*.py' -v"
   },
   "devDependencies": {
+    "jsdom": "^30.1.2",
     "ws": "^8.22.0"
   }
 }

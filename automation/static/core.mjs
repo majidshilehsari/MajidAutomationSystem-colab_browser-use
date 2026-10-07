@@ -127,6 +127,23 @@ export function quote(text) {
   return `"${truncate(value, 24)}"`;
 }
 
+/**
+ * Flatten a children argument and drop the values that must not reach the DOM.
+ *
+ * `appendChild(null)` throws, and a conditional child written as
+ * `cond ? el(...) : null` is the normal way to express "maybe no node here",
+ * so filtering has to happen in one place that every renderer goes through.
+ */
+export function compact(children) {
+  const out = [];
+  for (const child of [].concat(children)) {
+    if (child === null || child === undefined || child === false || child === true) continue;
+    if (Array.isArray(child)) out.push(...compact(child));
+    else out.push(child);
+  }
+  return out;
+}
+
 export function truncate(value, max) {
   const text = String(value == null ? '' : value);
   return text.length > max ? text.slice(0, max - 1) + '…' : text;
