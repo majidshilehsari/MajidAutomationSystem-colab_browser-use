@@ -231,6 +231,27 @@ POST   /automation/api/prompt          assemble the full AI prompt
 
 Every route except `info` needs the `X-Automation-Token` header.
 
+### Dedicated panel page
+
+The same controls are also available as a standalone page, away from the noVNC
+viewer:
+
+```
+https://<tunnel-url>/automation/panel.html
+```
+
+It talks to the same API on the same port, so it drives the same Chrome on the
+same virtual display, and runs survive closing either tab. The page is full
+width, which suits long flows better than the 344 px rail.
+
+Everything works there except click recording, which needs the browser view to
+click on; the Record tab says so and links across. A `⧉ Full panel` link in the
+sidebar header opens this page, and `🖥 Browser view` goes back.
+
+Like every other route except `GET /info` and `GET /automation/api/public/shot/*`,
+it sits behind the tunnel, and the API calls it makes still need
+`X-Automation-Token`.
+
 ## Stopping the environment
 
 Press `Ctrl+C` in the terminal running the supervisor, or run:

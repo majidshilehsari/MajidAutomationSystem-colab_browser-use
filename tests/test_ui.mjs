@@ -48,7 +48,7 @@ function fakeApi(requests, posts = []) {
 }
 
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
-async function mount({ readyStateComplete = true } = {}) {
+async function mount({ readyStateComplete = true, standalone = false } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -62,6 +62,9 @@ async function mount({ readyStateComplete = true } = {}) {
     virtualConsole,
   });
   const { window } = dom;
+  // The dedicated panel page sets this class on <body>; the sidebar reads it to
+  // know it is the whole page rather than an overlay inside noVNC.
+  if (standalone) window.document.body.classList.add('mas-standalone');
 
   const timers = [];
   const realSetInterval = globalThis.setInterval;
@@ -439,6 +442,41 @@ test('the AI tab sends the user request and an absolute origin', async () => {
     const body = JSON.parse(sent.body);
     assert.equal(body.request, 'روی اولین نتیجه کلیک کن');
     assert.equal(body.publicBase, 'https://example.trycloudflare.com');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the standalone panel opens full page and explains recording', async () => {
+  const page = await mount({ standalone: true });
+  try {
+    // No collapse tab, and the panel is on screen without anyone clicking.
+    assert.equal(page.display('#mas-toggle'), 'none', 'the collapse tab should be gone');
+    assert.notEqual(page.display('#mas-panel'), 'none', 'the panel should be open');
+
+    // A way back to the live browser view.
+    const link = page.doc.querySelector('.mas-vnclink');
+    assert.ok(link, 'no link to the browser view');
+    assert.equal(link.getAttribute('href'), '../vnc.html');
+
+    // Recording is the one thing that cannot work away from the browser view.
+    page.doc.querySelectorAll('.mas-tab')[1].dispatchEvent(new page.window.Event('click'));
+    const pane = page.doc.getElementById('mas-tab-record');
+    assert.equal(pane.querySelectorAll('button').length, 1,
+      'only Clear should remain: ' + pane.textContent);
+    assert.ok(pane.querySelector('a[href="../vnc.html"]'), 'no link to record from');
+    assert.ok(pane.textContent.length > 40, 'the explanation is missing');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('inside noVNC the sidebar offers the dedicated panel', async () => {
+  const page = await mount();
+  try {
+    const link = page.doc.querySelector('a[href="automation/panel.html"]');
+    assert.ok(link, 'no link to the dedicated panel');
+    assert.equal(link.getAttribute('target'), '_blank');
   } finally {
     await page.cleanup();
   }

@@ -52,6 +52,13 @@ function persistFlow() {
 
 function t(key) { return translate(state.lang, key); }
 
+/** True when running in the dedicated panel page instead of the noVNC overlay.
+ *  The panel drives the same API, so everything works except capturing clicks,
+ *  which needs the browser view to click on. */
+function isStandalone() {
+  return !!(document.body && document.body.classList.contains('mas-standalone'));
+}
+
 /* ------------------------------------------------------------------ *
  * API transport
  * ------------------------------------------------------------------ */
@@ -717,6 +724,24 @@ function exportJson() {
 
 function renderRecord() {
   const pane = document.getElementById('mas-tab-record');
+  if (isStandalone()) {
+    // Capturing clicks needs the browser view to click on, which only the
+    // noVNC page has. Everything else in this panel works the same.
+    replace(pane,
+      el('p', { class: 'mas-hint', text: t('recordStandalone') }),
+      el('div', { class: 'mas-row' }, [
+        el('a', {
+          class: 'mas-btn mas-primary', href: '../vnc.html', target: '_blank',
+          rel: 'noopener', text: '🖥 ' + t('openVnc'),
+        }),
+        button(t('clear'), () => {
+          state.flow.steps = []; persistFlow(); renderFlow(); renderRecord();
+        }),
+      ]),
+      el('p', { class: 'mas-hint', text: `${state.flow.steps.length} · ${state.flow.name}` }),
+    );
+    return;
+  }
   replace(pane,
     el('div', { class: 'mas-row' }, [
       el('button', {
@@ -1148,8 +1173,31 @@ function renderLog() {
  * ------------------------------------------------------------------ */
 
 function start() {
+  const standalone = isStandalone();
   buildPanel();
-  setPanelOpen(localStorage.getItem(LS.panel) === '1');
+  if (standalone) {
+    // The panel is the whole page here, so the collapse tab is pointless and a
+    // link back to the live browser view is not.
+    const toggle = document.getElementById('mas-toggle');
+    if (toggle) toggle.hidden = true;
+    const head = document.querySelector('#mas-panel .mas-head');
+    if (head) {
+      head.appendChild(el('a', {
+        class: 'mas-btn mas-vnclink', href: '../vnc.html', target: '_blank',
+        rel: 'noopener', text: '🖥 ' + t('openVnc'),
+      }));
+    }
+  } else {
+    // From inside noVNC, offer the dedicated panel in its own tab.
+    const head = document.querySelector('#mas-panel .mas-head');
+    if (head) {
+      head.appendChild(el('a', {
+        class: 'mas-btn mas-vnclink', href: 'automation/panel.html', target: '_blank',
+        rel: 'noopener', title: t('openPanel'), text: '⧉ ' + t('openPanel'),
+      }));
+    }
+  }
+  setPanelOpen(standalone || localStorage.getItem(LS.panel) === '1');
   selectTab('flow');
   renderStatus();
   refreshStatus();

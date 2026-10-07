@@ -45,18 +45,25 @@ MARKER = "<!-- automation-ui -->"
 END_MARKER = "<!-- /automation-ui -->"
 INJECT_BLOCK = re.compile(
     re.escape(MARKER) + r".*?" + re.escape(END_MARKER) + r"\n?", re.DOTALL)
+# Asset references in the standalone panel, with any version we wrote before.
+ASSET_REF = re.compile(r"(automation\.(?:css|js))(?:\?v=[0-9a-f]+)?")
+
+
+def cache_query(static_dir: str) -> str:
+    """?v=<hash of the main script>, so a new build cannot be served stale."""
+    main_script = os.path.join(static_dir, "automation.js")
+    if not os.path.exists(main_script):
+        return ""
+    with open(main_script, "rb") as handle:
+        digest = hashlib.sha256(handle.read()).hexdigest()[:10]
+    return "?v=%s" % digest
 
 
 def inject_block(static_dir: str) -> str:
     """The sidebar tags, with a content hash so a new build cannot be served
     from the browser's cache. Rewritten on every start, so it never goes stale.
     """
-    digest = ""
-    main_script = os.path.join(static_dir, "automation.js")
-    if os.path.exists(main_script):
-        with open(main_script, "rb") as handle:
-            digest = hashlib.sha256(handle.read()).hexdigest()[:10]
-    query = "?v=%s" % digest if digest else ""
+    query = cache_query(static_dir)
     return (
         MARKER + "\n"
         '<link rel="stylesheet" href="automation/automation.css%s">\n'
@@ -114,6 +121,20 @@ def prepare_web_root(web_root: str, novnc_dir: str, static_dir: str) -> Dict[str
     if os.path.exists(guide):
         shutil.copy2(guide, os.path.join(web_root, "automation", "ai_guide.md"))
         report["staticCopied"].append("ai_guide.md")
+
+    # The standalone panel is a plain static file, so its asset links are
+    # versioned here rather than injected.
+    panel = os.path.join(web_root, "automation", "panel.html")
+    if os.path.exists(panel):
+        with open(panel, encoding="utf-8") as handle:
+            html = handle.read()
+        query = cache_query(static_dir)
+        updated = ASSET_REF.sub(lambda m: m.group(1) + query, html)
+        if updated != html:
+            with open(panel, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+            report["panelPatched"] = True
+        report["panel"] = True
 
     if os.path.exists(target_vnc):
         with open(target_vnc, encoding="utf-8") as handle:

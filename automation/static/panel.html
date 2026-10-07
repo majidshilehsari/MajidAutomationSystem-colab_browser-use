@@ -1,0 +1,28 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>پنل اتوماسیون</title>
+<!--
+  The dedicated automation panel.
+
+  It is a separate page from the noVNC viewer, but it talks to the very same
+  API on the very same port, so it drives the same Chrome on the same virtual
+  display. Nothing here depends on the browser tab staying open: the executor
+  runs server side.
+
+  The asset URLs below get a ?v=<hash> appended by automation/server.py on
+  every start, so a new build is never served from the browser cache.
+-->
+<link rel="stylesheet" href="automation.css">
+</head>
+<body class="mas-standalone">
+  <header class="mas-page-head">
+    <h1>🤖 پنل اتوماسیون</h1>
+    <span class="mas-sub">کنترل همان مرورگر، از صفحه‌ای جدا — اجرا روی سرور انجام می‌شود، نه در این تب</span>
+  </header>
+  <script type="module" src="automation.js"></script>
+</body>
+</html>

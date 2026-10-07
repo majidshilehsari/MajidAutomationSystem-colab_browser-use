@@ -489,3 +489,65 @@
   #mas-root .mas-panel { font-size: 12px; }
   #mas-root .mas-body { padding: 6px; }
 }
+
+/* ------------------------------------------------------------------ *
+ * Dedicated panel page (automation/panel.html)
+ *
+ * The same sidebar, but as the whole page instead of an overlay pinned to the
+ * right edge of noVNC. Scoped to body.mas-standalone so vnc.html is untouched.
+ * ------------------------------------------------------------------ */
+body.mas-standalone {
+  margin: 0;
+  background: #0b0d11;
+  color: #e6e8ec;
+  color-scheme: dark;
+  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+body.mas-standalone .mas-page-head {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 14px 20px;
+  border-bottom: 1px solid #343a44;
+}
+
+body.mas-standalone .mas-page-head h1 {
+  margin: 0;
+  font-size: 16px;
+  font-weight: 600;
+}
+
+body.mas-standalone .mas-page-head .mas-sub {
+  opacity: 0.65;
+  font-size: 12px;
+}
+
+/* Not an overlay any more: no fixed positioning, no right rail, full width. */
+body.mas-standalone #mas-root .mas-panel {
+  position: static;
+  top: auto;
+  right: auto;
+  bottom: auto;
+  width: auto;
+  max-width: none;
+  min-height: calc(100vh - 57px);
+  border-left: 0;
+  box-shadow: none;
+  backdrop-filter: none;
+  background: #0b0d11;
+}
+
+body.mas-standalone #mas-root .mas-body,
+body.mas-standalone #mas-root .mas-foot,
+body.mas-standalone #mas-root .mas-head,
+body.mas-standalone #mas-root .mas-tabs {
+  width: 100%;
+  max-width: 1180px;
+  margin-left: auto;
+  margin-right: auto;
+}
+
+body.mas-standalone #mas-root .mas-toggle { display: none !important; }
+body.mas-standalone .mas-vnclink { text-decoration: none; }
