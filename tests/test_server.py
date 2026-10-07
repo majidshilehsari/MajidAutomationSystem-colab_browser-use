@@ -243,9 +243,18 @@ class ServerIntegrationTest(unittest.TestCase):
                                     method="PUT", body=flow)
         self.assertNotEqual(status, 422, body)
         # The reported failure came from actually running the flow.
-        status, body = http_request(self.url("/automation/api/run"),
-                                    method="POST", body={"flow": flow})
-        self.assertNotEqual(status, 422, "the flow was rejected: %s" % body)
+        try:
+            status, body = http_request(self.url("/automation/api/run"),
+                                        method="POST", body={"flow": flow})
+            self.assertNotEqual(status, 422, "the flow was rejected: %s" % body)
+        finally:
+            # xdotool is absent here, so the run ends in "error" and the shared
+            # engine would hand that to later tests as the current status.
+            for _ in range(300):
+                if not self.engine.busy():
+                    break
+                time.sleep(0.01)
+            self.engine._state = None
 
     def test_prompt_carries_the_user_request_and_the_shot_link(self):
         pages = os.path.join(self.data_dir, "pages")

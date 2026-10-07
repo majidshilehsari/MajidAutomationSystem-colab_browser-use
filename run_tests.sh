@@ -12,9 +12,12 @@ cd "$(dirname -- "${BASH_SOURCE[0]}")"
 status=0
 
 PYTHON=python3
-if [[ -x .venv/bin/python ]]; then
-  PYTHON=.venv/bin/python
-fi
+for candidate in .venv/bin/python "$HOME/.venv/bin/python"; do
+  if [[ -x $candidate ]]; then
+    PYTHON=$candidate
+    break
+  fi
+done
 
 printf '== Python tests (%s) ==\n' "$PYTHON"
 "$PYTHON" -c 'import websockify.websocketproxy' 2>/dev/null \
