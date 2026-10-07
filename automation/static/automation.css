@@ -18,6 +18,11 @@
   --mas-width: 344px;
   all: initial;
   position: static;
+  /* `all: initial` above resets this to normal, so it has to be declared after
+   * it. Without it Chrome paints the opened <select> popup and the scrollbars
+   * with the light system theme, which is what made the dropdowns white while
+   * the closed control was dark. */
+  color-scheme: dark;
 }
 
 #mas-root, #mas-root * {
@@ -141,6 +146,25 @@
   border-bottom-color: var(--mas-accent);
 }
 
+#mas-root .mas-tokenbar {
+  border-bottom: 1px solid var(--mas-warn);
+  background: rgba(224, 166, 60, 0.12);
+  padding: 8px 10px;
+}
+
+#mas-root .mas-tokenbar.is-error {
+  border-bottom-color: var(--mas-bad);
+  background: rgba(229, 72, 77, 0.14);
+}
+
+#mas-root .mas-tokenbar-text {
+  color: var(--mas-warn);
+  margin-bottom: 6px;
+  line-height: 1.4;
+}
+
+#mas-root .mas-tokenbar.is-error .mas-tokenbar-text { color: var(--mas-bad); }
+
 #mas-root .mas-body {
   flex: 1;
   overflow-y: auto;
@@ -182,6 +206,27 @@
   width: 100%;
 }
 
+#mas-root select.mas-input {
+  appearance: none;
+  -webkit-appearance: none;
+  background-image: linear-gradient(45deg, transparent 50%, var(--mas-dim) 50%),
+    linear-gradient(135deg, var(--mas-dim) 50%, transparent 50%);
+  background-position: calc(100% - 14px) 50%, calc(100% - 9px) 50%;
+  background-size: 5px 5px, 5px 5px;
+  background-repeat: no-repeat;
+  padding-right: 24px;
+}
+
+#mas-root select.mas-input option {
+  background: #1b1f26;
+  color: var(--mas-text);
+}
+
+#mas-root select.mas-input option:checked {
+  background: #1f5fc4;
+  color: #fff;
+}
+
 #mas-root .mas-area { resize: vertical; font-family: ui-monospace, Menlo, Consolas, monospace; }
 
 #mas-root .mas-row {
@@ -197,7 +242,7 @@
 
 #mas-root .mas-label { color: var(--mas-dim); white-space: nowrap; }
 #mas-root .mas-hint { color: var(--mas-dim); font-size: 11.5px; margin: 4px 0; }
-#mas-root .mas-empty { color: var(--mas-dim); padding: 10px 0; list-style: none; }
+#mas-root .mas-empty { color: var(--mas-dim); padding: 10px 0; }
 
 #mas-root .mas-field {
   display: flex;
@@ -222,7 +267,9 @@
 /* ----------------------------------------------------------------- steps */
 
 #mas-root .mas-steps {
-  list-style: none;
+  /* Longhand on purpose: `list-style: none` is a shorthand and some engines do
+   * not expand it, which leaves the <ol> counting its steps. */
+  list-style-type: none;
   margin: 0 0 10px;
   padding: 0;
   display: flex;
@@ -407,6 +454,9 @@
 #mas-root .mas-log-skip { color: var(--mas-dim); }
 
 /* ----------------------------------------------------------------- toast */
+
+#mas-root ol, #mas-root ul { list-style-type: none; margin: 0; padding: 0; }
+#mas-root .mas-errors ul { margin: 4px 0 0 16px; list-style-type: disc; }
 
 #mas-root .mas-toast-box {
   position: fixed;

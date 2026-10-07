@@ -20,8 +20,33 @@ const NOVNC_HTML = `<!doctype html><html><head><style>${CSS}</style></head><body
   </div></div>
 </body></html>`;
 
+const VALID_TOKEN = 'tok123';
+
+/** Stands in for the server: /info is open, everything else needs the token. */
+function fakeApi(requests) {
+  return async (url, options = {}) => {
+    const path = String(url);
+    requests.push(path);
+    const token = (options.headers || {})['X-Automation-Token'];
+    const json = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+    if (path.endsWith('/info')) {
+      return json({ authRequired: true, viewport: { width: 1366, height: 768 },
+                    engineBusy: false, detector: 'x11+cdp', cdpAvailable: false });
+    }
+    if (token !== VALID_TOKEN) {
+      return { ok: false, status: 401,
+               text: async () => '{"error":"missing or wrong X-Automation-Token header"}' };
+    }
+    if (path.endsWith('/status')) {
+      return json({ runId: null, status: 'idle', entries: [], history: [] });
+    }
+    return json({});
+  };
+}
+
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
 async function mount({ readyStateComplete = true } = {}) {
+  const requests = [];
   const errors = [];
   const virtualConsole = new VirtualConsole();
   virtualConsole.on('jsdomError', (e) => errors.push(String(e.message || e)));
@@ -44,7 +69,7 @@ async function mount({ readyStateComplete = true } = {}) {
     CustomEvent: window.CustomEvent, getComputedStyle: window.getComputedStyle.bind(window),
     requestAnimationFrame: window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window) : (fn) => setTimeout(fn, 0),
-    fetch: async () => ({ ok: false, status: 401, text: async () => '{"error":"no token"}' }),
+    fetch: fakeApi(requests),
     // Tracked so cleanup() can stop the sidebar's poll loops, otherwise the
     // test process never exits. Bound to the originals: referencing the global
     // here would recurse into this very wrapper.
@@ -73,8 +98,9 @@ async function mount({ readyStateComplete = true } = {}) {
   }
 
   return {
-    dom, window, errors, importError,
+    dom, window, errors, importError, requests,
     doc: window.document,
+    wait: (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms)),
     display: (selector) => window.getComputedStyle(window.document.querySelector(selector)).display,
     byText: (selector, text) => Array.from(window.document.querySelectorAll(selector))
       .find((node) => node.textContent.trim() === text),
@@ -176,6 +202,91 @@ test('adding a step through the UI creates a row', async () => {
     assert.equal(rows.length, 1, 'no step row appeared');
     assert.ok(rows[0].textContent.includes('click 0,0'), `unexpected row: ${rows[0].textContent}`);
     assert.equal(pane.querySelector('.mas-empty'), null, 'the empty hint should be gone');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('with no token the panel asks for one instead of throwing errors', async () => {
+  const page = await mount();
+  try {
+    const bar = page.doc.getElementById('mas-tokenbar');
+    assert.ok(bar, 'the token banner is missing');
+    assert.equal(bar.hidden, false, 'the banner must be visible before a token is set');
+    assert.equal(page.display('#mas-tokenbar'), 'block');
+    assert.ok(page.doc.getElementById('mas-token-input'), 'the token input is missing');
+    assert.equal(page.doc.getElementById('mas-toast').children.length, 0,
+      'a background poll must never raise a toast');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('without a token it does not knock on authenticated endpoints', async () => {
+  const page = await mount();
+  try {
+    await page.wait(60);  // let several poll cycles run
+    assert.ok(page.requests.some((u) => u.endsWith('/info')), '/info was never fetched');
+    assert.equal(page.requests.filter((u) => u.endsWith('/status')).length, 0,
+      'it polled /status without a token: ' + page.requests.join(', '));
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('entering the token connects and clears the banner', async () => {
+  const page = await mount();
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+
+    assert.equal(page.display('#mas-tokenbar'), 'none', 'the banner should disappear');
+    assert.ok(page.requests.some((u) => u.endsWith('/status')), '/status was never reached');
+    assert.equal(page.doc.getElementById('mas-toast').children.length, 0);
+    assert.ok(page.doc.querySelector('#mas-conn').classList.contains('is-ok'),
+      'the connection dot should turn green');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('a wrong token says so in the banner, not in a toast', async () => {
+  const page = await mount();
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = 'not-the-token';
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+
+    const bar = page.doc.getElementById('mas-tokenbar');
+    assert.equal(bar.hidden, false, 'the banner must stay so the human can retry');
+    assert.ok(bar.classList.contains('is-error'), 'it should be marked as an error');
+    assert.equal(page.doc.getElementById('mas-toast').children.length, 0);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the panel declares a dark colour scheme so dropdowns do not turn white', async () => {
+  const page = await mount();
+  try {
+    const root = page.doc.getElementById('mas-root');
+    assert.equal(page.window.getComputedStyle(root).colorScheme, 'dark',
+      'without color-scheme:dark Chrome paints the opened <select> popup white');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('step list shows no numbering and options are styled dark', async () => {
+  const page = await mount();
+  try {
+    const list = page.doc.querySelector('.mas-steps');
+    assert.equal(page.window.getComputedStyle(list).listStyleType, 'none');
+    assert.ok(page.window.getComputedStyle(page.doc.querySelector('select.mas-input'))
+      .backgroundColor.startsWith('rgb(18, 21, 26)'), 'the select must not be white');
   } finally {
     await page.cleanup();
   }

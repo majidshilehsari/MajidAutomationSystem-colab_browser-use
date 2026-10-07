@@ -33,6 +33,7 @@ const state = {
   keyBuffer: { step: null, timer: null },
   logOffset: 0,
   lastRenderedIndex: -1,
+  tokenRejected: false,
 };
 
 function loadFlow() {
@@ -157,6 +158,20 @@ function buildPanel() {
       }),
     ]),
     el('div', { class: 'mas-tabs' }, tabs),
+    el('div', { id: 'mas-tokenbar', class: 'mas-tokenbar', hidden: true }, [
+      el('div', { id: 'mas-tokenbar-text', class: 'mas-tokenbar-text' }),
+      el('div', { class: 'mas-row' }, [
+        el('input', {
+          id: 'mas-token-input', class: 'mas-input', type: 'password',
+          placeholder: 'AUTOMATION_TOKEN',
+          onKeydown: (event) => { if (event.key === 'Enter') setToken(event.target.value); },
+        }),
+        el('button', {
+          class: 'mas-btn mas-primary', type: 'button', text: t('tokenSubmit'),
+          onClick: () => setToken(document.getElementById('mas-token-input').value),
+        }),
+      ]),
+    ]),
     el('div', { class: 'mas-body' }, [
       el('section', { id: 'mas-tab-flow', class: 'mas-tabpane' }),
       el('section', { id: 'mas-tab-record', class: 'mas-tabpane', hidden: true }),
@@ -533,18 +548,56 @@ async function control(action, extra = {}) {
   }
 }
 
+/** One place owns the token so the AI tab and the banner cannot disagree. */
+function setToken(value) {
+  state.token = String(value || '').trim();
+  localStorage.setItem(LS.token, state.token);
+  state.tokenRejected = false;
+  const aiField = document.getElementById('mas-ai-token');
+  if (aiField) aiField.value = state.token;
+  refreshStatus();
+}
+
 async function refreshStatus() {
+  // /info needs no token, so it is always safe to ask. Everything else does,
+  // and knocking on those before the human has typed a token only produces a
+  // stream of 401s, so ask for the token instead.
+  let info;
   try {
-    const [status, info] = await Promise.all([api('/status'), api('/info')]);
-    state.status = status;
-    state.info = info;
-    setConnected(true);
+    info = await api('/info');
   } catch (error) {
-    // A 401 means the token is missing or wrong; anything else means the server
-    // is not answering. Both are shown, but only the first is fixable here.
-    setConnected(false, error.status === 401);
+    // The server itself is not answering; asking for a token would be misleading.
+    setConnected(false, false);
+    renderTokenBar(false);
     return;
   }
+  state.info = info;
+
+  if (info.authRequired && !state.token) {
+    setConnected(false, true);
+    renderTokenBar(true);
+    renderStatus();
+    return;
+  }
+
+  try {
+    state.status = await api('/status');
+  } catch (error) {
+    // A 401 here means the token is wrong. Say so where the human can fix it
+    // rather than throwing a toast from a background poll.
+    if (error.status === 401) {
+      state.tokenRejected = true;
+      setConnected(false, true);
+      renderTokenBar(true);
+    } else {
+      setConnected(false, false);
+    }
+    renderStatus();
+    return;
+  }
+  state.tokenRejected = false;
+  setConnected(true);
+  renderTokenBar(false);
   renderStatus();
   if (currentTab() === 'log') renderLog();
   // Redraw the step list only when the highlighted step moved, otherwise an
@@ -553,6 +606,19 @@ async function refreshStatus() {
     state.lastRenderedIndex = state.status.index;
     renderFlow();
   }
+}
+
+function renderTokenBar(show, detail = '') {
+  const bar = document.getElementById('mas-tokenbar');
+  const text = document.getElementById('mas-tokenbar-text');
+  const input = document.getElementById('mas-token-input');
+  if (!bar || !text) return;
+  bar.hidden = !show;
+  if (!show) return;
+  text.textContent = state.tokenRejected ? t('tokenBarWrong') : t('tokenBarTitle');
+  if (detail && !state.tokenRejected) text.textContent = detail;
+  bar.classList.toggle('is-error', Boolean(state.tokenRejected));
+  if (input && document.activeElement !== input) input.value = state.token;
 }
 
 function setConnected(ok, needsToken = false) {
@@ -574,6 +640,7 @@ function renderStatus() {
   }
   if (line) {
     const parts = [label, formatElapsed(status.elapsedMs)];
+    if (state.info && state.info.authRequired && !state.token) parts.push(t('needTokenShort'));
     if (status.error) parts.push(truncate(status.error, 90));
     replace(line, el('span', { class: 'mas-status-' + (status.status || 'idle'), text: parts.join(' · ') }));
   }
@@ -921,12 +988,9 @@ function renderAi() {
     el('label', { class: 'mas-field mas-wide' }, [
       el('span', { text: t('token') }),
       el('input', {
-        class: 'mas-input', type: 'password', value: state.token, placeholder: t('tokenHint'),
-        onInput: (event) => {
-          state.token = event.target.value.trim();
-          localStorage.setItem(LS.token, state.token);
-          refreshStatus();
-        },
+        id: 'mas-ai-token', class: 'mas-input', type: 'password',
+        value: state.token, placeholder: t('tokenHint'),
+        onInput: (event) => setToken(event.target.value),
       }),
     ]),
     el('div', { class: 'mas-row mas-wrap' }, [
