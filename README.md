@@ -231,6 +231,35 @@ POST   /automation/api/prompt          assemble the full AI prompt
 
 Every route except `info` needs the `X-Automation-Token` header.
 
+### Screenshots and extracted texts
+
+Everything the system captures is indexed under `<data>/archive/`, so both stay
+available after a run instead of being loose files on disk:
+
+- `shots.json` — every screenshot, from any route: Detect, a `screenshot` step,
+  the automatic one on failure, or the manual button. Each record has the file
+  name, a timestamp, where it came from, the step that produced it, and the
+  image size.
+- `texts.json` — every `capture_text` result plus notes saved by hand.
+
+Two tabs list them. **Screenshots** shows a thumbnail with date and time,
+newest first, and a link that opens the image at
+`/automation/api/public/shot/<name>` without a token. **Extracted texts** lists
+each saved text with its source and length, and has a box for saving your own.
+
+The matching routes, all behind `X-Automation-Token` except the image itself:
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/automation/api/shots` | list screenshot records, newest first |
+| `DELETE` | `/automation/api/shots/<id>` | drop one record |
+| `GET` | `/automation/api/texts` | list saved texts |
+| `POST` | `/automation/api/texts` | save a text, `{"text": "..."}` |
+| `DELETE` | `/automation/api/texts/<id>` | drop one text |
+
+Indexes are capped (500 shots, 300 texts) and written through a temporary file,
+so a runtime that dies mid-write cannot leave a truncated index behind.
+
 ### Dedicated panel page
 
 The same controls are also available as a standalone page, away from the noVNC

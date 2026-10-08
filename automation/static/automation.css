@@ -824,3 +824,89 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
 
 body.mas-standalone #mas-root .mas-lib-row { padding: 12px 14px; }
 body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
+
+/* ------------------------------------------------------------------ *
+ * Screenshots and extracted texts
+ * ------------------------------------------------------------------ */
+#mas-root .mas-shots { display: flex; flex-direction: column; gap: 8px; }
+
+#mas-root .mas-shot {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid #343a44;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
+#mas-root .mas-shot-thumb {
+  flex: 0 0 116px;
+  display: block;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid #343a44;
+}
+
+#mas-root .mas-shot-thumb img {
+  display: block;
+  width: 100%;
+  height: auto;
+  background: #000;
+}
+
+#mas-root .mas-shot-meta {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 11.5px;
+  color: #8b949e;
+}
+
+#mas-root .mas-shot-meta b {
+  color: #e6e8ec;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+#mas-root .mas-shot-step { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#mas-root .mas-shot-actions { display: flex; gap: 4px; flex: 0 0 auto; }
+
+#mas-root .mas-texts { display: flex; flex-direction: column; gap: 6px; }
+
+#mas-root .mas-text {
+  border: 1px solid #343a44;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.03);
+  padding: 8px 10px;
+}
+
+#mas-root .mas-text summary {
+  cursor: pointer;
+  font-size: 12px;
+  color: #e6e8ec;
+  font-variant-numeric: tabular-nums;
+}
+
+#mas-root .mas-text-src { color: #8b949e; font-weight: 400; }
+
+#mas-root .mas-text pre {
+  margin: 8px 0;
+  max-height: 260px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font-size: 11.5px;
+  line-height: 1.7;
+  color: #cbd5e1;
+}
+
+body.mas-standalone #mas-root .mas-shots {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+}
+
+body.mas-standalone #mas-root .mas-shot-thumb { flex: 0 0 180px; }
+body.mas-standalone #mas-root .mas-text pre { max-height: 420px; }

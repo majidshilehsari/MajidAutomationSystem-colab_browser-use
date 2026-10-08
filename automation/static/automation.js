@@ -10,7 +10,7 @@ import {
   API_PREFIX, STEP_DEFS, createStep, labelFor, validateFlow, emptyFlow,
   mapToDesktop, keysFromText, keysToText, moveStep, extractJson,
   normaliseImportedFlow, promptSteps, translate, formatElapsed, formatTime,
-  stepDef, truncate, structuredCloneSafe, compact,
+  stepDef, truncate, structuredCloneSafe, compact, formatDateTime,
 } from './core.mjs';
 
 const LS = {
@@ -153,7 +153,8 @@ function buildPanel() {
     title: t('title'), onClick: () => setPanelOpen(true),
   }, '◀');
 
-  const tabs = ['flow', 'record', 'pages', 'ai', 'log'].map((name) => el('button', {
+  const tabs = ['flow', 'record', 'pages', 'shots', 'texts', 'ai', 'log']
+    .map((name) => el('button', {
     class: 'mas-tab', dataset: { tab: name }, type: 'button',
     text: t('tab' + name[0].toUpperCase() + name.slice(1)),
     onClick: () => selectTab(name),
@@ -194,6 +195,8 @@ function buildPanel() {
       el('section', { id: 'mas-tab-flow', class: 'mas-tabpane' }),
       el('section', { id: 'mas-tab-record', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-pages', class: 'mas-tabpane', hidden: true }),
+      el('section', { id: 'mas-tab-shots', class: 'mas-tabpane', hidden: true }),
+      el('section', { id: 'mas-tab-texts', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-ai', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-log', class: 'mas-tabpane', hidden: true }),
     ]),
@@ -272,6 +275,8 @@ function selectTab(name) {
     node.hidden = node.id !== `mas-tab-${name}`;
   });
   if (name === 'pages') renderPages();
+  if (name === 'shots') renderShots();
+  if (name === 'texts') renderTexts();
   if (name === 'log') renderLog();
   if (name === 'ai') renderAi();
   if (name === 'flow') renderFlow();
@@ -1337,6 +1342,125 @@ async function openPage(id) {
 }
 
 /* ------------------------------------------------------------------ *
+ * Screenshots tab: every image the system ever took, newest first
+ * ------------------------------------------------------------------ */
+
+const ROLE_FA = { detect: 'شناسایی', run: 'اجرا', manual: 'دستی',
+  before: 'قبل گام', after: 'بعد گام', error: 'لحظه خطا' };
+
+function shotLink(name) {
+  return `${API_PREFIX}/public/shot/${encodeURIComponent(name)}`;
+}
+
+async function renderShots() {
+  const pane = document.getElementById('mas-tab-shots');
+  if (!pane) return;
+  replace(pane, el('p', { class: 'mas-empty', text: '…' }));
+  let rows = [];
+  try {
+    const data = await api('/shots');
+    rows = data.shots || [];
+  } catch (error) {
+    replace(pane, el('p', { class: 'mas-empty', text: error.message }));
+    return;
+  }
+  if (!rows.length) {
+    replace(pane, el('p', { class: 'mas-empty', text: t('shotsEmpty') }));
+    return;
+  }
+  replace(pane,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('⟳ ' + t('refresh'), renderShots),
+      el('span', { class: 'mas-hint', text: `${rows.length} ${t('shotsCount')}` }),
+    ]),
+    el('div', { class: 'mas-shots' }, rows.map((row) => el('div', { class: 'mas-shot' }, [
+      el('a', { class: 'mas-shot-thumb', href: row.url || shotLink(row.name), target: '_blank',
+        rel: 'noopener', title: t('openShot') }, [
+        el('img', { src: row.url || shotLink(row.name), alt: row.name || '', loading: 'lazy' }),
+      ]),
+      el('div', { class: 'mas-shot-meta' }, compact([
+        el('b', { text: formatDateTime(row.createdAt) }),
+        el('span', {
+          text: [ROLE_FA[row.role] || row.role || '',
+            row.image ? `${row.image.width}×${row.image.height}` : ''].filter(Boolean).join(' · '),
+        }),
+        row.stepLabel ? el('span', { class: 'mas-shot-step', text: `#${row.stepIndex} ${row.stepLabel}` }) : null,
+        row.title ? el('span', { class: 'mas-shot-step', text: truncate(row.title, 60) }) : null,
+      ])),
+      el('div', { class: 'mas-shot-actions' }, [
+        el('a', { class: 'mas-btn', href: row.url || shotLink(row.name), target: '_blank',
+          rel: 'noopener', text: '🔗' , title: t('shotLink') }),
+        button('🗑', async () => {
+          if (!window.confirm(t('deleteShotConfirm'))) return;
+          try {
+            await api(`/shots/${encodeURIComponent(row.id)}`, { method: 'DELETE' });
+            renderShots();
+          } catch (error) { toast(error.message, 'error'); }
+        }, { class: 'mas-btn mas-danger', title: t('delete') }),
+      ]),
+    ]))));
+}
+
+/* ------------------------------------------------------------------ *
+ * Extracted texts tab: what the system read off a page and kept
+ * ------------------------------------------------------------------ */
+
+async function renderTexts() {
+  const pane = document.getElementById('mas-tab-texts');
+  if (!pane) return;
+  replace(pane, el('p', { class: 'mas-empty', text: '…' }));
+  let rows = [];
+  try {
+    const data = await api('/texts');
+    rows = data.texts || [];
+  } catch (error) {
+    replace(pane, el('p', { class: 'mas-empty', text: error.message }));
+    return;
+  }
+  const noteBox = el('textarea', {
+    class: 'mas-input mas-area', rows: '3', placeholder: t('noteHint'),
+  });
+  replace(pane,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('⟳ ' + t('refresh'), renderTexts),
+      button('💾 ' + t('saveNote'), async () => {
+        const text = noteBox.value.trim();
+        if (!text) { toast(t('noteEmpty'), 'warn'); return; }
+        try {
+          await api('/texts', { method: 'POST', body: { text, source: 'manual' } });
+          renderTexts();
+          toast(t('saved'), 'ok');
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      el('span', { class: 'mas-hint', text: `${rows.length} ${t('textsCount')}` }),
+    ]),
+    noteBox,
+    rows.length
+      ? el('div', { class: 'mas-texts' }, rows.map((row) => el('details', { class: 'mas-text' }, [
+        el('summary', {}, compact([
+          el('b', { text: formatDateTime(row.createdAt) }),
+          el('span', {
+            class: 'mas-text-src',
+            text: ` · ${row.source || ''}${row.stepLabel ? ` · ${row.stepLabel}` : ''} · ${row.chars || (row.text || '').length}`,
+          }),
+        ])),
+        el('pre', { text: row.text || '' }),
+        el('div', { class: 'mas-row' }, [
+          button('📋', () => copyText(row.text || ''), { title: t('copy') }),
+          button('🗑', async () => {
+            if (!window.confirm(t('deleteTextConfirm'))) return;
+            try {
+              await api(`/texts/${encodeURIComponent(row.id)}`, { method: 'DELETE' });
+              renderTexts();
+            } catch (error) { toast(error.message, 'error'); }
+          }, { class: 'mas-btn mas-danger', title: t('delete') }),
+        ]),
+      ])))
+      : el('p', { class: 'mas-empty', text: t('textsEmpty') }),
+  );
+}
+
+/* ------------------------------------------------------------------ *
  * AI tab
  * ------------------------------------------------------------------ */
 
@@ -1481,7 +1605,7 @@ function renderLog() {
   replace(pane, el('div', { class: 'mas-log' }, entries.map((entry) => el('div', {
     class: `mas-log-line mas-log-${entry.level}`,
   }, [
-    el('span', { class: 'mas-log-t', text: new Date(entry.t * 1000).toLocaleTimeString() }),
+    el('span', { class: 'mas-log-t', text: formatDateTime(entry.t) }),
     el('span', { text: entry.message }),
   ]))));
   pane.scrollTop = pane.scrollHeight;

@@ -24,6 +24,7 @@ sys.path.insert(0, REPO_ROOT)
 from automation import server as srv  # noqa: E402
 from automation.api import AutomationApi, FlowStore  # noqa: E402
 from automation.detect import Detector  # noqa: E402
+from automation.archive import shot_archive, text_archive  # noqa: E402
 from automation.engine import AutomationEngine, ControlBackend  # noqa: E402
 
 try:
@@ -112,11 +113,15 @@ class ServerIntegrationTest(unittest.TestCase):
 
         proxy_class, base_handler = srv.load_websockify()
         backend = ControlBackend(script_path="/nonexistent/browser_control.sh")
-        cls.engine = AutomationEngine(backend, cls.data_dir)
+        cls.shots = shot_archive(cls.data_dir)
+        cls.texts = text_archive(cls.data_dir)
+        cls.engine = AutomationEngine(backend, cls.data_dir,
+                                      shots=cls.shots, texts=cls.texts)
         detector = Detector(backend, cls.data_dir, {"width": 1366, "height": 768})
         cls.api = AutomationApi(cls.engine, FlowStore(cls.data_dir), detector,
                                 data_dir=cls.data_dir, token=TOKEN,
-                                control_script="/nonexistent/browser_control.sh")
+                                control_script="/nonexistent/browser_control.sh",
+                                shots=cls.shots, texts=cls.texts)
         cls.proxy = proxy_class(
             RequestHandlerClass=srv.make_handler_class(cls.api, base_handler),
             listen_host="127.0.0.1", listen_port=0,

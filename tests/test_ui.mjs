@@ -43,6 +43,22 @@ function fakeApi(requests, posts = [], statusPayload = null) {
     if (path.endsWith('/status')) {
       return json(statusPayload || { runId: null, status: 'idle', entries: [], history: [] });
     }
+    if (path.endsWith('/shots')) {
+      return json({ shots: [
+        { id: 's2', name: 'b.png', role: 'error', createdAt: 1760000100,
+          stepIndex: 3, stepLabel: 'paste', image: { width: 1366, height: 768 },
+          url: '/automation/api/public/shot/b.png' },
+        { id: 's1', name: 'a.png', role: 'detect', createdAt: 1760000000,
+          title: 'Arena', image: { width: 1366, height: 768 },
+          url: '/automation/api/public/shot/a.png' },
+      ] });
+    }
+    if (path.endsWith('/texts')) {
+      return json({ texts: [
+        { id: 't1', text: 'Battle Arena\nStart game', source: 'capture_text',
+          stepLabel: 'خواندن صفحه', chars: 25, createdAt: 1760000050 },
+      ] });
+    }
     if (path.endsWith('/flows')) {
       return json({ flows: [
         { name: 'Google Search', steps: 10, updatedAt: 1760000000, description: 'جستجو' },
@@ -204,12 +220,21 @@ test('tabs swap panes and only one is visible', async () => {
   try {
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const tabs = Array.from(page.doc.querySelectorAll('.mas-tab'));
-    assert.equal(tabs.length, 5);
+    assert.deepEqual(tabs.map((n) => n.dataset.tab),
+      ['flow', 'record', 'pages', 'shots', 'texts', 'ai', 'log']);
 
-    tabs[3].dispatchEvent(new page.window.Event('click'));  // AI tab
+    tabs[5].dispatchEvent(new page.window.Event('click'));  // AI tab
     assert.equal(page.display('#mas-tab-ai'), 'block');
     assert.equal(page.display('#mas-tab-flow'), 'none');
     assert.ok(page.doc.querySelector('#mas-tab-ai textarea'), 'the import box is missing');
+
+    tabs[3].dispatchEvent(new page.window.Event('click'));  // screenshots
+    assert.equal(page.display('#mas-tab-shots'), 'block');
+    assert.equal(page.display('#mas-tab-ai'), 'none');
+
+    tabs[4].dispatchEvent(new page.window.Event('click'));  // extracted texts
+    assert.equal(page.display('#mas-tab-texts'), 'block');
+    assert.equal(page.display('#mas-tab-shots'), 'none');
   } finally {
     await page.cleanup();
   }
@@ -436,7 +461,7 @@ test('the AI tab sends the user request and an absolute origin', async () => {
     await page.wait(60);
 
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[3];
+    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[5];
     aiTab.dispatchEvent(new page.window.Event('click'));
     await page.wait(10);
 
@@ -643,7 +668,7 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[3];
+    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[5];
     aiTab.dispatchEvent(new page.window.Event('click'));
     await page.wait(10);
 
@@ -706,6 +731,68 @@ test('the saved flow library lists, loads, runs and deletes', async () => {
     await page.wait(80);
     assert.ok(page.requests.some((u) => u.includes('/flows/Google%20Search')),
       'the delete never reached the server');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the screenshots tab lists every shot with time, size and link', async () => {
+  const page = await mount();
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+    const shotsTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[3];
+    shotsTab.dispatchEvent(new page.window.Event('click'));
+
+    const pane = page.doc.getElementById('mas-tab-shots');
+    assert.ok(await page.until(() => pane.querySelectorAll('.mas-shot').length === 2),
+      'the shots never listed: ' + pane.textContent);
+
+    const first = pane.querySelector('.mas-shot');
+    // Newest first, with a real timestamp, the image size and an openable link.
+    assert.match(first.textContent, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}/,
+      'no date and time: ' + first.textContent);
+    assert.ok(first.textContent.includes('1366×768'), 'no image size');
+    const link = first.querySelector('a[href*="/public/shot/"]');
+    assert.ok(link, 'no link to the image');
+    assert.equal(link.getAttribute('target'), '_blank');
+    assert.ok(first.querySelector('img'), 'no thumbnail');
+    assert.ok(first.textContent.includes('لحظه خطا'), 'the role is missing');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the texts tab lists saved text and can save a new note', async () => {
+  const page = await mount();
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+    const textsTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[4];
+    textsTab.dispatchEvent(new page.window.Event('click'));
+
+    const pane = page.doc.getElementById('mas-tab-texts');
+    assert.ok(await page.until(() => pane.querySelectorAll('.mas-text').length === 1),
+      'the texts never listed: ' + pane.textContent);
+    assert.ok(pane.textContent.includes('Battle Arena'), 'the saved text is missing');
+
+    const box = pane.querySelector('textarea');
+    box.value = 'یادداشت دستی من';
+    box.dispatchEvent(new page.window.Event('input'));
+    const save = Array.from(pane.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('ذخیره یادداشت'));
+    save.dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+
+    const posted = page.posts.find((p) => p.url.endsWith('/texts'));
+    assert.ok(posted, '/texts was never posted');
+    assert.equal(JSON.parse(posted.body).text, 'یادداشت دستی من');
   } finally {
     await page.cleanup();
   }

@@ -17,7 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from . import schema
-from .engine import TERMINAL_STATES
+from .engine import TERMINAL_STATES, png_size
 
 API_PREFIX = "/automation/api"
 
@@ -126,8 +126,13 @@ class AutomationApi:
 
     def __init__(self, engine, store: FlowStore, detector=None, *, data_dir: str,
                  token: str = "", control_script: str = "", viewport=None,
-                 guide_path: str = "", version: str = "1.0"):
+                 guide_path: str = "", version: str = "1.0",
+                 shots=None, texts=None):
         self.engine = engine
+        # Indexes of every screenshot and every extracted text this session
+        # produced, so two panel tabs can list them with timestamps.
+        self.shots = shots
+        self.texts = texts
         self.store = store
         self.detector = detector
         self.data_dir = data_dir
@@ -155,6 +160,11 @@ class AutomationApi:
             ("GET", "/pages/*", self.route_page_get),
             ("GET", "/guide", self.route_guide),
             ("GET", "/report", self.route_report),
+            ("GET", "/shots", self.route_shots),
+            ("DELETE", "/shots/*", self.route_shot_delete),
+            ("GET", "/texts", self.route_texts),
+            ("POST", "/texts", self.route_text_add),
+            ("DELETE", "/texts/*", self.route_text_delete),
             ("POST", "/prompt", self.route_prompt),
         ]
 
@@ -307,6 +317,52 @@ class AutomationApi:
             lines = [json.loads(line) for line in handle if line.strip()]
         return json_response(200, {"runId": run_id, "entries": lines})
 
+    # -- archives ------------------------------------------------------
+    def note_shot(self, name: Optional[str], role: str, **extra: Any) -> None:
+        """Index one published screenshot. Never breaks the caller's request."""
+        if self.shots is None or not name:
+            return
+        try:
+            path = os.path.join(self.data_dir, "public", name)
+            self.shots.add(dict({"name": name, "role": role,
+                                 "image": png_size(path)}, **extra))
+        except OSError:
+            pass
+
+    def route_shots(self, **_: Any) -> Response:
+        rows = self.shots.list() if self.shots is not None else []
+        for row in rows:
+            row["url"] = "%s/public/shot/%s" % (API_PREFIX, row.get("name"))
+        return json_response(200, {"shots": rows})
+
+    def route_shot_delete(self, *, params: Dict[str, str], **_: Any) -> Response:
+        if self.shots is None or not self.shots.delete(params["*"]):
+            raise ApiError(404, "no such screenshot")
+        return json_response(200, {"ok": True})
+
+    def route_texts(self, **_: Any) -> Response:
+        return json_response(200, {"texts": self.texts.list() if self.texts else []})
+
+    def route_text_add(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise ApiError(400, "text must not be empty")
+        if self.texts is None:
+            raise ApiError(503, "text archive is not configured")
+        row = self.texts.add({
+            "text": text[:20000],
+            "source": str(payload.get("source") or "manual")[:40],
+            "note": str(payload.get("note") or "")[:200],
+            "chars": len(text),
+        })
+        return json_response(200, {"text": row})
+
+    def route_text_delete(self, *, params: Dict[str, str], **_: Any) -> Response:
+        if self.texts is None or not self.texts.delete(params["*"]):
+            raise ApiError(404, "no such text")
+        return json_response(200, {"ok": True})
+
     def route_screenshot(self, **_: Any) -> Response:
         if self.detector is None:
             raise ApiError(503, "detector is not configured")
@@ -314,6 +370,7 @@ class AutomationApi:
         if not shot:
             raise ApiError(500, "screenshot failed; is the desktop running?")
         public_name = self.detector.share(shot)
+        self.note_shot(public_name, "manual")
         return json_response(200, {
             "path": shot,
             "url": self._artifact_url(shot),
@@ -362,6 +419,9 @@ class AutomationApi:
             raise ApiError(503, "detector is not configured")
         payload = self.read_json(body)
         snapshot = self.detector.detect(include_dom=bool(payload.get("includeDom", True)))
+        self.note_shot(snapshot.get("publicShot"), "detect",
+                       pageKey=snapshot.get("pageKey"), title=snapshot.get("title"),
+                       url=snapshot.get("url"))
         if snapshot.get("error"):
             return json_response(200, {"ok": False, "snapshot": snapshot})
         return json_response(200, {"ok": True, "snapshot": snapshot})
@@ -543,6 +603,14 @@ def _previous_reply_section(text: str) -> str:
     ])
 
 
+def _stamp(epoch: Any) -> str:
+    """Date and time of a logged event, so a report can be read as a timeline."""
+    try:
+        return time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(float(epoch)))
+    except (TypeError, ValueError):
+        return "-" * 19
+
+
 def _shot_url(name: Optional[str], public_base: str) -> str:
     if not name:
         return ""
@@ -622,8 +690,9 @@ def _report_section(status: Dict[str, Any], public_base: str = "") -> str:
                 detail = " | stderr: %s" % str(entry["stderr"])[:200].replace("\n", " ")
             elif entry.get("stdout"):
                 detail = " | stdout: %s" % str(entry["stdout"])[:200].replace("\n", " ")
-            lines.append("%s %s%s" % (entry.get("level", "").upper().ljust(5),
-                                      entry.get("message", "")[:200], detail))
+            stamp = _stamp(entry.get("t"))
+            lines.append("%s %-5s %s%s" % (stamp, entry.get("level", "").upper(),
+                                           entry.get("message", "")[:200], detail))
         lines.append("```")
 
     lines += ["", "اگر اجرا نیمه‌کاره مانده، اول علت همان گام را از این گزارش پیدا کن،",

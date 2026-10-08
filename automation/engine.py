@@ -252,11 +252,16 @@ class AutomationEngine:
     """Single-flow runner with pause/stop/confirmation support."""
 
     def __init__(self, backend: ControlBackend, data_dir: str, sleep=time.sleep,
-                 clock=time.time, cdp: Any = None, cdp_port: int = 9222):
+                 clock=time.time, cdp: Any = None, cdp_port: int = 9222,
+                 shots: Any = None, texts: Any = None):
         self.backend = backend
         self.data_dir = data_dir
         self._cdp = cdp
         self._cdp_port = cdp_port
+        # Indexes of what this session produced, so the panel can list every
+        # screenshot and every extracted text without rescanning the disk.
+        self._shots = shots
+        self._texts = texts
         self._cdp_warned = False
         # Screenshots are copied here so a run report can link them without a
         # token, which is what lets the model actually look at the page.
@@ -574,6 +579,19 @@ class AutomationEngine:
                      error=None if ok else (err or out or "rc=%d" % rc)[:400],
                      screenshot=shots.get("after"), text=captured,
                      shots=shots or None, image=image)
+
+        if self._shots is not None:
+            for role, name in shots.items():
+                self._shots.add({
+                    "name": name, "role": role, "runId": state.run_id,
+                    "stepIndex": index, "stepLabel": label, "stepType": kind,
+                    "image": image, "status": "ok" if ok else "error",
+                })
+        if captured is not None and self._texts is not None:
+            self._texts.add({
+                "text": captured, "source": "capture_text", "runId": state.run_id,
+                "stepIndex": index, "stepLabel": label, "chars": len(captured),
+            })
 
         if not ok:
             if step.get("continueOnError"):

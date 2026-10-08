@@ -36,6 +36,7 @@ from typing import Any, Dict, Optional, Tuple, Type
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from automation import cdp, schema  # noqa: E402
+from automation.archive import shot_archive, text_archive  # noqa: E402
 from automation.api import API_PREFIX, AutomationApi, FlowStore  # noqa: E402
 from automation.detect import Detector  # noqa: E402
 from automation.engine import AutomationEngine, ControlBackend  # noqa: E402
@@ -284,14 +285,18 @@ def build_api(args: argparse.Namespace) -> AutomationApi:
     # The engine reads page text through CDP when the debugging port answers,
     # so wait_for_text and capture_text see the real DOM instead of whatever
     # ctrl+a happens to select.
-    engine = AutomationEngine(backend, args.data_dir, cdp=cdp, cdp_port=args.cdp_port)
+    shots = shot_archive(args.data_dir)
+    texts = text_archive(args.data_dir)
+    engine = AutomationEngine(backend, args.data_dir, cdp=cdp, cdp_port=args.cdp_port,
+                              shots=shots, texts=texts)
     detector = Detector(backend, args.data_dir, viewport=dict(schema.DEFAULT_VIEWPORT),
                         cdp_port=args.cdp_port)
     guide_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_guide.md")
     return AutomationApi(
         engine, FlowStore(args.data_dir), detector,
         data_dir=args.data_dir, token=token, control_script=args.control_script,
-        viewport=dict(schema.DEFAULT_VIEWPORT), guide_path=guide_path)
+        viewport=dict(schema.DEFAULT_VIEWPORT), guide_path=guide_path,
+        shots=shots, texts=texts)
 
 
 def parse_args(argv: Optional[list] = None) -> argparse.Namespace:

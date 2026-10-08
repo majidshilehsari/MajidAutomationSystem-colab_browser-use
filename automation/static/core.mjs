@@ -330,6 +330,14 @@ export function formatElapsed(ms) {
   return `${Math.floor(seconds / 60)}m ${seconds % 60}s`;
 }
 
+export function formatDateTime(epochSeconds) {
+  if (!epochSeconds) return '--';
+  const d = new Date(epochSeconds * 1000);
+  const p = (n) => String(n).padStart(2, '0');
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} `
+    + `${p(d.getHours())}:${p(d.getMinutes())}:${p(d.getSeconds())}`;
+}
+
 export function formatTime(epochSeconds) {
   if (!epochSeconds) return '--';
   const date = new Date(epochSeconds * 1000);
@@ -343,7 +351,15 @@ export function formatTime(epochSeconds) {
 export const STRINGS = {
   fa: {
     title: 'اتوماسیون',
-    tabFlow: 'مراحل', tabRecord: 'ضبط', tabPages: 'صفحه‌ها', tabAi: 'هوش مصنوعی', tabLog: 'گزارش',
+    tabFlow: 'مراحل', tabRecord: 'ضبط', tabPages: 'صفحه‌ها',
+    tabShots: 'اسکرین‌شات‌ها', tabTexts: 'متون استخراج‌شده',
+    tabAi: 'هوش مصنوعی', tabLog: 'گزارش',
+    shotsEmpty: 'هنوز اسکرین‌شاتی گرفته نشده', shotsCount: 'اسکرین‌شات',
+    openShot: 'باز کردن تصویر', deleteShotConfirm: 'این رکورد اسکرین‌شات پاک شود؟',
+    textsEmpty: 'هنوز متنی ذخیره نشده', textsCount: 'متن',
+    noteHint: 'متنی را که می‌خواهی نگه داری اینجا بنویس و «ذخیره یادداشت» را بزن',
+    noteEmpty: 'متنی ننوشتی', saveNote: 'ذخیره یادداشت', saved: 'ذخیره شد',
+    deleteTextConfirm: 'این متن پاک شود؟', refresh: 'تازه‌سازی', copy: 'کپی',
     flowName: 'نام مجموعه', addStep: 'افزودن گام', stepsEmpty: 'هنوز گامی ندارید.',
     run: 'اجرا', pause: 'توقف موقت', resume: 'ادامه', stop: 'قطع', stepOver: 'یک گام',
     save: 'ذخیره', saveAs: 'ذخیره با نام', load: 'بارگذاری', delete: 'حذف', duplicate: 'تکرار',
@@ -392,7 +408,15 @@ export const STRINGS = {
   },
   en: {
     title: 'Automation',
-    tabFlow: 'Flow', tabRecord: 'Record', tabPages: 'Pages', tabAi: 'AI', tabLog: 'Log',
+    tabFlow: 'Flow', tabRecord: 'Record', tabPages: 'Pages',
+    tabShots: 'Screenshots', tabTexts: 'Extracted texts',
+    tabAi: 'AI', tabLog: 'Log',
+    shotsEmpty: 'No screenshots yet', shotsCount: 'screenshots',
+    openShot: 'Open the image', deleteShotConfirm: 'Delete this screenshot record?',
+    textsEmpty: 'No text saved yet', textsCount: 'texts',
+    noteHint: 'Write text you want to keep, then press Save note',
+    noteEmpty: 'You did not write anything', saveNote: 'Save note', saved: 'Saved',
+    deleteTextConfirm: 'Delete this text?', refresh: 'Refresh', copy: 'Copy',
     flowName: 'Flow name', addStep: 'Add step', stepsEmpty: 'No steps yet.',
     run: 'Run', pause: 'Pause', resume: 'Resume', stop: 'Stop', stepOver: 'Step',
     save: 'Save', saveAs: 'Save as', load: 'Load', delete: 'Delete', duplicate: 'Duplicate',
