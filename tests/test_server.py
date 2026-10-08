@@ -286,6 +286,27 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("هنوز اجرایی", body.decode("utf-8"))
 
+    def test_prompt_asks_for_summary_code_and_questions(self):
+        # The model must not just dump code: it says what it understood, gives
+        # the code, then raises questions or improvements.
+        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
+                                    body={"flow": {"name": "f", "steps": []}})
+        self.assertEqual(status, 200, body)
+        text = body.decode("utf-8")
+        for heading in ("چه فهمیدی", "کد", "سؤال و نکته"):
+            self.assertIn(heading, text)
+        self.assertLess(text.index("چه فهمیدی"), text.index("سؤال و نکته"),
+                        "the sections are out of order")
+
+    def test_prompt_hands_back_the_previous_answer(self):
+        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
+                                    body={"flow": {"name": "f", "steps": []},
+                                          "previousReply": "دور قبل این را گفتم"})
+        self.assertEqual(status, 200, body)
+        text = body.decode("utf-8")
+        self.assertIn("پاسخ قبلی تو", text)
+        self.assertIn("دور قبل این را گفتم", text)
+
     def test_prompt_carries_the_run_report(self):
         # A finished run must reach the prompt, so the model can diagnose it.
         flow = {"name": "rep", "steps": [{"type": "click", "x": 1, "y": 1}]}

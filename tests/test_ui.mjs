@@ -569,6 +569,109 @@ test('the flow tab can also copy the run report', async () => {
   }
 });
 
+test('clear all removes every step after asking', async () => {
+  const flow = {
+    name: 'f', viewport: { width: 1366, height: 768 },
+    settings: { defaultDelayAfterMs: 0, repeat: 1, stopOnError: true },
+    steps: [
+      { id: 'a', type: 'click', x: 1, y: 2 },
+      { id: 'b', type: 'click', x: 3, y: 4 },
+      { id: 'c', type: 'click', x: 5, y: 6 },
+    ],
+  };
+  const page = await mount({ flow });
+  try {
+    const pane = page.doc.getElementById('mas-tab-flow');
+    assert.equal(pane.querySelectorAll('.mas-step').length, 3);
+
+    const clear = Array.from(pane.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('پاک کردن همه'));
+    assert.ok(clear, 'no clear-all button');
+
+    // Refusing must keep the steps.
+    page.window.confirm = () => false;
+    clear.dispatchEvent(new page.window.Event('click'));
+    assert.equal(pane.querySelectorAll('.mas-step').length, 3);
+
+    page.window.confirm = () => true;
+    clear.dispatchEvent(new page.window.Event('click'));
+    assert.equal(pane.querySelectorAll('.mas-step').length, 0, 'steps were not cleared');
+    assert.ok(pane.querySelector('.mas-empty'), 'the empty hint should be back');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('stop reacts at once and reaches the server', async () => {
+  const page = await mount({ status: { runId: 'r', status: 'running', index: 0,
+    stepCount: 3, elapsedMs: 100, results: [], entries: [] } });
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+
+    const stop = page.doc.getElementById('mas-stop');
+    stop.dispatchEvent(new page.window.Event('click'));
+    assert.equal(stop.disabled, true, 'the button should lock while stopping');
+    assert.ok(stop.textContent.includes('…'), 'no busy feedback: ' + stop.textContent);
+    await page.wait(80);
+    assert.equal(stop.disabled, false, 'the button should unlock afterwards');
+    assert.ok(page.posts.some((p) => p.url.endsWith('/control')
+      && JSON.parse(p.body).action === 'stop'), '/control stop was never sent');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the AI answer is kept and handed back on the next prompt', async () => {
+  const page = await mount();
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[3];
+    aiTab.dispatchEvent(new page.window.Event('click'));
+    await page.wait(10);
+
+    const reply = page.doc.getElementById('mas-ai-reply');
+    assert.ok(reply, 'no AI reply box');
+    reply.value = '### ۱) چه فهمیدی\nباید جستجو کنم.\n```json\n'
+      + '{"name":"t","steps":[{"type":"click","x":5,"y":5}]}\n```\n'
+      + '### ۳) سؤال و نکته\nکدام نتیجه را کلیک کنم؟';
+    reply.dispatchEvent(new page.window.Event('input'));
+
+    const build = Array.from(page.doc.querySelectorAll('#mas-tab-ai button'))
+      .find((b) => b.textContent.includes('🧩'));
+    build.dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+
+    const sent = page.posts.filter((p) => p.url.endsWith('/prompt')).pop();
+    assert.ok(sent, '/prompt was never called');
+    assert.ok(JSON.parse(sent.body).previousReply.includes('چه فهمیدی'),
+      'the previous answer was not sent back');
+
+    // Importing shows the model's prose, not just its code.
+    const importBtn = Array.from(page.doc.querySelectorAll('#mas-tab-ai button'))
+      .find((b) => b.textContent.includes('وارد کردن'));
+    importBtn.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    aiTab.dispatchEvent(new page.window.Event('click'));
+    await page.wait(10);
+    const notes = page.doc.querySelector('.mas-ai-notes');
+    assert.ok(notes, 'the AI notes box did not appear');
+    assert.ok(notes.textContent.includes('باید جستجو کنم'), notes.textContent);
+    assert.ok(!notes.querySelector('pre').textContent.includes('```json'),
+      'the JSON block should be stripped from the notes');
+    assert.ok(notes.textContent.includes('کدام نتیجه را کلیک کنم؟'),
+      'the model question was lost');
+  } finally {
+    await page.cleanup();
+  }
+});
+
 test('record layer stays hidden until recording starts', async () => {
   const page = await mount();
   try {

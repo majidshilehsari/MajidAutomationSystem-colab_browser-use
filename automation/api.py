@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from . import schema
+from .engine import TERMINAL_STATES
 
 API_PREFIX = "/automation/api"
 
@@ -247,7 +248,21 @@ class AutomationApi:
         if action == "resume":
             return json_response(200, {"run": self.engine.resume()})
         if action == "stop":
-            return json_response(200, {"run": self.engine.stop()})
+            # Never 409: pressing Stop with nothing running must not look like a
+            # broken button.
+            try:
+                self.engine.stop()
+            except RuntimeError:
+                pass
+            # The snapshot taken at the instant of the request still says
+            # "running", which reads as the button doing nothing. Wait briefly
+            # for the runner to actually land.
+            run = self.engine.status()
+            deadline = time.time() + 3.0
+            while time.time() < deadline and run.get("status") not in TERMINAL_STATES:
+                time.sleep(0.05)
+                run = self.engine.status()
+            return json_response(200, {"run": run})
         if action == "confirm":
             approve = bool(payload.get("approve", False))
             return json_response(200, {"run": self.engine.confirm(approve)})
@@ -387,10 +402,13 @@ class AutomationApi:
             snapshot = self.detector.load(page_id)
         flow = payload.get("flow")
         request = payload.get("request")
+        previous = payload.get("previousReply")
         public_base = str(payload.get("publicBase") or "").rstrip("/")
         parts = [guide]
         if isinstance(request, str) and request.strip():
             parts.append(_request_section(request))
+        if isinstance(previous, str) and previous.strip():
+            parts.append(_previous_reply_section(previous))
         if snapshot:
             parts.append(_snapshot_section(snapshot, public_base))
         if flow:
@@ -512,6 +530,17 @@ _RESULT_FA = {
 }
 
 
+def _previous_reply_section(text: str) -> str:
+    return "\n".join([
+        "## پاسخ قبلی تو",
+        "",
+        "این جوابی است که دور قبل دادی. روی همان ادامه بده و از صفر شروع نکن؛",
+        "اگر کاربر ایرادی گرفته، همان بخش را اصلاح کن.",
+        "",
+        "> " + text.strip()[:6000].replace("\n", "\n> "),
+    ])
+
+
 def _report_section(status: Dict[str, Any]) -> str:
     """Everything that actually happened on the desktop, step by step.
 
@@ -578,15 +607,26 @@ def _reply_instructions() -> str:
     return "\n".join([
         "## چطور جواب بدهی",
         "",
-        "فقط یک شیء JSON و هیچ چیز دیگر برگردان، با این شکل:",
+        "جواب را دقیقاً در همین سه بخش و به همین ترتیب بده:",
+        "",
+        "### ۱) چه فهمیدی",
+        "در دو یا سه خط کوتاه بگو از درخواست کاربر و وضعیت صفحه چه برداشتی کردی",
+        "و قرار است چه کاری انجام شود. توضیح طولانی نده.",
+        "",
+        "### ۲) کد",
+        "یک شیء JSON داخل بلوک ```json و در این بخش هیچ چیز دیگر:",
         "",
         "```json",
         '{"name": "نام کوتاه", "steps": [{"type": "click", "x": 0, "y": 0}]}',
         "```",
         "",
+        "### ۳) سؤال و نکته",
+        "اگر چیزی مبهم است، یا راه بهتری به ذهنت می‌رسد، اینجا بپرس و پیشنهاد بده.",
+        "اگر نداری بنویس «چیزی نیست». به‌جای حدس زدن، بپرس.",
+        "",
         "قانون‌ها: مختصات، پیکسلِ دسکتاپ در viewport بالا است، نه درصد. برای متن",
         "از `paste` استفاده کن. روی هر گامی که ثبت/خرید/ارسال/حذف می‌کند",
-        '`"requiresConfirmation": true` بگذار. فیلد جدید اختراع نکن.',
+        '"requiresConfirmation": true" بگذار. فیلد جدید اختراع نکن.',
     ])
 
 

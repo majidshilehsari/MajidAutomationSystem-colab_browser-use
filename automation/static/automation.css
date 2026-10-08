@@ -775,3 +775,22 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
   body.mas-standalone #mas-root #mas-tab-flow > .mas-errors { grid-column: 1 / -1; }
   body.mas-standalone #mas-root #mas-tab-flow > .mas-editor { grid-column: 1; }
 }
+
+/* What the model said around its code: summary and questions. */
+#mas-root .mas-ai-notes {
+  margin: 10px 0;
+  padding: 10px 12px;
+  border-left: 3px solid #38bdf8;
+  border-radius: 6px;
+  background: rgba(56, 189, 248, 0.08);
+}
+
+#mas-root .mas-ai-notes pre {
+  margin: 6px 0 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1.7;
+  color: #cbd5e1;
+}

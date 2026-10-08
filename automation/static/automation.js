@@ -15,7 +15,7 @@ import {
 
 const LS = {
   token: 'mas.token', lang: 'mas.lang', flow: 'mas.flow', panel: 'mas.panelOpen',
-  request: 'mas.userRequest',
+  request: 'mas.userRequest', reply: 'mas.aiReply',
 };
 
 const state = {
@@ -43,6 +43,8 @@ const state = {
   runSeenRunAt: 0,
   tokenRejected: false,
   userRequest: localStorage.getItem(LS.request) || '',
+  aiReply: localStorage.getItem(LS.reply) || '',
+  aiNotes: '',
 };
 
 function loadFlow() {
@@ -208,7 +210,7 @@ function buildPanel() {
         }),
         el('button', {
           id: 'mas-stop', class: 'mas-btn', type: 'button', text: '⏹',
-          onClick: () => control('stop'),
+          title: t('stop'), onClick: stopRun,
         }),
         el('span', { id: 'mas-progress', class: 'mas-progress', text: '0/0' }),
       ]),
@@ -442,6 +444,7 @@ function renderFlow() {
     button(t('load'), loadFlowDialog),
     button('JSON ⇩', exportJson),
     button('📋 ' + t('copyReport'), () => copyFrom('/report')),
+    button('🗑 ' + t('clearAll'), clearAllSteps, { class: 'mas-btn mas-danger' }),
   ]);
 
   const errorBox = errors.length
@@ -452,6 +455,23 @@ function renderFlow() {
     : null;
 
   replace(pane, nameRow, addRow, errorBox, list, settingsBox, ioRow);
+}
+
+/** Delete every step, after asking. One at a time gets old by step ten. */
+function clearAllSteps() {
+  if (!state.flow.steps.length) {
+    toast(t('nothingToClear'), 'warn');
+    return;
+  }
+  const message = t('clearAllConfirm').replace('{n}', String(state.flow.steps.length));
+  if (!window.confirm(message)) return;
+  state.flow.steps = [];
+  state.openStepId = null;
+  state.keyBuffer = { step: null, timer: null };
+  persistFlow();
+  renderFlow();
+  renderRecord();
+  toast(t('clearedAll'), 'ok');
 }
 
 function stepRow(step, index, outcomes = stepOutcomes()) {
@@ -644,6 +664,24 @@ async function runFlow() {
     refreshStatus();
   } catch (error) {
     toast(error.message, 'error');
+  }
+}
+
+/** Stop with immediate feedback: the button reacts before the server answers. */
+async function stopRun() {
+  const stop = document.getElementById('mas-stop');
+  if (stop) {
+    stop.disabled = true;
+    stop.textContent = '⏹ …';
+  }
+  try {
+    await control('stop');
+    await refreshStatus();
+  } finally {
+    if (stop) {
+      stop.disabled = false;
+      stop.textContent = '⏹';
+    }
   }
 }
 
@@ -1202,7 +1240,16 @@ async function openPage(id) {
 
 function renderAi() {
   const pane = document.getElementById('mas-tab-ai');
-  const importBox = el('textarea', { class: 'mas-input mas-area', rows: '8', placeholder: t('importHint') });
+  // The model's whole answer. Kept so the next prompt can hand it back, which
+  // is what turns one shot into a conversation.
+  const importBox = el('textarea', {
+    id: 'mas-ai-reply', class: 'mas-input mas-area', rows: '10',
+    value: state.aiReply, placeholder: t('importHint'),
+    onInput: (event) => {
+      state.aiReply = event.target.value;
+      try { localStorage.setItem(LS.reply, state.aiReply); } catch (_) { /* quota */ }
+    },
+  });
   // What the human wants done on this page. Kept in state so switching tabs
   // does not lose it, and sent to /prompt as part of the prompt.
   const requestBox = el('textarea', {
@@ -1234,10 +1281,15 @@ function renderAi() {
     ]),
     el('div', { class: 'mas-row' }, [
       button(t('importBtn'), async () => {
-        const parsed = extractJson(importBox.value);
-        if (!parsed) { toast('JSON?', 'error'); return; }
+        const raw = importBox.value;
+        // Show what the model said even when its code turns out to be unusable:
+        // its summary and questions are the point of the exchange.
+        state.aiNotes = aiNotesFrom(raw);
+        const parsed = extractJson(raw);
+        if (!parsed) { renderAi(); toast('JSON?', 'error'); return; }
         const { flow, errors } = normaliseImportedFlow(parsed, state.flow.viewport);
         if (!flow || !flow.steps.length) {
+          renderAi();
           toast(errors.join(' | '), 'error');
           return;
         }
@@ -1249,8 +1301,22 @@ function renderAi() {
       }, { class: 'mas-btn mas-primary' }),
     ]),
     importBox,
+    state.aiNotes
+      ? el('div', { class: 'mas-ai-notes' }, [
+        el('b', { text: '💬 ' + t('aiNotes') }),
+        el('pre', { text: state.aiNotes }),
+      ])
+      : null,
     el('p', { class: 'mas-hint', text: `${state.flow.steps.length} steps · ${state.flow.name}` }),
   );
+}
+
+/** The model's prose with the JSON block taken out: its summary and questions. */
+function aiNotesFrom(raw) {
+  return String(raw || '')
+    .replace(/```json[\s\S]*?```/gi, '')
+    .replace(/```[\s\S]*?```/g, '')
+    .trim();
 }
 
 async function copyFrom(path) {
@@ -1270,6 +1336,8 @@ async function buildPrompt() {
   const body = { flow: state.flow, publicBase: window.location.origin };
   if (page) body.pageId = page.id;
   if (state.userRequest && state.userRequest.trim()) body.request = state.userRequest;
+  // Hand the model its own previous answer back, so it can iterate on it.
+  if (state.aiReply && state.aiReply.trim()) body.previousReply = state.aiReply;
   if (!page) toast(t('aiRequestNone'), 'warn');
   try {
     const response = await fetch(API_PREFIX + '/prompt', {
