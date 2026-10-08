@@ -353,6 +353,10 @@ export const STRINGS = {
     aiRequestHint: 'مثلاً: روی اولین نتیجه کلیک کن، عنوانش را در فیلد جستجو بنویس و Enter بزن. این متن داخل پرامپت می‌رود.',
     aiRequestNone: 'هنوز صفحه‌ای شناسایی نشده؛ اول «شناسایی صفحه» را بزن.',
     openVnc: 'نمای مرورگر', openPanel: 'پنل بزرگ',
+    copyReport: 'کپی گزارش اجرا', nowRunning: 'در حال اجرا:',
+    stateRunning: 'در حال اجرا', statePending: 'هنوز اجرا نشده',
+    stateOk: 'موفق', stateError: 'ناموفق', stateSkipped: 'رد شده',
+    stateIgnored: 'خطا نادیده گرفته شد',
     recordStandalone: 'ضبطِ کلیک به نمای مرورگر نیاز دارد، چون باید روی خودِ صفحه کلیک کنی. '
       + 'برای ضبط، نمای مرورگر را باز کن؛ بقیه‌ی بخش‌ها (ساخت، ویرایش، اجرا، ذخیره، '
       + 'شناسایی صفحه و هوش مصنوعی) همین‌جا کامل کار می‌کنند و همان مرورگر را کنترل می‌کنند.',
@@ -390,6 +394,10 @@ export const STRINGS = {
     aiRequestHint: 'e.g. click the first result, type its title into the search box and press Enter. This text goes into the prompt.',
     aiRequestNone: 'No page detected yet; press Detect first.',
     openVnc: 'Browser view', openPanel: 'Full panel',
+    copyReport: 'Copy run report', nowRunning: 'Running:',
+    stateRunning: 'running', statePending: 'not run yet',
+    stateOk: 'ok', stateError: 'failed', stateSkipped: 'skipped',
+    stateIgnored: 'error ignored',
     recordStandalone: 'Recording clicks needs the browser view, because you have to click '
       + 'on the page itself. Open the browser view to record; everything else here '
       + '(build, edit, run, save, detect, AI) works and drives the same browser.',

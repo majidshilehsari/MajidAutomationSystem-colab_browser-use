@@ -34,6 +34,13 @@ const state = {
   keyBuffer: { step: null, timer: null },
   logOffset: 0,
   lastRenderedIndex: -1,
+  lastResultsSig: '',
+  // Timing for the step that is running right now, measured in the browser so a
+  // clock difference with the Colab VM cannot make the counter go backwards.
+  runSeenIndex: -1,
+  runSeenAt: 0,
+  runSeenRun: null,
+  runSeenRunAt: 0,
   tokenRejected: false,
   userRequest: localStorage.getItem(LS.request) || '',
 };
@@ -189,6 +196,7 @@ function buildPanel() {
       el('section', { id: 'mas-tab-log', class: 'mas-tabpane', hidden: true }),
     ]),
     el('div', { class: 'mas-foot' }, [
+      el('div', { id: 'mas-runpanel', class: 'mas-runpanel', hidden: true }),
       el('div', { class: 'mas-runbar' }, [
         el('button', {
           id: 'mas-run', class: 'mas-btn mas-primary', type: 'button', text: '▶ ' + t('run'),
@@ -279,6 +287,90 @@ function rerenderAll() {
  * Flow tab
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Run progress: which step passed, which one is running, for how long
+ * ------------------------------------------------------------------ */
+
+const STATE_ICONS = { ok: '✓', error: '✕', skipped: '⊘', ignored: '⚠' };
+
+/** Outcomes of the pass on screen, keyed by step index. */
+function stepOutcomes() {
+  const status = state.status || {};
+  const pass = status.passIndex || 1;
+  const map = new Map();
+  (status.results || []).forEach((row) => {
+    if ((row.passIndex || 1) === pass) map.set(row.index, row);
+  });
+  return map;
+}
+
+function finishedCount() {
+  const status = state.status || {};
+  const pass = status.passIndex || 1;
+  return (status.results || []).filter((row) => (row.passIndex || 1) === pass).length;
+}
+
+/** Seconds the running step has been going, measured here rather than against
+ *  the server clock, so a skew cannot make the counter jump or go negative. */
+function currentStepSeconds() {
+  if (!isRunning()) return 0;
+  if (state.status.index !== state.runSeenIndex) {
+    state.runSeenIndex = state.status.index;
+    state.runSeenAt = Date.now();
+  }
+  return (Date.now() - state.runSeenAt) / 1000;
+}
+
+function formatSeconds(seconds) {
+  if (!Number.isFinite(seconds) || seconds < 0) return '--';
+  if (seconds < 10) return `${seconds.toFixed(1)}s`;
+  if (seconds < 60) return `${Math.round(seconds)}s`;
+  return `${Math.floor(seconds / 60)}m ${Math.round(seconds) % 60}s`;
+}
+
+function stepBadge(index, outcomes) {
+  if (isRunning() && state.status.index === index) {
+    return el('span', { class: 'mas-state is-running', title: t('stateRunning') }, [
+      el('span', { text: '▶' }),
+      el('span', {
+        class: 'mas-timer', id: 'mas-timer', text: formatSeconds(currentStepSeconds()),
+      }),
+    ]);
+  }
+  const row = outcomes.get(index);
+  if (!row) {
+    return el('span', { class: 'mas-state is-pending', text: '·', title: t('statePending') });
+  }
+  const time = typeof row.durationMs === 'number' ? `${row.durationMs}ms` : '';
+  return el('span', {
+    class: 'mas-state is-' + row.status,
+    text: [STATE_ICONS[row.status] || '·', time].filter(Boolean).join(' '),
+    title: row.error || t('state' + row.status[0].toUpperCase() + row.status.slice(1)),
+  });
+}
+
+/** Total run time, anchored to the browser clock the first time we see a run. */
+function runSeconds() {
+  const status = state.status || {};
+  if (!status.runId) return 0;
+  if (status.runId !== state.runSeenRun) {
+    state.runSeenRun = status.runId;
+    state.runSeenRunAt = Date.now() - (status.elapsedMs || 0);
+  }
+  if (!isRunning()) return (status.elapsedMs || 0) / 1000;
+  return (Date.now() - state.runSeenRunAt) / 1000;
+}
+
+/** Refresh only the ticking numbers, so no editor closes under the user. */
+function tickTimers() {
+  const step = document.getElementById('mas-timer');
+  if (step) step.textContent = formatSeconds(currentStepSeconds());
+  const total = document.getElementById('mas-run-clock');
+  if (total) total.textContent = formatSeconds(runSeconds());
+  const now = document.getElementById('mas-run-now');
+  if (now) now.textContent = formatSeconds(currentStepSeconds());
+}
+
 function renderFlow() {
   const pane = document.getElementById('mas-tab-flow');
   const errors = validateFlow(state.flow);
@@ -349,6 +441,7 @@ function renderFlow() {
     }),
     button(t('load'), loadFlowDialog),
     button('JSON ⇩', exportJson),
+    button('📋 ' + t('copyReport'), () => copyFrom('/report')),
   ]);
 
   const errorBox = errors.length
@@ -361,7 +454,7 @@ function renderFlow() {
   replace(pane, nameRow, addRow, errorBox, list, settingsBox, ioRow);
 }
 
-function stepRow(step, index) {
+function stepRow(step, index, outcomes = stepOutcomes()) {
   const row = el('li', {
     class: 'mas-step' + (state.status.index === index && isRunning() ? ' is-current' : ''),
     draggable: 'true', dataset: { id: step.id },
@@ -387,6 +480,7 @@ function stepRow(step, index) {
       type: 'checkbox', checked: step.enabled !== false, title: 'enabled',
       onChange: (event) => { step.enabled = event.target.checked; persistFlow(); },
     }),
+    stepBadge(index, outcomes),
     el('button', {
       class: 'mas-step-label', type: 'button', text: step.label || labelFor(step),
       title: step.note || '',
@@ -621,6 +715,14 @@ async function refreshStatus() {
     state.lastRenderedIndex = state.status.index;
     renderFlow();
   }
+  // Once a run has finished the highlight stops moving, but the badges still
+  // have to catch up, otherwise every step keeps looking "not run yet".
+  const sig = `${state.status.runId || ''}:${(state.status.results || []).length}`;
+  if (currentTab() === 'flow' && sig !== state.lastResultsSig) {
+    state.lastResultsSig = sig;
+    // Never close an editor the human has open; the badges catch up later.
+    if (!state.openStepId) renderFlow();
+  }
 }
 
 function renderTokenBar(show, detail = '') {
@@ -671,6 +773,53 @@ function renderStatus() {
   }
   const run = document.getElementById('mas-run');
   if (run) run.disabled = isRunning();
+  renderRunPanel(raw, label);
+}
+
+/** The always-visible run board: progress, clock, current step, report. */
+function renderRunPanel(raw, label) {
+  const panel = document.getElementById('mas-runpanel');
+  if (!panel) return;
+  const status = state.status;
+  if (!status.runId && !isRunning()) {
+    panel.hidden = true;
+    return;
+  }
+  const total = status.stepCount || 0;
+  const done = finishedCount();
+  const failed = (status.results || []).filter((r) => r.status === 'error').length;
+  const pct = total ? Math.min(100, Math.round((done / total) * 100)) : 0;
+  const current = status.currentStep
+    ? (status.currentStep.label || status.currentStep.type) : '';
+
+  panel.hidden = false;
+  replace(panel,
+    el('div', { class: 'mas-runpanel-head' }, [
+      el('span', { class: 'mas-pill mas-pill-' + raw, text: label }),
+      el('span', { class: 'mas-clock', id: 'mas-run-clock', text: formatSeconds(runSeconds()) }),
+      el('span', {
+        class: 'mas-count',
+        text: `${done}/${total}${failed ? ` · ${failed} ✕` : ''}`,
+      }),
+      el('span', { class: 'mas-spacer' }),
+      button('📋 ' + t('copyReport'), () => copyFrom('/report')),
+    ]),
+    el('div', { class: 'mas-bar' }, [
+      el('div', {
+        class: 'mas-bar-fill' + (raw === 'error' ? ' is-error' : ''),
+        style: `width:${pct}%`,
+      }),
+    ]),
+    compact([
+      isRunning() && current ? el('div', { class: 'mas-runpanel-now' }, [
+        el('span', { text: t('nowRunning') }),
+        el('b', { text: current }),
+        el('span', { class: 'mas-now-timer', id: 'mas-run-now', text: formatSeconds(currentStepSeconds()) }),
+      ]) : null,
+      status.error ? el('div', { class: 'mas-runpanel-error', text: status.error }) : null,
+    ]),
+  );
+  tickTimers();
 }
 
 /* ------------------------------------------------------------------ *
@@ -1202,6 +1351,8 @@ function start() {
   renderStatus();
   refreshStatus();
   setInterval(refreshStatus, 900);
+  // Counters tick on their own so the numbers move smoothly between polls.
+  setInterval(tickTimers, 1000);
   window.addEventListener('resize', () => { if (state.recording) positionRecordLayer(); });
   window.addEventListener('scroll', () => { if (state.recording) positionRecordLayer(); }, true);
   setInterval(() => { if (state.recording) positionRecordLayer(); }, 1000);

@@ -256,6 +256,52 @@ class ServerIntegrationTest(unittest.TestCase):
                 time.sleep(0.01)
             self.engine._state = None
 
+    def test_report_says_which_step_stopped_the_run(self):
+        from automation.api import _report_section
+        status = {
+            "runId": "r1", "status": "error", "index": 2, "passIndex": 1,
+            "stepCount": 4, "elapsedMs": 12340,
+            "error": "step #2 (type) failed with rc=124: timed out",
+            "results": [
+                {"index": 0, "passIndex": 1, "type": "click",
+                 "label": "click 100,200", "status": "ok", "durationMs": 42, "error": None},
+                {"index": 1, "passIndex": 1, "type": "paste",
+                 "label": 'paste "سلام"', "status": "ok", "durationMs": 88, "error": None},
+                {"index": 2, "passIndex": 1, "type": "type", "label": "type 'x'",
+                 "status": "error", "durationMs": 60000, "error": "timed out after 60s"},
+            ],
+            "entries": [{"t": 1, "level": "error", "message": "type -> rc=124",
+                         "stderr": "timed out"}],
+        }
+        text = _report_section(status)
+        self.assertIn("## گزارش اجرای سیستم", text)
+        self.assertIn("3 گام اجرا شده", text)
+        self.assertIn("timed out after 60s", text)
+        # The model must be told exactly where it stopped.
+        self.assertIn("اجرا روی گام **#2", text)
+        self.assertIn("| 1 |", text)  # the per-step table
+
+    def test_report_endpoint_answers_when_nothing_has_run(self):
+        status, body = http_request(self.url("/automation/api/report"))
+        self.assertEqual(status, 200)
+        self.assertIn("هنوز اجرایی", body.decode("utf-8"))
+
+    def test_prompt_carries_the_run_report(self):
+        # A finished run must reach the prompt, so the model can diagnose it.
+        flow = {"name": "rep", "steps": [{"type": "click", "x": 1, "y": 1}]}
+        http_request(self.url("/automation/api/run"), method="POST", body={"flow": flow})
+        try:
+            for _ in range(200):
+                if not self.engine.busy():
+                    break
+                time.sleep(0.01)
+            status, body = http_request(self.url("/automation/api/prompt"),
+                                        method="POST", body={"flow": flow})
+            self.assertEqual(status, 200, body)
+            self.assertIn("گزارش اجرای سیستم", body.decode("utf-8"))
+        finally:
+            self.engine._state = None
+
     def test_prompt_carries_the_user_request_and_the_shot_link(self):
         pages = os.path.join(self.data_dir, "pages")
         os.makedirs(pages, exist_ok=True)

@@ -153,6 +153,7 @@ class AutomationApi:
             ("GET", "/pages", self.route_pages),
             ("GET", "/pages/*", self.route_page_get),
             ("GET", "/guide", self.route_guide),
+            ("GET", "/report", self.route_report),
             ("POST", "/prompt", self.route_prompt),
         ]
 
@@ -369,6 +370,11 @@ class AutomationApi:
                 return text_response(200, handle.read(), "text/markdown; charset=utf-8")
         return text_response(200, _builtin_guide(self.viewport), "text/markdown; charset=utf-8")
 
+    def route_report(self, **_: Any) -> Response:
+        """The last run, step by step, as the AI sees it."""
+        return text_response(200, _report_section(self.engine.status()) or
+                             "هنوز اجرایی ثبت نشده است.")
+
     def route_prompt(self, *, body: bytes = b"", **_: Any) -> Response:
         payload = self.read_json(body)
         guide = _builtin_guide(self.viewport)
@@ -390,6 +396,9 @@ class AutomationApi:
         if flow:
             normalized, errors = schema.validate_flow(flow)
             parts.append(_flow_section(normalized if not errors else flow, errors))
+        report = _report_section(self.engine.status())
+        if report:
+            parts.append(report)
         parts.append(_reply_instructions())
         return text_response(200, "\n\n---\n\n".join(parts))
 
@@ -490,6 +499,78 @@ def _flow_section(flow: Dict[str, Any], errors: List[str]) -> str:
         lines.append("")
         lines.append("ایرادهای اعتبارسنجی جریان فعلی:")
         lines.extend("- %s" % e for e in errors)
+    return "\n".join(lines)
+
+
+_STATUS_FA = {
+    "running": "در حال اجرا", "paused": "متوقف موقت", "waiting": "منتظر تأیید انسان",
+    "done": "موفق", "error": "خطا", "stopped": "توقف دستی", "cancelled": "لغو شده",
+    "idle": "بی‌کار",
+}
+_RESULT_FA = {
+    "ok": "موفق", "error": "ناموفق", "skipped": "رد شده", "ignored": "خطا نادیده گرفته شد",
+}
+
+
+def _report_section(status: Dict[str, Any]) -> str:
+    """Everything that actually happened on the desktop, step by step.
+
+    This is the part that lets the model diagnose a run that stopped halfway:
+    which step passed, which one failed, how long each took, and what the
+    control script said.
+    """
+    if not status or not status.get("results") and not status.get("entries"):
+        return ""
+    results = status.get("results") or []
+    total = status.get("stepCount") or 0
+    elapsed = int(status.get("elapsedMs") or 0) / 1000.0
+    state = _STATUS_FA.get(status.get("status"), status.get("status"))
+
+    lines = ["## گزارش اجرای سیستم", ""]
+    lines.append("وضعیت: **%s** · %d گام در جریان · %d گام اجرا شده · %.1f ثانیه"
+                 % (state, total, len(results), elapsed))
+    if status.get("error"):
+        lines.append("")
+        lines.append("خطا: `%s`" % status["error"])
+    if status.get("awaitingConfirmation"):
+        conf = status["awaitingConfirmation"]
+        lines.append("")
+        lines.append("منتظر تأیید انسان قبل از گام #%s (%s)."
+                     % (conf.get("index"), conf.get("label")))
+
+    if results:
+        lines += ["", "| # | گام | نوع | نتیجه | زمان | خطا |",
+                  "|---|------|------|-------|------|------|"]
+        for row in results:
+            outcome = _RESULT_FA.get(row.get("status"), row.get("status"))
+            duration = row.get("durationMs")
+            duration = "%dms" % duration if isinstance(duration, int) else "-"
+            error = (row.get("error") or "").replace("|", "/").replace("\n", " ")[:160]
+            lines.append("| %s | %s | %s | %s | %s | %s |" % (
+                row.get("index"), (row.get("label") or "")[:60].replace("|", "/"),
+                row.get("type"), outcome, duration, error or "-"))
+
+        last = results[-1]
+        if status.get("status") in ("error", "stopped") and last:
+            lines += ["", "اجرا روی گام **#%s (%s)** متوقف شد؛ گام‌های بعد از آن اجرا نشدند."
+                      % (last.get("index"), last.get("label"))]
+
+    entries = [e for e in (status.get("entries") or [])
+               if e.get("level") in ("error", "warn", "ok", "step")][-40:]
+    if entries:
+        lines += ["", "### رویدادهای ثبت‌شده", "", "```"]
+        for entry in entries:
+            detail = ""
+            if entry.get("stderr"):
+                detail = " | stderr: %s" % str(entry["stderr"])[:200].replace("\n", " ")
+            elif entry.get("stdout"):
+                detail = " | stdout: %s" % str(entry["stdout"])[:200].replace("\n", " ")
+            lines.append("%s %s%s" % (entry.get("level", "").upper().ljust(5),
+                                      entry.get("message", "")[:200], detail))
+        lines.append("```")
+
+    lines += ["", "اگر اجرا نیمه‌کاره مانده، اول علت همان گام را از این گزارش پیدا کن،",
+              "بعد جریان را اصلاح کن؛ از گامی که موفق بوده دوباره شروع نکن."]
     return "\n".join(lines)
 
 

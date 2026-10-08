@@ -463,6 +463,44 @@ if __name__ == "__main__":
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 
+class RunResultsTest(EngineTestBase):
+    """The per-step result rows are what the AI reads to find the failure."""
+
+    def test_every_executed_step_gets_a_result_row(self):
+        self.backend.fail_on = {"type"}
+        status = self.run_to_completion(build_flow([
+            {"type": "click", "x": 1, "y": 2},
+            {"type": "paste", "text": "سلام"},
+            {"type": "type", "text": "boom"},
+            {"type": "click", "x": 3, "y": 4},
+        ]))
+
+        rows = status["results"]
+        self.assertEqual([r["index"] for r in rows], [0, 1, 2])
+        self.assertEqual([r["status"] for r in rows], ["ok", "ok", "error"])
+        self.assertEqual(rows[2]["type"], "type")
+        self.assertTrue(rows[2]["error"], "the failing step must say why")
+        self.assertIsInstance(rows[0]["durationMs"], int)
+        self.assertEqual(status["status"], "error")
+
+    def test_disabled_steps_are_recorded_as_skipped(self):
+        status = self.run_to_completion(build_flow([
+            {"type": "click", "x": 1, "y": 2, "enabled": False},
+            {"type": "click", "x": 3, "y": 4},
+        ]))
+        self.assertEqual([r["status"] for r in status["results"]], ["skipped", "ok"])
+
+    def test_summary_on_disk_carries_the_rows(self):
+        status = self.run_to_completion(build_flow([{"type": "click", "x": 1, "y": 2}]))
+        path = os.path.join(self.tmp, "runs", status["runId"], "summary.json")
+        self.assertTrue(os.path.exists(path), "summary.json was not written")
+        with open(path, encoding="utf-8") as handle:
+            summary = json.load(handle)
+        self.assertEqual(summary["executed"], 1)
+        self.assertEqual(summary["failed"], 0)
+        self.assertEqual(len(summary["results"]), 1)
+
+
 class RealProcessTest(unittest.TestCase):
     """Runs the real ControlBackend against real scripts, no fakes.
 

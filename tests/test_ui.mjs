@@ -23,7 +23,7 @@ const NOVNC_HTML = `<!doctype html><html><head><style>${CSS}</style></head><body
 const VALID_TOKEN = 'tok123';
 
 /** Stands in for the server: /info is open, everything else needs the token. */
-function fakeApi(requests, posts = []) {
+function fakeApi(requests, posts = [], statusPayload = null) {
   return async (url, options = {}) => {
     const path = String(url);
     requests.push(path);
@@ -41,14 +41,15 @@ function fakeApi(requests, posts = []) {
                text: async () => '{"error":"missing or wrong X-Automation-Token header"}' };
     }
     if (path.endsWith('/status')) {
-      return json({ runId: null, status: 'idle', entries: [], history: [] });
+      return json(statusPayload || { runId: null, status: 'idle', entries: [], history: [] });
     }
     return json({});
   };
 }
 
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
-async function mount({ readyStateComplete = true, standalone = false } = {}) {
+async function mount({ readyStateComplete = true, standalone = false, flow = null,
+                      status: statusPayload = null } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -76,7 +77,7 @@ async function mount({ readyStateComplete = true, standalone = false } = {}) {
     CustomEvent: window.CustomEvent, getComputedStyle: window.getComputedStyle.bind(window),
     requestAnimationFrame: window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window) : (fn) => setTimeout(fn, 0),
-    fetch: fakeApi(requests, posts),
+    fetch: fakeApi(requests, posts, statusPayload),
     // Tracked so cleanup() can stop the sidebar's poll loops, otherwise the
     // test process never exits. Bound to the originals: referencing the global
     // here would recurse into this very wrapper.
@@ -92,6 +93,9 @@ async function mount({ readyStateComplete = true, standalone = false } = {}) {
   }
 
   // A cache-busting query gives every mount its own module instance.
+  // The sidebar reads its flow from localStorage at import time, so seed first.
+  if (flow) window.localStorage.setItem('mas.flow', JSON.stringify(flow));
+
   const moduleUrl = `../automation/static/automation.js?run=${Math.random()}`;
   let importError = null;
   try {
@@ -108,6 +112,15 @@ async function mount({ readyStateComplete = true, standalone = false } = {}) {
     dom, window, errors, importError, requests, posts,
     doc: window.document,
     wait: (ms = 30) => new Promise((resolve) => setTimeout(resolve, ms)),
+    /** Poll until fn() is true, so tests do not flake on a slow first poll. */
+    async until(fn, ms = 2000) {
+      const deadline = Date.now() + ms;
+      while (Date.now() < deadline) {
+        if (fn()) return true;
+        await new Promise((resolve) => setTimeout(resolve, 15));
+      }
+      return fn();
+    },
     display: (selector) => window.getComputedStyle(window.document.querySelector(selector)).display,
     byText: (selector, text) => Array.from(window.document.querySelectorAll(selector))
       .find((node) => node.textContent.trim() === text),
@@ -477,6 +490,80 @@ test('inside noVNC the sidebar offers the dedicated panel', async () => {
     const link = page.doc.querySelector('a[href="automation/panel.html"]');
     assert.ok(link, 'no link to the dedicated panel');
     assert.equal(link.getAttribute('target'), '_blank');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('a finished run shows the board, per step badges and a report button', async () => {
+  // The user's case: three steps ran, the third failed, the rest never ran.
+  const status = {
+    runId: 'r1', status: 'error', index: 2, passIndex: 1, stepCount: 4,
+    elapsedMs: 12340,
+    error: "step #2 (type 'x') failed with rc=124: timed out",
+    currentStep: null, awaitingConfirmation: null,
+    results: [
+      { index: 0, passIndex: 1, type: 'click', label: 'click 100,200', status: 'ok', durationMs: 42 },
+      { index: 1, passIndex: 1, type: 'paste', label: 'paste "سلام"', status: 'ok', durationMs: 88 },
+      { index: 2, passIndex: 1, type: 'type', label: "type 'x'", status: 'error',
+        durationMs: 60000, error: 'timed out after 60s' },
+    ],
+    entries: [],
+  };
+  const flow = {
+    name: 'جریان تست',
+    viewport: { width: 1366, height: 768 },
+    settings: {
+      defaultDelayAfterMs: 0, screenshotAfterEachStep: false, stopOnError: true,
+      repeat: 1, allowShellSteps: false, stepTimeoutMs: 60000,
+    },
+    steps: [
+      { id: 'a', type: 'click', x: 100, y: 200, label: 'click 100,200' },
+      { id: 'b', type: 'paste', text: 'سلام', label: 'paste "سلام"' },
+      { id: 'c', type: 'type', text: 'x', label: "type 'x'" },
+      { id: 'd', type: 'click', x: 5, y: 6, label: 'click 5,6' },
+    ],
+  };
+  const page = await mount({ status, flow });
+  try {
+    // The poll only reaches /status once a token is set.
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    const panel = page.doc.getElementById('mas-runpanel');
+    assert.ok(await page.until(() => !panel.hidden), 'the run board never appeared');
+    assert.ok(panel.querySelector('.mas-pill-error'), 'the status pill should read error');
+    assert.ok(panel.querySelector('#mas-run-clock'), 'no clock');
+    assert.ok(panel.querySelector('.mas-bar-fill'), 'no progress bar');
+    assert.ok(panel.textContent.includes('3/4'), 'expected 3/4 done: ' + panel.textContent);
+    assert.ok(panel.textContent.includes('timed out'), 'the error should be shown');
+
+    const report = Array.from(panel.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('گزارش'));
+    assert.ok(report, 'no copy-report button');
+
+    const badges = Array.from(page.doc.querySelectorAll('.mas-step .mas-state'))
+      .map((n) => n.className.replace('mas-state ', ''));
+    assert.deepEqual(page.errors, [], 'the sidebar threw: ' + page.errors.join(' | '));
+    assert.deepEqual(badges, ['is-ok', 'is-ok', 'is-error', 'is-pending'], badges.join(','));
+
+    const failed = page.doc.querySelectorAll('.mas-step .mas-state')[2];
+    assert.ok(failed.textContent.includes('60000ms'), failed.textContent);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the flow tab can also copy the run report', async () => {
+  const page = await mount();
+  try {
+    const pane = page.doc.getElementById('mas-tab-flow');
+    const button = Array.from(pane.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('کپی گزارش اجرا'));
+    assert.ok(button, 'no report button in the flow tab');
+    button.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    assert.ok(page.requests.some((u) => u.endsWith('/report')), '/report was never fetched');
   } finally {
     await page.cleanup();
   }

@@ -218,6 +218,10 @@ class RunState:
         self.index = 0
         self.pass_index = 1
         self.entries: List[Dict[str, Any]] = []
+        # One row per executed step, so a report can be built without parsing
+        # the human-readable log. This is what the AI reads to see where a run
+        # stopped and why.
+        self.results: List[Dict[str, Any]] = []
         self.started_at = time.time()
         self.finished_at: Optional[float] = None
         self.error: Optional[str] = None
@@ -239,6 +243,7 @@ class RunState:
             "elapsedMs": int(((self.finished_at or time.time()) - self.started_at) * 1000),
             "error": self.error,
             "entries": self.entries[-200:],
+            "results": self.results[-300:],
         }
 
 
@@ -341,6 +346,29 @@ class AutomationEngine:
             if len(self._state.entries) > 2000:
                 self._state.entries = self._state.entries[-1500:]
 
+    def _record(self, index: int, step: Dict[str, Any], status: str,
+                started_at: Optional[float] = None, duration_ms: int = 0,
+                rc: Optional[int] = None, error: Optional[str] = None,
+                screenshot: Optional[str] = None) -> None:
+        """Append one machine-readable row about a step's outcome."""
+        with self._lock:
+            assert self._state is not None
+            self._state.results.append({
+                "index": index,
+                "passIndex": self._state.pass_index,
+                "type": step.get("type"),
+                "label": step.get("label") or step.get("type"),
+                "stepId": step.get("id"),
+                "status": status,
+                "startedAt": round(started_at, 3) if started_at else None,
+                "durationMs": duration_ms,
+                "rc": rc,
+                "error": (error or None),
+                "screenshot": screenshot,
+            })
+            if len(self._state.results) > 2000:
+                self._state.results = self._state.results[-1500:]
+
     def _interruptible_sleep(self, seconds: float) -> bool:
         """Sleep in small slices; returns False if a stop was requested."""
         deadline = self._clock() + seconds
@@ -384,6 +412,7 @@ class AutomationEngine:
                         raise _Stopped()
                     if not step.get("enabled", True):
                         self._log("skip", "step %d disabled: %s" % (index, step.get("label")))
+                        self._record(index, step, "skipped")
                         continue
                     self._execute_step(state, index, step, shot_dir, settings)
                     with self._lock:
@@ -442,13 +471,22 @@ class AutomationEngine:
                   "%s -> rc=%d in %dms" % (label, rc, duration_ms),
                   rc=rc, stdout=out[:800], stderr=err[:800], durationMs=duration_ms)
 
+        shot_name = None
         if settings.get("screenshotAfterEachStep"):
-            name = "step-%03d-%s.png" % (index, step.get("id", "s"))
-            self._capture(shot_dir, name)
+            shot_name = "step-%03d-%s.png" % (index, step.get("id", "s"))
+            self._capture(shot_dir, shot_name)
+
+        self._record(index, step, "ok" if ok else "error",
+                     started_at=started, duration_ms=duration_ms, rc=rc,
+                     error=None if ok else (err or out or "rc=%d" % rc)[:400],
+                     screenshot=shot_name)
 
         if not ok:
             if step.get("continueOnError"):
                 self._log("warn", "continueOnError is set, ignoring failure of #%d" % index)
+                self._record(index, step, "ignored", started_at=started,
+                             duration_ms=duration_ms, rc=rc,
+                             error=(err or out or "rc=%d" % rc)[:400])
             elif not settings.get("stopOnError", True):
                 self._log("warn", "stopOnError is false, continuing after #%d" % index)
             else:
@@ -542,6 +580,9 @@ class AutomationEngine:
                 "finishedAt": self._state.finished_at,
                 "error": self._state.error,
                 "steps": len(self._state.flow.get("steps", [])),
+                "executed": len(self._state.results),
+                "failed": sum(1 for r in self._state.results if r["status"] == "error"),
+                "results": self._state.results,
             }
             self.history.append(summary)
             if len(self.history) > 100:
