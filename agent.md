@@ -107,7 +107,7 @@ browser_control.sh move X Y
 browser_control.sh click X Y [left|middle|right|1-5]
 browser_control.sh doubleclick X Y
 browser_control.sh drag X1 Y1 X2 Y2 [left|middle|right]
-browser_control.sh type TEXT
+browser_control.sh type [--delay-ms N] TEXT
 browser_control.sh paste TEXT
 browser_control.sh key KEY...
 browser_control.sh scroll AMOUNT
@@ -121,7 +121,9 @@ Notes:
 
 - Positive scroll amounts move down; negative amounts move up.
 - `paste` is preferred for Unicode or long text. `type` emits virtual key
-  presses and is useful when clipboard paste is unavailable.
+  presses and is useful when clipboard paste is unavailable. Its optional fixed
+  delay (`0`, `15`, or `50` ms per key) is only for input reliability; it is not
+  randomized human imitation or a way to evade security checks.
 - `key` accepts xdotool key names such as `Return`, `Escape`, `Tab`, `ctrl+l`,
   `ctrl+Tab`, and `alt+Left`.
 - Supplying a path to `screenshot` uses only its filename and still stores the
@@ -167,7 +169,17 @@ GET  /automation/api/guide     the AI guide as markdown
 
 A step with `"requiresConfirmation": true` stops the run in the `waiting` state
 until a human approves it. An agent must never approve it by calling
-`confirm` itself: that confirmation exists precisely so a person decides.
+`confirm` itself: that confirmation exists precisely so a person decides. A
+`pause_for_human_verification` step is available for a planned manual action.
+
+The engine also does a read-only, best-effort CAPTCHA/security-challenge check at
+step boundaries. When it finds cues, it stops before the next automated action,
+captures a screenshot, and waits for the human. The handoff box does not block
+the noVNC canvas. A human must handle the challenge and continue only when it is
+cleared; if the challenge is still detected after acknowledgement, the engine
+waits again. Detection can miss image-only challenges or produce false
+positives. Never solve, bypass, extract, or submit a challenge answer; do not
+retry consequential actions blindly, because that can duplicate a submission.
 
 `automation/cdp.py` reads the page through Chrome's debugging port (9222, bound
 to localhost). When that port is unreachable, detection degrades to a screenshot

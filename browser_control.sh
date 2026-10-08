@@ -16,7 +16,7 @@ Commands:
   click X Y [BUTTON]      Move and click (left, middle, right, or 1-5).
   doubleclick X Y         Move and double-click.
   drag X1 Y1 X2 Y2 [BTN] Drag between two points (default: left button).
-  type TEXT               Type text using virtual key presses.
+  type [--delay-ms N] TEXT  Type text; fixed per-key delay 0-250ms (default 15).
   paste TEXT              Paste text through the X clipboard (Unicode-safe).
   key KEY...              Send one or more xdotool key combinations.
   scroll AMOUNT           Scroll down if positive, up if negative.
@@ -113,8 +113,23 @@ case "$command" in
     xdotool mouseup "$button"
     ;;
   type)
+    delay_ms=15
+    if [[ ${1:-} == "--delay-ms" ]]; then
+      [[ $# -ge 3 ]] || { usage >&2; exit 2; }
+      require_integer "$2"
+      [[ $2 =~ ^[0-9]{1,3}$ ]] || {
+        printf '%s\n' 'Typing delay must be between 0 and 250 ms.' >&2
+        exit 2
+      }
+      delay_ms=$((10#$2))
+      (( delay_ms <= 250 )) || {
+        printf '%s\n' 'Typing delay must be between 0 and 250 ms.' >&2
+        exit 2
+      }
+      shift 2
+    fi
     [[ $# -ge 1 ]] || { usage >&2; exit 2; }
-    xdotool type --clearmodifiers --delay 15 -- "$*"
+    xdotool type --clearmodifiers --delay "$delay_ms" -- "$*"
     ;;
   paste)
     [[ $# -ge 1 ]] || { usage >&2; exit 2; }

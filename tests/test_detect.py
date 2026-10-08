@@ -54,6 +54,18 @@ class FakeBackend(ControlBackend):
         return 0, self.page_text_value, ""
 
 
+class StaticCdp:
+    @staticmethod
+    def evaluate(expression, port=9222, timeout=8.0):
+        dom = {
+            "url": "https://example.com/security?session=private",
+            "title": "Verify you are human",
+            "bodyText": "Please verify you are human to continue.",
+            "elements": [], "elementCount": 0, "challengeHints": [],
+        }
+        return {"value": dom, "url": dom["url"], "title": dom["title"]}
+
+
 class DetectorTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp(prefix="automation-detect-")
@@ -81,6 +93,16 @@ class DetectorTest(unittest.TestCase):
         self.assertEqual(snapshot["windows"][0]["title"], "Example search")
         self.assertIsNotNone(snapshot["screenshot"])
         self.assertTrue(snapshot["id"])
+
+    def test_manual_detect_includes_a_best_effort_challenge_assessment(self):
+        detector = Detector(self.backend, self.tmp, {"width": 1366, "height": 768},
+                            cdp_module=StaticCdp)
+        snapshot = detector.detect()
+        self.assertTrue(snapshot["challenge"]["detected"])
+        self.assertEqual(snapshot["challenge"]["pageOrigin"], "https://example.com")
+        pages = detector.pages()
+        self.assertTrue(pages[0]["challengeDetected"])
+        self.assertIn("human-verification-wording", pages[0]["challengeSignals"])
 
     def test_detect_is_remembered_in_the_page_index(self):
         first = self.detector.detect()

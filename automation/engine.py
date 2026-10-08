@@ -20,9 +20,16 @@ import struct
 import subprocess
 import threading
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+from .challenge import CHALLENGE_SCRIPT, assess_page, safe_origin
+
 DEFAULT_DISPLAY = ":1"
+# Fixed, deterministic delays chosen for input reliability only. These are not
+# randomized and must never be presented as a way to imitate people or bypass
+# a site's anti-abuse controls.
+TYPING_DELAYS_MS = {"low": 50, "normal": 15, "fast": 0}
 
 TERMINAL_STATES = ("done", "error", "stopped", "cancelled")
 
@@ -138,8 +145,8 @@ class ControlBackend:
     def drag(self, x1: int, y1: int, x2: int, y2: int, button: str = "left") -> Tuple[int, str, str]:
         return self.control(["drag", x1, y1, x2, y2, button])
 
-    def type_text(self, text: str) -> Tuple[int, str, str]:
-        return self.control(["type", text])
+    def type_text(self, text: str, delay_ms: int = 15) -> Tuple[int, str, str]:
+        return self.control(["type", "--delay-ms", delay_ms, text])
 
     def paste(self, text: str) -> Tuple[int, str, str]:
         return self.control(["paste", text])
@@ -223,6 +230,9 @@ class RunState:
         # the human-readable log. This is what the AI reads to see where a run
         # stopped and why.
         self.results: List[Dict[str, Any]] = []
+        # Human verification pauses (automatic challenge detection or an
+        # explicit pause_for_human_verification step), without page contents.
+        self.handoffs: List[Dict[str, Any]] = []
         self.started_at = time.time()
         self.finished_at: Optional[float] = None
         self.error: Optional[str] = None
@@ -245,6 +255,7 @@ class RunState:
             "error": self.error,
             "entries": self.entries[-200:],
             "results": self.results[-300:],
+            "handoffs": self.handoffs[-50:],
         }
 
 
@@ -263,6 +274,8 @@ class AutomationEngine:
         self._shots = shots
         self._texts = texts
         self._cdp_warned = False
+        self._challenge_probe_unavailable = False
+        self._challenge_probe_warned = False
         # Screenshots are copied here so a run report can link them without a
         # token, which is what lets the model actually look at the page.
         self.public_dir = os.path.join(data_dir, "public")
@@ -296,6 +309,8 @@ class AutomationEngine:
             self._paused = False
             self._stop_requested = False
             self._confirmed = None
+            self._challenge_probe_unavailable = False
+            self._challenge_probe_warned = False
             self._wakeup.set()
             self._thread = threading.Thread(target=self._run, name="automation-%s" % run_id,
                                             daemon=True)
@@ -363,7 +378,9 @@ class AutomationEngine:
                 rc: Optional[int] = None, error: Optional[str] = None,
                 screenshot: Optional[str] = None, text: Optional[str] = None,
                 shots: Optional[Dict[str, str]] = None,
-                image: Optional[Dict[str, int]] = None) -> None:
+                image: Optional[Dict[str, int]] = None,
+                typing_mode: Optional[str] = None,
+                key_delay_ms: Optional[int] = None) -> None:
         """Append one machine-readable row about a step's outcome."""
         with self._lock:
             assert self._state is not None
@@ -385,6 +402,8 @@ class AutomationEngine:
                 "text": text,
                 "shots": shots or None,
                 "image": image,
+                "typingMode": typing_mode,
+                "keyDelayMs": key_delay_ms,
             })
             if len(self._state.results) > 2000:
                 self._state.results = self._state.results[-1500:]
@@ -477,10 +496,16 @@ class AutomationEngine:
                         self._log("skip", "step %d disabled: %s" % (index, step.get("label")))
                         self._record(index, step, "skipped")
                         continue
+                    if step.get("type") != "pause_for_human_verification":
+                        self._pause_if_challenge(state, index, step, shot_dir)
                     self._execute_step(state, index, step, shot_dir, settings)
                     with self._lock:
                         if state.status == "error":
                             raise _Failed(state.error or "step failed")
+            if not self._interruptible_sleep(0):
+                raise _Stopped()
+            if steps:
+                self._pause_if_challenge(state, len(steps) - 1, steps[-1], shot_dir)
         except _Stopped:
             self._finish("stopped")
             return
@@ -496,39 +521,148 @@ class AutomationEngine:
 
         self._finish("done")
 
+    def _pause_if_challenge(self, state: RunState, index: int, step: Dict[str, Any],
+                            shot_dir: str) -> None:
+        """Pause before further automation when read-only CDP cues suggest a challenge.
+
+        After the human acknowledges the handoff, probe again before the next
+        browser action. If the challenge is still visible, keep waiting rather
+        than letting the flow act on the challenge page.
+        """
+        while True:
+            if self._cdp is None or self._challenge_probe_unavailable:
+                return
+            try:
+                result = self._cdp.evaluate(CHALLENGE_SCRIPT, port=self._cdp_port, timeout=1.5)
+                payload = result.get("value") if isinstance(result, dict) and "value" in result else result
+                assessment = assess_page(payload)
+                if not assessment.get("pageOrigin") and isinstance(result, dict):
+                    assessment["pageOrigin"] = safe_origin(result.get("url"))
+            except Exception:
+                self._challenge_probe_unavailable = True
+                if not self._challenge_probe_warned:
+                    self._challenge_probe_warned = True
+                    self._log("warn", "automatic CAPTCHA/security-check detection is unavailable "
+                                      "(page inspection through CDP failed); inspect the page manually")
+                return
+            if not assessment.get("detected"):
+                return
+
+            message = (
+                "سامانه نشانه‌هایی از CAPTCHA یا بررسی امنیتی دید و اجرای خودکار را متوقف کرد. "
+                "خودت صفحه را بررسی و در صورت مجاز بودن، مرحله را در مرورگر انجام بده؛ "
+                "کد یا پاسخ را برای هوش مصنوعی نفرست. فقط وقتی چالش رفع شده و صفحه عادی است ادامه بده."
+            )
+            self._create_handoff(state, index, step, shot_dir, "challenge", message, assessment)
+
+    def _create_handoff(self, state: RunState, index: int, step: Dict[str, Any],
+                        shot_dir: str, kind: str, message: str,
+                        assessment: Optional[Dict[str, Any]] = None) -> None:
+        label = step.get("label") or step.get("type") or "human verification"
+        step_id = step.get("id", "s")
+        name = "step-%03d-handoff-p%03d-%s-%s.png" % (
+            index,
+            state.pass_index,
+            step_id,
+            uuid.uuid4().hex[:8],
+        )
+        path = self._capture(shot_dir, name)
+        public_name = self._publish(path)
+        image = png_size(path) if path else None
+        signals = list((assessment or {}).get("signals") or [])
+        page_origin = (assessment or {}).get("pageOrigin") or ""
+        role = "challenge" if kind == "challenge" else "handoff"
+        event = {
+            "kind": kind,
+            "detectedAt": round(self._clock(), 3),
+            "index": index,
+            "label": label,
+            "signals": signals,
+            "pageOrigin": page_origin,
+            "publicShot": public_name,
+            "decision": "pending",
+            "resolvedAt": None,
+        }
+        with self._lock:
+            state.handoffs.append(event)
+            if len(state.handoffs) > 50:
+                state.handoffs = state.handoffs[-40:]
+
+        if public_name and self._shots is not None:
+            try:
+                self._shots.add({
+                    "name": public_name, "role": role, "runId": state.run_id,
+                    "stepIndex": index, "stepLabel": label,
+                    "stepType": step.get("type"), "image": image,
+                    "status": "waiting",
+                })
+            except OSError as exc:
+                self._log("warn", "could not index human-handoff screenshot: %s" % exc)
+
+        log_message = ("possible CAPTCHA/security challenge detected; pausing for human review"
+                       if kind == "challenge" else "pausing for the requested human verification")
+        self._log("warn", log_message, stepIndex=index, signals=signals,
+                  pageOrigin=page_origin, publicShot=public_name)
+        pending = {
+            "index": index, "label": label, "type": step.get("type"),
+            "kind": kind, "message": message, "signals": signals,
+            "pageOrigin": page_origin, "publicShot": public_name,
+        }
+        self._wait_for_human(state, label, pending, event)
+
+    def _wait_for_human(self, state: RunState, label: str,
+                        pending: Dict[str, Any], event: Optional[Dict[str, Any]] = None) -> None:
+        with self._lock:
+            self._confirmed = None
+            self._wakeup.clear()
+            state.awaiting_confirmation = pending
+            state.status = "waiting"
+        if pending.get("kind") == "confirmation":
+            self._log("warn", "waiting for human confirmation before: %s" % label)
+        while True:
+            approved: Optional[bool] = None
+            stopped = False
+            with self._lock:
+                if self._stop_requested:
+                    state.awaiting_confirmation = None
+                    state.status = "running"
+                    stopped = True
+                elif self._confirmed is not None:
+                    approved = self._confirmed
+                    self._confirmed = None
+                    state.awaiting_confirmation = None
+                    state.status = "running"
+                    if event is not None:
+                        event["decision"] = "continued" if approved else "stopped"
+                        event["resolvedAt"] = round(self._clock(), 3)
+            if stopped:
+                self._log("warn", "human handoff stopped by user before: %s" % label)
+                raise _Stopped()
+            if approved is not None:
+                if approved:
+                    self._log("info", "human confirmed the handoff; continuing after: %s" % label)
+                    return
+                self._log("warn", "human declined the handoff; stopping before: %s" % label)
+                raise _Stopped()
+            self._wakeup.wait(0.2)
+            self._wakeup.clear()
+
     def _execute_step(self, state: RunState, index: int, step: Dict[str, Any],
                       shot_dir: str, settings: Dict[str, Any]) -> None:
         label = step.get("label") or step.get("type")
-        self._log("step", "#%d %s" % (index, label), stepId=step.get("id"), type=step.get("type"))
+        kind = step.get("type")
+        self._log("step", "#%d %s" % (index, label), stepId=step.get("id"), type=kind)
 
         if step.get("requiresConfirmation"):
-            with self._lock:
-                self._confirmed = None
-                self._wakeup.clear()
-                state.awaiting_confirmation = {"index": index, "label": label, "type": step.get("type")}
-                state.status = "waiting"
-            self._log("warn", "waiting for human confirmation before: %s" % label)
-            while True:
-                with self._lock:
-                    if self._stop_requested:
-                        state.awaiting_confirmation = None
-                        state.status = "running"
-                        raise _Stopped()
-                    if self._confirmed is not None:
-                        approved = self._confirmed
-                        state.awaiting_confirmation = None
-                        state.status = "running"
-                        if not approved:
-                            self._log("warn", "confirmation refused; stopping before: %s" % label)
-                            raise _Stopped()
-                        break
-                self._wakeup.wait(0.2)
-                self._wakeup.clear()
+            self._wait_for_human(state, label, {
+                "index": index, "label": label, "type": kind,
+                "kind": "confirmation",
+                "message": "گام بعدی به تأیید تو نیاز دارد.",
+            })
 
         shots: Dict[str, str] = {}
         image = None
         step_id = step.get("id", "s")
-        kind = step.get("type")
 
         if settings.get("screenshotBeforeEachStep"):
             before = self._capture(shot_dir, "step-%03d-before-%s.png" % (index, step_id))
@@ -536,8 +670,19 @@ class AutomationEngine:
             if published:
                 shots["before"] = published
 
+        typing_mode = None
+        key_delay_ms = None
+        if kind == "type":
+            typing_mode = step.get("typingMode", settings.get("typingMode", "normal"))
+            key_delay_ms = TYPING_DELAYS_MS.get(typing_mode, TYPING_DELAYS_MS["normal"])
+
         started = self._clock()
-        rc, out, err = self._dispatch(step)
+        if kind == "pause_for_human_verification":
+            self._create_handoff(state, index, step, shot_dir, "manual_verification",
+                                 step["prompt"])
+            rc, out, err = 0, "human verification confirmed", ""
+        else:
+            rc, out, err = self._dispatch(step, settings)
         duration_ms = int((self._clock() - started) * 1000)
 
         ok = rc == 0
@@ -549,7 +694,9 @@ class AutomationEngine:
         self._log("ok" if ok else "error",
                   "%s -> rc=%d in %dms" % (label, rc, duration_ms),
                   rc=rc, stdout=(out or "")[:keep], stderr=(err or "")[:800],
-                  durationMs=duration_ms)
+                  durationMs=duration_ms,
+                  **({"typingMode": typing_mode, "keyDelayMs": key_delay_ms}
+                     if typing_mode is not None else {}))
 
         if kind == "screenshot" and ok and out:
             published = self._publish(out)
@@ -578,7 +725,8 @@ class AutomationEngine:
                      started_at=started, duration_ms=duration_ms, rc=rc,
                      error=None if ok else (err or out or "rc=%d" % rc)[:400],
                      screenshot=shots.get("after"), text=captured,
-                     shots=shots or None, image=image)
+                     shots=shots or None, image=image,
+                     typing_mode=typing_mode, key_delay_ms=key_delay_ms)
 
         if self._shots is not None:
             for role, name in shots.items():
@@ -623,7 +771,7 @@ class AutomationEngine:
             return None
         return out.strip() or os.path.join(shot_dir, name)
 
-    def _dispatch(self, step: Dict[str, Any]) -> Tuple[int, str, str]:
+    def _dispatch(self, step: Dict[str, Any], settings: Optional[Dict[str, Any]] = None) -> Tuple[int, str, str]:
         kind = step["type"]
         if kind == "click":
             return self.backend.click(int(step["x"]), int(step["y"]),
@@ -636,7 +784,10 @@ class AutomationEngine:
             return self.backend.drag(int(step["x1"]), int(step["y1"]),
                                      int(step["x2"]), int(step["y2"]), step.get("button", "left"))
         if kind == "type":
-            return self.backend.type_text(step["text"])
+            settings = settings or {}
+            mode = step.get("typingMode", settings.get("typingMode", "normal"))
+            delay_ms = TYPING_DELAYS_MS.get(mode, TYPING_DELAYS_MS["normal"])
+            return self.backend.type_text(step["text"], delay_ms=delay_ms)
         if kind == "paste":
             return self.backend.paste(step["text"])
         if kind == "key":

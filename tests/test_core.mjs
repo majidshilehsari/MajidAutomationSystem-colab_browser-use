@@ -59,6 +59,8 @@ test('labels are readable', () => {
   assert.equal(labelFor(createStep('key', { keys: ['ctrl', 'l'] })), 'key ctrl+l');
   assert.equal(labelFor(createStep('wait', { ms: 1500 })), 'wait 1500ms');
   assert.equal(labelFor(createStep('scroll', { amount: -3 })), 'scroll -3');
+  assert.equal(labelFor(createStep('pause_for_human_verification')),
+               'pause for human verification');
   assert.equal(labelFor(createStep('goto_url', { url: 'https://example.com' })),
                'open https://example.com');
   const long = labelFor(createStep('paste', { text: 'x'.repeat(60) }));
@@ -96,6 +98,27 @@ test('validateFlow accepts a good flow and rejects a bad one', () => {
   assert.ok(errors.some((e) => e.includes('keys must not be empty')));
   assert.ok(errors.some((e) => e.includes('scheme')));
   assert.ok(errors.some((e) => e.includes('ms must be positive')));
+});
+
+test('validateFlow accepts fixed typing modes and deliberate human pauses', () => {
+  const good = emptyFlow('safe handoff');
+  good.settings.typingMode = 'low';
+  good.steps = [
+    createStep('type', { text: 'hello', typingMode: 'fast' }),
+    createStep('pause_for_human_verification', { prompt: 'Review this step yourself.' }),
+  ];
+  assert.deepEqual(validateFlow(good, VP), []);
+
+  const bad = emptyFlow('bad mode');
+  bad.settings.typingMode = 'random';
+  bad.steps = [createStep('type', { text: 'hello', typingMode: 'stealth' })];
+  const errors = validateFlow(bad, VP);
+  assert.ok(errors.some((error) => error.includes('settings: typingMode')));
+  assert.ok(errors.some((error) => error.includes('typingMode must be low, normal, or fast')));
+
+  const longPrompt = emptyFlow('long prompt');
+  longPrompt.steps = [createStep('pause_for_human_verification', { prompt: 'x'.repeat(1001) })];
+  assert.ok(validateFlow(longPrompt, VP).some((error) => error.includes('1000 characters')));
 });
 
 test('keysFromText and keysToText round trip', () => {

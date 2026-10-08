@@ -33,7 +33,7 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     "double_click": {"required": ["x", "y"], "optional": []},
     "drag": {"required": ["x1", "y1", "x2", "y2"], "optional": ["button"]},
     "move": {"required": ["x", "y"], "optional": []},
-    "type": {"required": ["text"], "optional": []},
+    "type": {"required": ["text"], "optional": ["typingMode"]},
     "paste": {"required": ["text"], "optional": []},
     "key": {"required": ["keys"], "optional": []},
     "scroll": {"required": ["amount"], "optional": ["x", "y"]},
@@ -45,6 +45,9 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     # Read the whole visible page text and put it in the run report, so the
     # model can see the page without guessing what was on it.
     "capture_text": {"required": [], "optional": ["limit"]},
+    # Deliberate human handoff for CAPTCHA, MFA, consent, or another task that
+    # must stay under direct human control. The engine does not solve it.
+    "pause_for_human_verification": {"required": ["prompt"], "optional": []},
     "shell": {"required": ["command"], "optional": []},
 }
 
@@ -126,6 +129,15 @@ def _validate_step(step: Any, index: int, viewport: Dict[str, int], errors: List
     if "text" in step and not isinstance(step["text"], str):
         _err(errors, "%s (%s): 'text' must be a string" % (where, kind))
 
+    if kind == "type" and "typingMode" in step and step["typingMode"] not in ("low", "normal", "fast"):
+        _err(errors, "%s (type): 'typingMode' must be low, normal, or fast" % where)
+
+    if "prompt" in step and (
+            not isinstance(step["prompt"], str)
+            or not step["prompt"].strip()
+            or len(step["prompt"]) > 1000):
+        _err(errors, "%s (%s): 'prompt' must be plain text, non-empty, and at most 1000 characters" % (where, kind))
+
     if "keys" in step:
         keys = step["keys"]
         if isinstance(keys, str):
@@ -182,6 +194,7 @@ def _check_bounds(step: Dict[str, Any], fields: Iterable[str], viewport: Dict[st
 def _validate_settings(settings: Any, errors: List[str]) -> Dict[str, Any]:
     defaults = {
         "defaultDelayAfterMs": 350,
+        "typingMode": "normal",
         "screenshotAfterEachStep": False,
         "screenshotBeforeEachStep": False,
         "screenshotOnError": True,
@@ -203,6 +216,8 @@ def _validate_settings(settings: Any, errors: List[str]) -> Dict[str, Any]:
             _validate_int(settings, field, "settings", errors, 0, 10 * 60 * 1000)
     if "repeat" in settings:
         _validate_int(settings, "repeat", "settings", errors, 1, 1000)
+    if "typingMode" in settings and settings["typingMode"] not in ("low", "normal", "fast"):
+        _err(errors, "settings: 'typingMode' must be low, normal, or fast")
     for field in ("screenshotAfterEachStep", "screenshotBeforeEachStep",
                   "screenshotOnError", "stopOnError", "allowShellSteps"):
         if field in settings and not isinstance(settings[field], bool):
@@ -253,6 +268,8 @@ def default_label(step: Dict[str, Any]) -> str:
         return "focus %s" % str(step.get("title"))[:30]
     if kind == "screenshot":
         return "screenshot"
+    if kind == "pause_for_human_verification":
+        return "pause for human verification"
     if kind == "shell":
         return "shell %s" % str(step.get("command"))[:40]
     return kind

@@ -20,6 +20,7 @@ from typing import Any, Dict, List, Optional
 from urllib.parse import urlparse
 
 from . import cdp
+from .challenge import assess_page
 
 MAX_ELEMENTS = 250
 MAX_TEXT_CHARS = 4000
@@ -94,7 +95,23 @@ PAGE_SCRIPT = r"""
     },
     bodyText: (document.body && document.body.innerText || '').replace(/\n{3,}/g, '\n\n').slice(0, %d),
     elementCount: nodes.length,
-    elements: elements
+    elements: elements,
+    challengeHints: Array.from(document.querySelectorAll(
+      'iframe, [data-sitekey], [id*="captcha" i], [class*="captcha" i], ' +
+      '[aria-label*="captcha" i], [title*="captcha" i], [id*="challenge" i], ' +
+      '[class*="challenge" i], [aria-label*="challenge" i], [title*="challenge" i]'))
+      .filter(el => {
+        const rect = el.getBoundingClientRect();
+        const style = window.getComputedStyle(el);
+        return rect.width > 1 && rect.height > 1 && style.display !== 'none' &&
+               style.visibility !== 'hidden' && style.opacity !== '0';
+      }).slice(0, 80).map(el => [
+        el.tagName || '', el.id || '',
+        typeof el.className === 'string' ? el.className : '',
+        el.getAttribute('title') || '', el.getAttribute('aria-label') || '',
+        el.getAttribute('src') || '',
+        el.hasAttribute('data-sitekey') ? 'data-sitekey' : ''
+      ].join(' ').slice(0, 400))
   };
 })()
 """ % (MAX_ELEMENTS, MAX_TEXT_CHARS)
@@ -208,6 +225,7 @@ class Detector:
             "title": windows["active"],
             "text": "",
             "elements": [],
+            "challenge": {"detected": False, "signals": [], "pageOrigin": ""},
             "error": None,
         }
 
@@ -235,6 +253,11 @@ class Detector:
             if not snapshot["url"]:
                 snapshot["url"] = _url_from_title(snapshot["title"])
 
+        snapshot["challenge"] = assess_page({
+            "url": snapshot.get("url"), "title": snapshot.get("title"),
+            "text": snapshot.get("text"),
+            "hints": (dom or {}).get("challengeHints", []),
+        })
         public_name = self.share(shot)
         snapshot["publicShot"] = public_name
         snapshot["pageKey"] = page_key(snapshot.get("url"), snapshot.get("title"))
@@ -272,6 +295,8 @@ class Detector:
                 "screenshot": snapshot.get("screenshot"),
                 "elements": len(snapshot.get("elements", [])),
                 "cdp": snapshot.get("cdp", False),
+                "challengeDetected": bool((snapshot.get("challenge") or {}).get("detected")),
+                "challengeSignals": (snapshot.get("challenge") or {}).get("signals", []),
                 # The index stays small: only a preview of the page text.
                 "textChars": len(text),
                 "textPreview": text[:300],

@@ -385,10 +385,50 @@
 
 #mas-root .mas-confirm-box h3 { margin: 0 0 6px; font-size: 14px; }
 #mas-root .mas-confirm-box p { margin: 0 0 12px; color: var(--mas-dim); }
+#mas-root .mas-confirm-shot {
+  display: inline-block;
+  margin: 0 0 12px;
+  color: #9ec5fe;
+  text-decoration: underline;
+}
+
+/* A challenge handoff must not block the noVNC canvas: the user needs to be
+ * able to handle the check in the real browser while automation is paused. */
+#mas-root .mas-confirm.mas-confirm-handoff {
+  inset: auto 12px 12px 12px;
+  justify-content: flex-start;
+  align-items: flex-end;
+  background: transparent;
+  pointer-events: none;
+}
+#mas-root .mas-confirm.mas-confirm-handoff .mas-confirm-box {
+  width: min(560px, calc(100vw - var(--mas-width) - 36px));
+  max-height: 48vh;
+  overflow: auto;
+  pointer-events: auto;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.55);
+}
+body:not(.mas-standalone) #mas-root .mas-confirm.mas-confirm-handoff {
+  right: calc(var(--mas-width) + 12px);
+}
+body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
+  right: 12px;
+  left: 12px;
+}
 
 /* ------------------------------------------------------------ pages table */
 
 #mas-root .mas-pages { display: flex; flex-direction: column; gap: 6px; margin-bottom: 10px; }
+#mas-root .mas-challenge-warning {
+  margin: 8px 0;
+  padding: 9px;
+  border: 1px solid var(--mas-warn);
+  border-radius: 5px;
+  background: rgba(224, 166, 60, 0.12);
+}
+#mas-root .mas-challenge-warning b,
+#mas-root .mas-challenge-badge { color: var(--mas-warn); }
+#mas-root .mas-challenge-badge { display: block; margin-bottom: 4px; font-size: 11px; }
 
 #mas-root .mas-page {
   display: flex;

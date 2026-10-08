@@ -220,7 +220,9 @@ class ServerIntegrationTest(unittest.TestCase):
     def test_guide_is_served(self):
         status, body = http_request(self.url("/automation/api/guide"))
         self.assertEqual(status, 200)
-        self.assertIn(b"Step types", body)
+        self.assertIn("نوع گام‌ها".encode("utf-8"), body)
+        self.assertIn(b"pause_for_human_verification", body)
+        self.assertIn(b"CAPTCHA", body)
 
     def test_a_flow_name_with_a_space_can_be_saved(self):
         # Regression: the browser sends "Untitled flow" as "Untitled%20flow" and
@@ -311,6 +313,26 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertIn("Battle Arena", text)
         self.assertIn("Start game", text)
 
+    def test_report_includes_human_handoff_and_fixed_typing_details(self):
+        from automation.api import _report_section
+        text = _report_section({
+            "status": "waiting", "stepCount": 2, "elapsedMs": 1200,
+            "results": [{"index": 0, "type": "type", "label": "type query",
+                         "status": "ok", "durationMs": 30, "typingMode": "low",
+                         "keyDelayMs": 50}],
+            "entries": [],
+            "awaitingConfirmation": {"index": 1, "label": "verify", "kind": "challenge"},
+            "handoffs": [{"kind": "challenge", "detectedAt": 1,
+                           "index": 1, "label": "verify", "signals": ["human-verification-wording"],
+                           "pageOrigin": "https://example.com", "publicShot": "challenge.png",
+                           "decision": "pending"}],
+        }, "https://abc.trycloudflare.com")
+        self.assertIn("CAPTCHA / بررسی امنیتی", text)
+        self.assertIn("https://example.com", text)
+        self.assertIn("https://abc.trycloudflare.com/automation/api/public/shot/challenge.png", text)
+        self.assertIn("low, 50ms/کلید", text)
+        self.assertIn("هیچ پاسخی خودکار وارد نشده", text)
+
     def test_report_endpoint_answers_when_nothing_has_run(self):
         status, body = http_request(self.url("/automation/api/report"))
         self.assertEqual(status, 200)
@@ -327,6 +349,16 @@ class ServerIntegrationTest(unittest.TestCase):
             self.assertIn(heading, text)
         self.assertLess(text.index("چه فهمیدی"), text.index("سؤال و نکته"),
                         "the sections are out of order")
+
+    def test_ai_prompt_explains_safe_human_handoff_and_typing_modes(self):
+        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
+                                    body={"flow": {"name": "f", "steps": []}})
+        self.assertEqual(status, 200, body)
+        text = body.decode("utf-8")
+        self.assertIn("typingMode", text)
+        self.assertIn("pause_for_human_verification", text)
+        self.assertIn("کد CAPTCHA را از کاربر نخواه", text)
+        self.assertIn("CAPTCHA", text)
 
     def test_prompt_hands_back_the_previous_answer(self):
         status, body = http_request(self.url("/automation/api/prompt"), method="POST",

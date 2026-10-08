@@ -70,37 +70,84 @@ or VNC password.
 The installer currently downloads AMD64 builds and is not designed for ARM
 runtimes.
 
-## Quick start in Google Colab
+## Google Colab: cell-by-cell setup for this branch
 
-Clone the repository into `/content` and replace `YOUR_USERNAME` with the
-GitHub account or organization that hosts it:
+Use the Arena branch below; `main` may not contain the automation-sidebar
+changes. Run each numbered block in its own Colab code cell.
 
-```bash
-cd /content
-git clone https://github.com/HoussemMouradi/colab_browser-use.git
-cd colab_browser-use
-chmod +x *.sh
-./install.sh
+### Cell 1 — clone the correct branch
+
+```python
+%cd /content
+!git clone --single-branch --branch arena/a41706bf-majidautomationsystem-colab-br https://github.com/majidshilehsari/MajidAutomationSystem-colab_browser-use.git
+%cd /content/MajidAutomationSystem-colab_browser-use
+!git status --short --branch
 ```
 
-Start the browser stack:
+Expected: `git status` identifies
+`arena/a41706bf-majidautomationsystem-colab-br` as the current branch and shows
+no modified files. If the repository already exists in this runtime, skip the
+clone and run `!git checkout arena/a41706bf-majidautomationsystem-colab-br`
+from its directory instead.
 
-```bash
-./start_colab_browser.sh --wait
+### Cell 2 — install the desktop and browser dependencies
+
+```python
+%cd /content/MajidAutomationSystem-colab_browser-use
+!chmod +x ./*.sh
+!./install.sh
 ```
 
-Keep that command running. It prints values similar to:
+Expected final lines include `Installed Chrome`, `Installed cloudflared`, and
+`Computer-use dependencies are ready.` Installation may take several minutes.
 
-```text
-BROWSER_URL=https://example.trycloudflare.com/vnc.html?autoconnect=true&resize=scale&path=websockify
-VNC_PASSWORD=temporary-password
-AUTOMATION_TOKEN=temporary-token
-STATE_DIR=/content/colab_browser-computer-use/.runtime
+### Cell 3 — start the server-side browser stack
+
+```python
+%cd /content/MajidAutomationSystem-colab_browser-use
+!./start_colab_browser.sh --wait
 ```
 
-Open `BROWSER_URL` on another computer and enter `VNC_PASSWORD` when prompted.
-All three values are temporary. A new tunnel URL, VNC password, and automation
-token are generated on each start. Share none of them.
+This cell intentionally remains running. Expected output includes the names
+`BROWSER_URL=`, `VNC_PASSWORD=`, `AUTOMATION_TOKEN=`, and `STATE_DIR=`, plus
+`Supervisor is running; keep this terminal session open.` Their values are
+per-run secrets: never post them in chat. Open `BROWSER_URL` in a separate
+browser tab or device and enter the VNC password only into the noVNC password
+prompt. Keep this Colab runtime and its start cell alive for server-side runs.
+
+### Cell 4 — connect the sidebar and verify page detection
+
+In the noVNC page, open the right-hand automation sidebar and its AI tab. Enter
+the current run's `AUTOMATION_TOKEN` in the sidebar's token field—not in an AI
+conversation. Expect the connection indicator to show **Connected**. Open
+**Pages → Detect page**; expect a saved page entry and screenshot. A
+`challenge` assessment is also included in the snapshot; a warning is shown
+only when the best-effort detector finds likely challenge cues.
+
+### Cell 5 — verify the human handoff without visiting a CAPTCHA
+
+For a safe local test, add a `pause_for_human_verification` step in the Flow tab
+with a short prompt, followed by a harmless `wait` step. Run it. Expected: the
+status changes to **Waiting**, a small handoff box appears without disabling
+the noVNC canvas, and the later step does not run yet. Click **Continue after
+human review** for this test; expected: the wait step runs and status becomes
+**Done**. You do not need to trigger a real CAPTCHA to verify the flow.
+
+### Optional developer-test cell
+
+The browser runtime does not need Node. If Node.js and npm are available and
+you want to run the repository's complete checks:
+
+```python
+%cd /content/MajidAutomationSystem-colab_browser-use
+!npm ci
+!./run_tests.sh
+```
+
+Expected final line: `ALL CHECKS PASSED`. The script reports individual Python,
+JavaScript, shell, and syntax results. If Node/npm are absent, run these checks
+in a development environment; do not install unrelated Node tooling just to use
+the Colab browser.
 
 ## Agent control
 
@@ -137,7 +184,7 @@ Common commands:
 ./browser_control.sh click X Y [left|middle|right|1-5]
 ./browser_control.sh doubleclick X Y
 ./browser_control.sh drag X1 Y1 X2 Y2 [left|middle|right]
-./browser_control.sh type TEXT
+./browser_control.sh type [--delay-ms N] TEXT
 ./browser_control.sh paste TEXT
 ./browser_control.sh key KEY...
 ./browser_control.sh scroll AMOUNT
@@ -153,25 +200,35 @@ guidance, troubleshooting, and a complete agent workflow.
 ## Automation sidebar
 
 The noVNC page carries a collapsible panel on the right edge, mirroring the
-noVNC control bar on the left. Open it with the arrow on the right, then paste
-`AUTOMATION_TOKEN` into the AI tab once; the panel remembers it in your browser.
+noVNC control bar on the left. Open it with the arrow on the right and enter the
+current run's `AUTOMATION_TOKEN` in the dedicated token field under the AI tab,
+not in an AI conversation. The panel remembers it in this browser, but a new
+Colab start generates a new per-run token. Keep it private.
 
-The panel has five tabs:
+The panel has seven tabs:
 
 | tab | what it does |
 | --- | --- |
 | Flow | the step list: add, edit, reorder, enable, duplicate, delete, save, load |
 | Record | capture real clicks and keystrokes into steps |
 | Pages | detect the current page and browse the pages you already detected |
-| AI | copy the guide, copy a full prompt, paste back what the AI returned |
+| Screenshots | browse screenshots and open their public debugging links |
+| Extracted texts | browse captured page text and save notes |
+| AI | copy the Persian guide, copy a full prompt, paste back what the AI returned |
 | Log | the live log of the running flow |
 
 ### Step types
 
 `click`, `double_click`, `drag`, `move`, `scroll`, `type`, `paste`, `key`,
-`wait`, `wait_for_text`, `goto_url`, `focus_window`, `screenshot`. Every step
-also accepts `label`, `note`, `enabled`, `delayAfterMs`, `requiresConfirmation`,
-and `continueOnError`.
+`wait`, `wait_for_text`, `goto_url`, `focus_window`, `screenshot`, `capture_text`,
+and `pause_for_human_verification`. Every step also accepts `label`, `note`,
+`enabled`, `delayAfterMs`, `requiresConfirmation`, and `continueOnError`.
+
+`settings.typingMode` controls the fixed typing delay for `type`: `low` = 50 ms,
+`normal` = 15 ms (default), `fast` = 0 ms between keys. A `type` step may
+optionally override it with its own `typingMode`. These are deterministic input
+reliability settings, not human imitation or anti-bot evasion. Use `paste` for
+Unicode, Persian and long text.
 
 Coordinates are desktop pixels of the fixed 1366x768 display, so a recorded
 click stays valid no matter how your noVNC window is scaled.
@@ -186,6 +243,29 @@ stays alive.
 A step marked `requiresConfirmation` pauses the run and waits for a human. If
 nobody is watching, it waits until the run is stopped. Use it before anything
 that submits, sends, buys, or deletes.
+
+### CAPTCHA and human verification
+
+The server performs a read-only, best-effort check of visible page text and DOM
+hints through Chrome DevTools Protocol at step boundaries. If cues for CAPTCHA,
+human verification, or a security check are found, the executor pauses before
+its next action, captures a screenshot, and records only coarse signal names,
+the page origin, and the screenshot link—not the page body or challenge answer.
+The Detect page snapshot also includes a `challenge` assessment for the AI.
+
+A small non-blocking handoff notice leaves the noVNC canvas usable. The human
+handles the page in the real browser, then chooses **Continue after human
+review** only after the challenge is cleared and the page is normal. The runner
+continues from the pending step; it does not repeat steps that already passed.
+For a planned human action, add a `pause_for_human_verification` step with a
+`prompt`. Detection is heuristic: it can miss image-only challenges or raise a
+false positive, so still inspect the page yourself. Without working CDP, only
+manual detection is available.
+
+The system deliberately does not solve CAPTCHA, read/submit its answer, or offer
+stealth/randomized typing. It also avoids blind automatic retries: retrying a
+click or submission may duplicate a consequential action. Prefer an official
+API, a stable browser session, reasonable request rates, and human review.
 
 ### Detecting a page for an AI
 

@@ -54,6 +54,20 @@ class FakeCdp:
         return {"value": self.value, "url": "https://example.com/", "title": "T"}
 
 
+class SequenceCdp(FakeCdp):
+    """Returns a different read-only page probe on each call."""
+
+    def __init__(self, values):
+        super().__init__()
+        self.values = list(values)
+
+    def evaluate(self, expression, port=9222, timeout=8.0):
+        self.calls.append((expression, port))
+        index = min(len(self.calls) - 1, len(self.values) - 1)
+        return {"value": self.values[index], "url": "https://fallback.example/path?token=secret",
+                "title": "page"}
+
+
 class FakeBackend(ControlBackend):
     """Implements the primitive layer without touching X."""
 
@@ -79,8 +93,8 @@ class FakeBackend(ControlBackend):
     def drag(self, x1, y1, x2, y2, button="left"):
         return self._record("drag", x1, y1, x2, y2, button)
 
-    def type_text(self, text):
-        return self._record("type", text)
+    def type_text(self, text, delay_ms=15):
+        return self._record("type", text, delay_ms)
 
     def paste(self, text):
         return self._record("paste", text)
@@ -204,6 +218,19 @@ class HappyPathTest(EngineTestBase):
         flow = build_flow([{"type": "click", "x": 1, "y": 1, "delayAfterMs": 250}])
         self.run_to_completion(flow)
         self.assertGreaterEqual(self.clock.now - before, 0.25)
+
+    def test_type_uses_fixed_flow_mode_and_step_override_and_reports_them(self):
+        status = self.run_to_completion(build_flow([
+            {"type": "type", "text": "first"},
+            {"type": "type", "text": "second", "typingMode": "fast"},
+        ], typingMode="low"))
+        self.assertEqual([call for call in self.backend.calls if call[0] == "type"], [
+            ("type", "first", 50), ("type", "second", 0),
+        ])
+        self.assertEqual(
+            [(row["typingMode"], row["keyDelayMs"]) for row in status["results"]],
+            [("low", 50), ("fast", 0)],
+        )
 
     def test_repeat_runs_every_pass(self):
         flow = build_flow([{"type": "click", "x": 1, "y": 1}], repeat=3)
@@ -345,6 +372,95 @@ class ConfirmationTest(EngineTestBase):
             self.engine.confirm(True)
 
 
+class HumanHandoffTest(EngineTestBase):
+    def test_detected_challenge_pauses_before_the_next_step_and_resumes_in_place(self):
+        cdp = SequenceCdp([
+            {"url": "https://example.com/home", "text": "Home", "hints": []},
+            {"url": "https://example.com/check?session=private",
+             "text": "Verify you are human", "hints": []},
+            {"url": "https://example.com/home", "text": "Home", "hints": []},
+        ])
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        engine.start(build_flow([
+            {"type": "click", "x": 1, "y": 1},
+            {"type": "click", "x": 2, "y": 2},
+        ]))
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"))
+        waiting = engine.status()["awaitingConfirmation"]
+        self.assertEqual(waiting["kind"], "challenge")
+        self.assertIn("CAPTCHA", waiting["message"])
+        self.assertEqual(waiting["pageOrigin"], "https://example.com")
+        self.assertEqual([call[0] for call in self.backend.calls], ["click", "screenshot"],
+                         "the second browser action must not run before human review")
+        handoff = engine.status()["handoffs"][0]
+        self.assertEqual(handoff["decision"], "pending")
+        self.assertTrue(os.path.exists(os.path.join(engine.public_dir, handoff["publicShot"])))
+
+        engine.confirm(True)
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"))
+        self.assertEqual([call[0] for call in self.backend.calls], ["click", "screenshot", "click"],
+                         "resume must not repeat the successful first click")
+        self.assertEqual(engine.status()["handoffs"][0]["decision"], "continued")
+        self.assertTrue(all("token=secret" not in str(call) for call in cdp.calls))
+
+    def test_acknowledgement_does_not_resume_while_challenge_is_still_detected(self):
+        cdp = SequenceCdp([
+            {"url": "https://example.com/check", "text": "Verify you are human", "hints": []},
+            {"url": "https://example.com/check", "text": "Verify you are human", "hints": []},
+            {"url": "https://example.com/home", "text": "Home", "hints": []},
+        ])
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        engine.start(build_flow([{"type": "click", "x": 3, "y": 4}]))
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"))
+
+        engine.confirm(True)
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"
+                                   and len(engine.status()["handoffs"]) == 2))
+        self.assertEqual(engine.status()["status"], "waiting")
+        self.assertEqual(self.backend.names, ["screenshot", "screenshot"],
+                         "no browser action may run while the challenge remains")
+
+        engine.confirm(True)
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"))
+        self.assertEqual(self.backend.names, ["screenshot", "screenshot", "click"])
+        self.assertEqual([event["decision"] for event in engine.status()["handoffs"]],
+                         ["continued", "continued"])
+
+    def test_declining_a_challenge_handoff_stops_without_running_a_browser_action(self):
+        cdp = SequenceCdp([{"url": "https://example.com/check", "text": "CAPTCHA challenge",
+                            "hints": ["iframe https://www.google.com/recaptcha/anchor"]}])
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        engine.start(build_flow([{"type": "click", "x": 3, "y": 4}]))
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"))
+        engine.confirm(False)
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "stopped"))
+        self.assertEqual([call[0] for call in self.backend.calls], ["screenshot"])
+        self.assertEqual(engine.status()["handoffs"][0]["decision"], "stopped")
+
+    def test_explicit_human_verification_step_pauses_then_continues(self):
+        self.engine.start(build_flow([
+            {"type": "click", "x": 1, "y": 1},
+            {"type": "pause_for_human_verification", "prompt": "لطفاً بررسی را خودت انجام بده."},
+            {"type": "click", "x": 2, "y": 2},
+        ]))
+        self.assertTrue(wait_until(lambda: self.engine.status()["status"] == "waiting"))
+        pending = self.engine.status()["awaitingConfirmation"]
+        self.assertEqual(pending["kind"], "manual_verification")
+        self.assertIn("خودت", pending["message"])
+        self.assertEqual([call[0] for call in self.backend.calls], ["click", "screenshot"])
+        self.engine.confirm(True)
+        self.assertTrue(wait_until(lambda: self.engine.status()["status"] == "done"))
+        self.assertEqual([call[0] for call in self.backend.calls], ["click", "screenshot", "click"])
+        self.assertEqual([row["status"] for row in self.engine.status()["results"]],
+                         ["ok", "ok", "ok"])
+
+
 class WaitTest(EngineTestBase):
     def test_wait_advances_the_clock(self):
         before = self.clock.now
@@ -434,6 +550,10 @@ class BackendCommandTest(unittest.TestCase):
         self.backend.click(10, 20, "left", 2)
         self.assertEqual(self.backend.argv, [["doubleclick", "10", "20"]])
 
+    def test_type_delay_is_an_explicit_fixed_cli_option(self):
+        self.backend.type_text("hello", delay_ms=50)
+        self.assertEqual(self.backend.argv, [["type", "--delay-ms", "50", "hello"]])
+
     def test_many_clicks_move_once_then_click_repeatedly(self):
         self.backend.click(1, 2, "right", 4)
         self.assertEqual(self.backend.argv[0], ["move", "1", "2"])
@@ -460,7 +580,7 @@ class BackendCommandTest(unittest.TestCase):
         self.backend.position()
         self.assertEqual(self.backend.argv, [
             ["drag", "1", "2", "3", "4", "middle"],
-            ["type", "hello world"],
+            ["type", "--delay-ms", "15", "hello world"],
             ["paste", "متن فارسی"],
             ["key", "ctrl", "l"],
             ["url", "https://example.com"],
@@ -510,7 +630,9 @@ class PageReadingTest(EngineTestBase):
             {"type": "wait_for_text", "text": "Search", "timeoutMs": 2000},
         ]))
         self.assertEqual(status["status"], "done")
-        self.assertEqual(cdp.calls[0][0], "document.body.innerText")
+        self.assertIn("document.querySelectorAll", cdp.calls[0][0],
+                      "the engine must use the read-only challenge probe first")
+        self.assertEqual(cdp.calls[1][0], "document.body.innerText")
         self.assertNotIn("page_text", self.backend.names,
                          "the clipboard fallback should not have been needed")
 

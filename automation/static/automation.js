@@ -223,14 +223,21 @@ function buildPanel() {
 
   const confirm = el('div', { id: 'mas-confirm', class: 'mas-confirm', hidden: true }, [
     el('div', { class: 'mas-confirm-box' }, [
-      el('h3', { text: t('confirmTitle') }),
+      el('h3', { id: 'mas-confirm-title', text: t('confirmTitle') }),
       el('p', { id: 'mas-confirm-label' }),
+      el('p', { id: 'mas-confirm-message' }),
+      el('a', {
+        id: 'mas-confirm-shot', hidden: true, target: '_blank', rel: 'noopener',
+        class: 'mas-confirm-shot', text: t('viewChallengeShot'),
+      }),
       el('div', { class: 'mas-row' }, [
         el('button', {
+          id: 'mas-confirm-approve',
           class: 'mas-btn mas-primary', type: 'button', text: t('approve'),
           onClick: () => control('confirm', { approve: true }),
         }),
         el('button', {
+          id: 'mas-confirm-refuse',
           class: 'mas-btn', type: 'button', text: t('refuse'),
           onClick: () => control('confirm', { approve: false }),
         }),
@@ -417,6 +424,16 @@ function renderFlow() {
         onInput: (e) => { settings.defaultDelayAfterMs = Number(e.target.value) || 0; persistFlow(); },
       }),
     ]),
+    el('label', { class: 'mas-field' }, [
+      el('span', { text: t('typingMode') }),
+      el('select', {
+        id: 'mas-flow-typing-mode', class: 'mas-input',
+        onChange: (e) => { settings.typingMode = e.target.value; persistFlow(); },
+      }, ['low', 'normal', 'fast'].map((mode) => el('option', {
+        value: mode, selected: (settings.typingMode || 'normal') === mode,
+      }, t('typing' + mode[0].toUpperCase() + mode.slice(1))))),
+    ]),
+    el('p', { class: 'mas-hint', text: t('typingModeHelp') }),
     el('label', { class: 'mas-field' }, [
       el('span', { text: t('repeat') }),
       el('input', {
@@ -661,10 +678,20 @@ function stepEditor(step) {
         el('span', { text: field.key }),
         el('select', {
           class: 'mas-input',
-          onChange: (event) => { step[field.key] = event.target.value; },
-        }, (field.options || []).map((option) => el('option', {
-          value: option, selected: String(step[field.key] || '') === option,
-        }, option))),
+          onChange: (event) => {
+            if (field.key === 'typingMode' && event.target.value === 'inherit') delete step[field.key];
+            else step[field.key] = event.target.value;
+          },
+        }, (field.options || []).map((option) => {
+          const selected = field.key === 'typingMode'
+            ? String(step[field.key] || 'inherit') === option
+            : String(step[field.key] || '') === option;
+          const optionLabel = field.key === 'typingMode'
+            ? t(option === 'inherit' ? 'typingInherit'
+              : 'typing' + option[0].toUpperCase() + option.slice(1))
+            : option;
+          return el('option', { value: option, selected }, optionLabel);
+        })),
       ]));
       continue;
     }
@@ -910,10 +937,27 @@ function renderStatus() {
   const confirm = document.getElementById('mas-confirm');
   if (confirm) {
     const waiting = status.awaitingConfirmation;
+    const kind = waiting && waiting.kind;
+    const humanHandoff = kind === 'challenge' || kind === 'manual_verification';
     confirm.hidden = !waiting;
+    confirm.classList.toggle('mas-confirm-handoff', Boolean(humanHandoff));
     if (waiting) {
-      document.getElementById('mas-confirm-label').textContent =
-        `#${waiting.index + 1} ${waiting.label || waiting.type}`;
+      const title = document.getElementById('mas-confirm-title');
+      const labelText = document.getElementById('mas-confirm-label');
+      const message = document.getElementById('mas-confirm-message');
+      const approve = document.getElementById('mas-confirm-approve');
+      const refuse = document.getElementById('mas-confirm-refuse');
+      const shot = document.getElementById('mas-confirm-shot');
+      title.textContent = kind === 'challenge' ? t('challengeTitle')
+        : kind === 'manual_verification' ? t('manualHandoffTitle') : t('confirmTitle');
+      labelText.textContent = `#${(waiting.index || 0) + 1} ${waiting.label || waiting.type}`
+        + (waiting.pageOrigin ? ` · ${waiting.pageOrigin}` : '');
+      message.textContent = kind === 'challenge' ? t('challengeBody') : (waiting.message || '');
+      approve.textContent = humanHandoff ? t('humanContinue') : t('approve');
+      refuse.textContent = humanHandoff ? t('humanStop') : t('refuse');
+      shot.hidden = !waiting.publicShot;
+      shot.href = waiting.publicShot
+        ? `${API_PREFIX}/public/shot/${encodeURIComponent(waiting.publicShot)}` : '';
     }
   }
   const run = document.getElementById('mas-run');
@@ -1259,6 +1303,9 @@ async function renderPages() {
     list.appendChild(el('div', { class: 'mas-page' }, [
       thumb,
       el('div', { class: 'mas-page-info' }, [
+        page.challengeDetected ? el('span', {
+          class: 'mas-challenge-badge', text: '⚠ ' + t('possibleChallenge'),
+        }) : null,
         el('button', {
           class: 'mas-step-label', type: 'button',
           text: truncate(page.title || page.pageKey, 60),
@@ -1293,7 +1340,13 @@ function renderPageDetail(container, page) {
     })),
   ]));
 
+  const challenge = page.challenge || { detected: false, signals: [] };
   replace(container,
+    challenge.detected ? el('div', { class: 'mas-challenge-warning' }, [
+      el('b', { text: '⚠ ' + t('possibleChallenge') }),
+      el('div', { class: 'mas-hint', text: `${t('challengeSignals')}: ${(challenge.signals || []).join(', ')}` }),
+      el('div', { class: 'mas-hint', text: t('challengeBody') }),
+    ]) : el('p', { class: 'mas-hint', text: t('noChallengeDetected') }),
     el('h4', { text: `${t('elements')} (${(page.elements || []).length})` }),
     page.url ? el('div', { class: 'mas-hint', text: page.url }) : null,
     el('table', { class: 'mas-table' }, [
@@ -1321,6 +1374,12 @@ async function copyDetected() {
   lines.push(`${t('elementText')}: ${page.title || ''}`);
   if (page.url) lines.push(`URL: ${page.url}`);
   if (page.pageKey) lines.push(`pageKey: ${page.pageKey}`);
+  if (page.challenge && page.challenge.detected) {
+    lines.push(`⚠ ${t('possibleChallenge')}: ${(page.challenge.signals || []).join(', ')}`);
+    lines.push(t('challengeCopySafety'));
+  } else {
+    lines.push(t('noChallengeDetected'));
+  }
   if (page.publicShot) {
     lines.push(`${t('shotLink')}: ${location.origin}${API_PREFIX}/public/shot/${page.publicShot}`);
   }
@@ -1346,6 +1405,7 @@ async function openPage(id) {
  * ------------------------------------------------------------------ */
 
 const ROLE_FA = { detect: 'شناسایی', run: 'اجرا', manual: 'دستی',
+  challenge: 'بررسی CAPTCHA', handoff: 'تحویل به انسان',
   before: 'قبل گام', after: 'بعد گام', error: 'لحظه خطا' };
 
 function shotLink(name) {

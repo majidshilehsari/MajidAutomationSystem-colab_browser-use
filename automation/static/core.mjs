@@ -55,7 +55,10 @@ export const STEP_DEFS = [
   { type: 'scroll', group: 'mouse', fields: [
     { key: 'amount', kind: INT }, { key: 'x', kind: INT, optional: true },
     { key: 'y', kind: INT, optional: true }] },
-  { type: 'type', group: 'keyboard', fields: [{ key: 'text', kind: TEXT }] },
+  { type: 'type', group: 'keyboard', fields: [
+    { key: 'text', kind: TEXT },
+    { key: 'typingMode', kind: SELECT, options: ['inherit', 'low', 'normal', 'fast'], optional: true },
+  ] },
   { type: 'paste', group: 'keyboard', fields: [{ key: 'text', kind: AREA }] },
   { type: 'key', group: 'keyboard', fields: [{ key: 'keysText', kind: TEXT, virtual: true }] },
   { type: 'wait', group: 'flow', fields: [{ key: 'ms', kind: INT }] },
@@ -68,6 +71,9 @@ export const STEP_DEFS = [
   // Read what the page says right now and put it in the run report, so the
   // model can see the page instead of guessing.
   { type: 'capture_text', group: 'flow', fields: [{ key: 'limit', kind: INT, optional: true }] },
+  { type: 'pause_for_human_verification', group: 'safety', fields: [
+    { key: 'prompt', kind: AREA },
+  ] },
 ];
 
 export const STEP_DEFAULTS = {
@@ -85,6 +91,9 @@ export const STEP_DEFAULTS = {
   focus_window: { title: 'Google Chrome' },
   screenshot: {},
   capture_text: {},
+  pause_for_human_verification: {
+    prompt: 'وقتی بررسی یا کار انسانی تمام شد و صفحه امن و آماده‌ی ادامه بود، این‌جا ادامه را بزن.',
+  },
 };
 
 export function stepDef(type) {
@@ -123,6 +132,7 @@ export function labelFor(step) {
     case 'focus_window': return `focus ${truncate(step.title, 30)}`;
     case 'screenshot': return step.name ? `screenshot ${step.name}` : 'screenshot';
     case 'capture_text': return step.limit ? `capture text (max ${step.limit})` : 'capture text';
+    case 'pause_for_human_verification': return 'pause for human verification';
     default: return step.type;
   }
 }
@@ -166,6 +176,7 @@ export function emptyFlow(name = 'Untitled flow') {
     viewport: { ...DEFAULT_VIEWPORT },
     settings: {
       defaultDelayAfterMs: 350,
+      typingMode: 'normal',
       screenshotAfterEachStep: false,
       stopOnError: true,
       repeat: 1,
@@ -184,6 +195,10 @@ export function validateFlow(flow, viewport = DEFAULT_VIEWPORT) {
   const errors = [];
   if (!flow || typeof flow !== 'object') return ['flow must be an object'];
   if (!Array.isArray(flow.steps)) errors.push('steps must be a list');
+  if (flow.settings && flow.settings.typingMode !== undefined
+      && !['low', 'normal', 'fast'].includes(flow.settings.typingMode)) {
+    errors.push('settings: typingMode must be low, normal, or fast');
+  }
   const w = (flow.viewport && flow.viewport.width) || viewport.width;
   const h = (flow.viewport && flow.viewport.height) || viewport.height;
   (flow.steps || []).forEach((step, index) => {
@@ -202,6 +217,17 @@ export function validateFlow(flow, viewport = DEFAULT_VIEWPORT) {
     }
     if ((step.type === 'type' || step.type === 'paste') && !step.text) {
       errors.push(`${where}: text must not be empty`);
+    }
+    if (step.type === 'type' && step.typingMode !== undefined
+        && !['low', 'normal', 'fast'].includes(step.typingMode)) {
+      errors.push(`${where}: typingMode must be low, normal, or fast`);
+    }
+    if (step.type === 'pause_for_human_verification') {
+      if (!(typeof step.prompt === 'string' && step.prompt.trim())) {
+        errors.push(`${where}: prompt must not be empty`);
+      } else if (step.prompt.length > 1000) {
+        errors.push(`${where}: prompt must be at most 1000 characters`);
+      }
     }
     if (step.type === 'wait' && !(Number(step.ms) > 0)) {
       errors.push(`${where}: ms must be positive`);
@@ -400,6 +426,17 @@ export const STRINGS = {
     token: 'رمز اتصال', tokenHint: 'همان AUTOMATION_TOKEN که در Colab چاپ شد.',
     connected: 'متصل', needToken: 'رمز لازم است',
     logEmpty: 'گزارشی نیست.',
+    typingMode: 'سرعت پیش‌فرض تایپ',
+    typingModeHelp: 'این گزینه فقط برای پایداری ورودی است؛ تایپ تصادفی یا راه دورزدن CAPTCHA نیست. برای فارسی و متن بلند از paste استفاده کن.',
+    typingInherit: 'پیش‌فرض جریان', typingLow: 'کم · ۵۰ ms بین کلیدها',
+    typingNormal: 'معمولی · ۱۵ ms بین کلیدها', typingFast: 'سریع · ۰ ms بین کلیدها',
+    challengeTitle: 'بررسی امنیتی: اجرای خودکار متوقف شد',
+    challengeBody: 'نشانه‌ای از CAPTCHA یا بررسی امنیتی دیده شد. فقط خودت آن را در مرورگر بررسی کن؛ کد یا پاسخ را برای هوش مصنوعی نفرست. بعد از رفع چالش و عادی‌شدن صفحه، ادامه را بزن.',
+    manualHandoffTitle: 'اقدام انسانی لازم است',
+    humanContinue: 'ادامه پس از بررسی انسانی', humanStop: 'توقف جریان',
+    viewChallengeShot: 'دیدن عکس زمان توقف', possibleChallenge: 'احتمال CAPTCHA / بررسی امنیتی',
+    challengeSignals: 'نشانه‌ها', noChallengeDetected: 'در این بررسی نشانه‌ی روشنی از CAPTCHA پیدا نشد؛ تشخیص قطعی نیست.',
+    challengeCopySafety: 'ایمنی: اگر CAPTCHA یا بررسی امنیتی باشد، توقف کن؛ فقط انسان آن را انجام می‌دهد.',
     confirmTitle: 'تأیید انسانی لازم است', approve: 'تأیید می‌کنم', refuse: 'اجرا نشود',
     statusIdle: 'آماده', statusRunning: 'در حال اجرا', statusPaused: 'متوقف موقت',
     statusWaiting: 'منتظر تأیید', statusDone: 'تمام شد', statusError: 'خطا', statusStopped: 'قطع شد',
@@ -457,6 +494,17 @@ export const STRINGS = {
     token: 'Access token', tokenHint: 'The AUTOMATION_TOKEN printed in Colab.',
     connected: 'Connected', needToken: 'Token required',
     logEmpty: 'Nothing logged yet.',
+    typingMode: 'Default typing speed',
+    typingModeHelp: 'For input reliability only; no randomized typing or CAPTCHA bypass. Use paste for Unicode and long text.',
+    typingInherit: 'Flow default', typingLow: 'Low · 50 ms between keys',
+    typingNormal: 'Normal · 15 ms between keys', typingFast: 'Fast · 0 ms between keys',
+    challengeTitle: 'Security check: automation paused',
+    challengeBody: 'CAPTCHA or security-verification cues were detected. Review and handle the page yourself; do not send the code or answer to the AI. Continue only after the challenge is cleared and the page is back to normal.',
+    manualHandoffTitle: 'Human action needed',
+    humanContinue: 'Continue after human review', humanStop: 'Stop flow',
+    viewChallengeShot: 'View screenshot at pause', possibleChallenge: 'Possible CAPTCHA / security check',
+    challengeSignals: 'Signals', noChallengeDetected: 'No clear CAPTCHA cue was found in this check; detection is not definitive.',
+    challengeCopySafety: 'Safety: pause at CAPTCHA or security checks; only the human handles them.',
     confirmTitle: 'Human confirmation needed', approve: 'Approve', refuse: 'Do not run',
     statusIdle: 'Idle', statusRunning: 'Running', statusPaused: 'Paused',
     statusWaiting: 'Waiting', statusDone: 'Done', statusError: 'Error', statusStopped: 'Stopped',

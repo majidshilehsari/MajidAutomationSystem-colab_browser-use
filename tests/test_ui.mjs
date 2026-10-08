@@ -186,6 +186,49 @@ test('a valid flow renders the step list (the appendChild(null) crash)', async (
   }
 });
 
+test('typing mode settings, per-step overrides and human-verification steps edit cleanly', async () => {
+  const flow = {
+    name: 'verification',
+    viewport: { width: 1366, height: 768 },
+    settings: { defaultDelayAfterMs: 0, typingMode: 'low', repeat: 1,
+      screenshotAfterEachStep: false, stopOnError: true, allowShellSteps: false,
+      stepTimeoutMs: 60000 },
+    steps: [
+      { id: 't1', type: 'type', text: 'hello', label: 'type "hello"', enabled: true },
+      { id: 'h1', type: 'pause_for_human_verification',
+        prompt: 'لطفاً این مرحله را خودت بررسی کن.', label: 'pause for human verification', enabled: true },
+    ],
+  };
+  const page = await mount({ flow });
+  try {
+    const globalMode = page.doc.getElementById('mas-flow-typing-mode');
+    assert.ok(globalMode, 'flow-level typing mode selector is missing');
+    assert.equal(globalMode.value, 'low');
+
+    const typeLabel = Array.from(page.doc.querySelectorAll('.mas-step-label'))
+      .find((button) => button.textContent.includes('hello'));
+    typeLabel.dispatchEvent(new page.window.Event('click'));
+    const stepMode = page.doc.querySelector('.mas-editor select');
+    assert.ok(stepMode, 'per-step typing-mode selector is missing');
+    assert.equal(stepMode.value, 'inherit');
+    stepMode.value = 'fast';
+    stepMode.dispatchEvent(new page.window.Event('change'));
+    page.doc.querySelector('.mas-editor button').dispatchEvent(new page.window.Event('click'));
+    const saved = JSON.parse(page.window.localStorage.getItem('mas.flow'));
+    assert.equal(saved.steps[0].typingMode, 'fast');
+
+    const pauseLabel = Array.from(page.doc.querySelectorAll('.mas-step-label'))
+      .find((button) => button.textContent.includes('pause for human'));
+    pauseLabel.dispatchEvent(new page.window.Event('click'));
+    const prompt = page.doc.querySelector('.mas-editor textarea');
+    assert.ok(prompt, 'human verification prompt editor is missing');
+    assert.equal(prompt.value, 'لطفاً این مرحله را خودت بررسی کن.');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
 test('the confirmation overlay stays off screen until a step needs it', async () => {
   const page = await mount();
   try {
@@ -193,6 +236,46 @@ test('the confirmation overlay stays off screen until a step needs it', async ()
     assert.equal(confirm.hidden, true, 'the overlay should start hidden');
     assert.equal(page.display('#mas-confirm'), 'none',
       'display:flex overrides [hidden]: the overlay would cover the VNC password prompt');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('CAPTCHA handoff notice is non-blocking and offers a human-only continuation', async () => {
+  const status = {
+    runId: 'r-captcha', status: 'waiting', index: 1, stepCount: 3, elapsedMs: 900,
+    currentStep: null,
+    awaitingConfirmation: {
+      index: 1, label: 'verify page', type: 'click', kind: 'challenge',
+      message: 'Review the page yourself.', pageOrigin: 'https://example.com',
+      publicShot: 'challenge-1.png',
+    },
+    entries: [], results: [], handoffs: [],
+  };
+  const page = await mount({ status });
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    const confirm = page.doc.getElementById('mas-confirm');
+    assert.ok(await page.until(() => !confirm.hidden), 'the human handoff notice did not appear');
+    assert.ok(confirm.classList.contains('mas-confirm-handoff'));
+    assert.equal(page.window.getComputedStyle(confirm).pointerEvents, 'none',
+      'the handoff overlay must not block clicks on the noVNC canvas');
+    assert.ok(confirm.textContent.includes('بررسی امنیتی'));
+    assert.ok(confirm.textContent.includes('کد یا پاسخ را برای هوش مصنوعی نفرست'));
+    assert.equal(page.doc.getElementById('mas-confirm-approve').textContent,
+      'ادامه پس از بررسی انسانی');
+    assert.equal(page.doc.getElementById('mas-confirm-refuse').textContent, 'توقف جریان');
+    assert.equal(page.doc.getElementById('mas-confirm-shot').getAttribute('href'),
+      '/automation/api/public/shot/challenge-1.png');
+
+    page.doc.getElementById('mas-confirm-approve').dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    const posted = page.posts.find((p) => p.url.endsWith('/control'));
+    assert.ok(posted, 'the continuation button did not call the control endpoint');
+    assert.deepEqual(JSON.parse(posted.body), { action: 'confirm', approve: true });
+    assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
   }

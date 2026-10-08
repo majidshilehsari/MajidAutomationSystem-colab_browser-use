@@ -31,6 +31,7 @@ class ValidateFlowTest(unittest.TestCase):
         self.assertEqual(errors, [])
         self.assertEqual(len(normalized["steps"]), 4)
         self.assertEqual(normalized["settings"]["defaultDelayAfterMs"], 350)
+        self.assertEqual(normalized["settings"]["typingMode"], "normal")
 
     def test_fills_in_ids_labels_and_defaults(self):
         normalized, errors = schema.validate_flow(flow())
@@ -68,6 +69,47 @@ class ValidateFlowTest(unittest.TestCase):
         self.assertEqual(normalized["settings"]["repeat"], 3)
         self.assertFalse(normalized["settings"]["stopOnError"])
         self.assertTrue(normalized["settings"]["screenshotAfterEachStep"] is False)
+
+    def test_type_accepts_fixed_typing_modes_and_inherits_flow_setting(self):
+        normalized, errors = schema.validate_flow(flow(
+            steps=[{"type": "type", "text": "hello", "typingMode": "low"}],
+            settings={"typingMode": "fast"}))
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["settings"]["typingMode"], "fast")
+        self.assertEqual(normalized["steps"][0]["typingMode"], "low")
+
+    def test_rejects_unknown_typing_modes(self):
+        _, errors = schema.validate_flow(flow(
+            steps=[{"type": "type", "text": "hello", "typingMode": "stealth"}]))
+        self.assertTrue(any("typingMode" in error for error in errors))
+        _, errors = schema.validate_flow(flow(settings={"typingMode": "random"}))
+        self.assertTrue(any("settings: 'typingMode'" in error for error in errors))
+
+    def test_typing_mode_is_only_allowed_on_type_steps(self):
+        _, errors = schema.validate_flow(flow(
+            steps=[{"type": "wait", "ms": 1, "typingMode": "fast"}]))
+        self.assertTrue(any("unexpected field 'typingMode'" in error for error in errors))
+
+    def test_human_verification_step_requires_a_plain_prompt(self):
+        normalized, errors = schema.validate_flow(flow(steps=[{
+            "type": "pause_for_human_verification", "prompt": "Please do this manually.",
+        }]))
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["steps"][0]["type"], "pause_for_human_verification")
+        _, errors = schema.validate_flow(flow(steps=[{"type": "pause_for_human_verification"}]))
+        self.assertTrue(any("missing required field 'prompt'" in error for error in errors))
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "pause_for_human_verification", "prompt": "   ",
+        }]))
+        self.assertTrue(any("'prompt' must be plain text" in error for error in errors))
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "pause_for_human_verification", "prompt": 12,
+        }]))
+        self.assertTrue(any("prompt' must be plain text" in error for error in errors))
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "pause_for_human_verification", "prompt": "x" * 1001,
+        }]))
+        self.assertTrue(any("prompt' must be plain text" in error for error in errors))
 
     def test_shell_steps_are_blocked_unless_enabled(self):
         _, errors = schema.validate_flow(flow(steps=[{"type": "shell", "command": "ls"}]))
@@ -151,6 +193,8 @@ class DefaultLabelTest(unittest.TestCase):
             "key ctrl+l": {"type": "key", "keys": ["ctrl+l"]},
             "wait 500ms": {"type": "wait", "ms": 500},
             "scroll -3": {"type": "scroll", "amount": -3},
+            "pause for human verification": {
+                "type": "pause_for_human_verification", "prompt": "continue manually"},
         }
         for expected, step in cases.items():
             self.assertEqual(schema.default_label(step), expected)
