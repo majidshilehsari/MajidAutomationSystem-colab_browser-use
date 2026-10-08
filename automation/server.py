@@ -35,7 +35,7 @@ from typing import Any, Dict, Optional, Tuple, Type
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from automation import schema  # noqa: E402
+from automation import cdp, schema  # noqa: E402
 from automation.api import API_PREFIX, AutomationApi, FlowStore  # noqa: E402
 from automation.detect import Detector  # noqa: E402
 from automation.engine import AutomationEngine, ControlBackend  # noqa: E402
@@ -281,7 +281,10 @@ def build_api(args: argparse.Namespace) -> AutomationApi:
                 token = handle.read().strip()
     backend = ControlBackend(script_path=args.control_script, display=args.display,
                              screenshot_dir=os.path.join(args.data_dir, "shots"))
-    engine = AutomationEngine(backend, args.data_dir)
+    # The engine reads page text through CDP when the debugging port answers,
+    # so wait_for_text and capture_text see the real DOM instead of whatever
+    # ctrl+a happens to select.
+    engine = AutomationEngine(backend, args.data_dir, cdp=cdp, cdp_port=args.cdp_port)
     detector = Detector(backend, args.data_dir, viewport=dict(schema.DEFAULT_VIEWPORT),
                         cdp_port=args.cdp_port)
     guide_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_guide.md")

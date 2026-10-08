@@ -281,6 +281,31 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertIn("اجرا روی گام **#2", text)
         self.assertIn("| 1 |", text)  # the per-step table
 
+    def test_report_links_the_published_screenshots_absolutely(self):
+        from automation.api import _report_section
+        status = {
+            "runId": "r1", "status": "error", "index": 1, "passIndex": 1,
+            "stepCount": 2, "elapsedMs": 900, "error": "boom",
+            "results": [
+                {"index": 0, "passIndex": 1, "type": "capture_text",
+                 "label": "خواندن صفحه", "status": "ok", "durationMs": 12,
+                 "text": "Battle Arena\nStart game", "error": None},
+                {"index": 1, "passIndex": 1, "type": "paste", "label": "paste",
+                 "status": "error", "durationMs": 60000, "error": "timed out",
+                 "shots": {"error": "step-001-error-x.png"},
+                 "image": {"width": 1366, "height": 768}},
+            ],
+            "entries": [],
+        }
+        text = _report_section(status, "https://abc.trycloudflare.com")
+        # The model must be able to open the failure image itself.
+        self.assertIn("https://abc.trycloudflare.com/automation/api/public/shot/"
+                      "step-001-error-x.png", text)
+        self.assertIn("1366x768", text)
+        # ...and read what the page actually said.
+        self.assertIn("Battle Arena", text)
+        self.assertIn("Start game", text)
+
     def test_report_endpoint_answers_when_nothing_has_run(self):
         status, body = http_request(self.url("/automation/api/report"))
         self.assertEqual(status, 200)

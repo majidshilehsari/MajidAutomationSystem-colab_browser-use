@@ -42,6 +42,9 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     "goto_url": {"required": ["url"], "optional": []},
     "focus_window": {"required": ["title"], "optional": []},
     "screenshot": {"required": [], "optional": ["name"]},
+    # Read the whole visible page text and put it in the run report, so the
+    # model can see the page without guessing what was on it.
+    "capture_text": {"required": [], "optional": ["limit"]},
     "shell": {"required": ["command"], "optional": []},
 }
 
@@ -180,6 +183,8 @@ def _validate_settings(settings: Any, errors: List[str]) -> Dict[str, Any]:
     defaults = {
         "defaultDelayAfterMs": 350,
         "screenshotAfterEachStep": False,
+        "screenshotBeforeEachStep": False,
+        "screenshotOnError": True,
         "stopOnError": True,
         "repeat": 1,
         "allowShellSteps": False,
@@ -198,7 +203,8 @@ def _validate_settings(settings: Any, errors: List[str]) -> Dict[str, Any]:
             _validate_int(settings, field, "settings", errors, 0, 10 * 60 * 1000)
     if "repeat" in settings:
         _validate_int(settings, "repeat", "settings", errors, 1, 1000)
-    for field in ("screenshotAfterEachStep", "stopOnError", "allowShellSteps"):
+    for field in ("screenshotAfterEachStep", "screenshotBeforeEachStep",
+                  "screenshotOnError", "stopOnError", "allowShellSteps"):
         if field in settings and not isinstance(settings[field], bool):
             _err(errors, "settings: '%s' must be true or false" % field)
     merged = dict(defaults)

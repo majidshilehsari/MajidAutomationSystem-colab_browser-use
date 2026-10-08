@@ -16,6 +16,7 @@ import json
 import os
 import shlex
 import signal
+import struct
 import subprocess
 import threading
 import time
@@ -251,9 +252,15 @@ class AutomationEngine:
     """Single-flow runner with pause/stop/confirmation support."""
 
     def __init__(self, backend: ControlBackend, data_dir: str, sleep=time.sleep,
-                 clock=time.time):
+                 clock=time.time, cdp: Any = None, cdp_port: int = 9222):
         self.backend = backend
         self.data_dir = data_dir
+        self._cdp = cdp
+        self._cdp_port = cdp_port
+        self._cdp_warned = False
+        # Screenshots are copied here so a run report can link them without a
+        # token, which is what lets the model actually look at the page.
+        self.public_dir = os.path.join(data_dir, "public")
         self._sleep = sleep
         self._clock = clock
         self._lock = threading.RLock()
@@ -349,7 +356,9 @@ class AutomationEngine:
     def _record(self, index: int, step: Dict[str, Any], status: str,
                 started_at: Optional[float] = None, duration_ms: int = 0,
                 rc: Optional[int] = None, error: Optional[str] = None,
-                screenshot: Optional[str] = None) -> None:
+                screenshot: Optional[str] = None, text: Optional[str] = None,
+                shots: Optional[Dict[str, str]] = None,
+                image: Optional[Dict[str, int]] = None) -> None:
         """Append one machine-readable row about a step's outcome."""
         with self._lock:
             assert self._state is not None
@@ -365,9 +374,58 @@ class AutomationEngine:
                 "rc": rc,
                 "error": (error or None),
                 "screenshot": screenshot,
+                # The page text a capture_text step read, and the published
+                # screenshots around the step, so a report can show the model
+                # what the page actually said and looked like.
+                "text": text,
+                "shots": shots or None,
+                "image": image,
             })
             if len(self._state.results) > 2000:
                 self._state.results = self._state.results[-1500:]
+
+    def _page_text(self) -> Tuple[int, str, str]:
+        """The visible text of the page.
+
+        CDP reads the real DOM, so it works no matter which element has focus.
+        The clipboard fallback presses ctrl+a / ctrl+c, which selects the
+        focused field instead of the page whenever the caret sits in an input,
+        so a wait_for_text on a page label could never match. CDP first,
+        clipboard only if the debugging port is unreachable.
+        """
+        if self._cdp is not None:
+            try:
+                result = self._cdp.evaluate("document.body.innerText", port=self._cdp_port)
+                value = (result or {}).get("value")
+                if isinstance(value, str) and value:
+                    return 0, value, ""
+            except Exception as exc:
+                if not self._cdp_warned:
+                    self._cdp_warned = True
+                    self._log("warn", "page text via CDP failed, falling back to the "
+                                      "clipboard: %s" % exc)
+        return self.backend.page_text()
+
+    def _publish(self, path: Optional[str]) -> Optional[str]:
+        """Copy a screenshot into the public share dir; returns its file name."""
+        if not path:
+            return None
+        target = path.strip()
+        if not os.path.isfile(target):
+            return None
+        name = os.path.basename(target)
+        try:
+            os.makedirs(self.public_dir, exist_ok=True)
+            with open(target, "rb") as src:
+                data = src.read()
+            tmp = os.path.join(self.public_dir, name + ".tmp")
+            with open(tmp, "wb") as dst:
+                dst.write(data)
+            os.replace(tmp, os.path.join(self.public_dir, name))
+            return name
+        except OSError as exc:
+            self._log("warn", "could not publish %s: %s" % (name, exc))
+            return None
 
     def _interruptible_sleep(self, seconds: float) -> bool:
         """Sleep in small slices; returns False if a stop was requested."""
@@ -462,24 +520,60 @@ class AutomationEngine:
                 self._wakeup.wait(0.2)
                 self._wakeup.clear()
 
+        shots: Dict[str, str] = {}
+        image = None
+        step_id = step.get("id", "s")
+        kind = step.get("type")
+
+        if settings.get("screenshotBeforeEachStep"):
+            before = self._capture(shot_dir, "step-%03d-before-%s.png" % (index, step_id))
+            published = self._publish(before)
+            if published:
+                shots["before"] = published
+
         started = self._clock()
         rc, out, err = self._dispatch(step)
         duration_ms = int((self._clock() - started) * 1000)
 
         ok = rc == 0
+        captured = None
+        if kind == "capture_text":
+            limit = int(step.get("limit") or 0) or 4000
+            captured = (out or "")[:limit]
+        keep = 6000 if captured is not None else 800
         self._log("ok" if ok else "error",
                   "%s -> rc=%d in %dms" % (label, rc, duration_ms),
-                  rc=rc, stdout=out[:800], stderr=err[:800], durationMs=duration_ms)
+                  rc=rc, stdout=(out or "")[:keep], stderr=(err or "")[:800],
+                  durationMs=duration_ms)
 
-        shot_name = None
-        if settings.get("screenshotAfterEachStep"):
-            shot_name = "step-%03d-%s.png" % (index, step.get("id", "s"))
-            self._capture(shot_dir, shot_name)
+        if kind == "screenshot" and ok and out:
+            published = self._publish(out)
+            if published:
+                shots["after"] = published
+                image = png_size(os.path.join(shot_dir, published))
+        elif settings.get("screenshotAfterEachStep"):
+            after = self._capture(shot_dir, "step-%03d-after-%s.png" % (index, step_id))
+            published = self._publish(after)
+            if published:
+                shots["after"] = published
+                image = png_size(os.path.join(shot_dir, published))
+
+        if not ok and settings.get("screenshotOnError", True) and not self._stop_requested:
+            # The page at the moment of failure is the most useful image there
+            # is, and stopOnError would otherwise end the run without one. A
+            # stop the human asked for is not a failure, and photographing it
+            # would delay the very thing they pressed the button for.
+            failure = self._capture(shot_dir, "step-%03d-error-%s.png" % (index, step_id))
+            published = self._publish(failure)
+            if published:
+                shots["error"] = published
+                image = image or png_size(os.path.join(shot_dir, published))
 
         self._record(index, step, "ok" if ok else "error",
                      started_at=started, duration_ms=duration_ms, rc=rc,
                      error=None if ok else (err or out or "rc=%d" % rc)[:400],
-                     screenshot=shot_name)
+                     screenshot=shots.get("after"), text=captured,
+                     shots=shots or None, image=image)
 
         if not ok:
             if step.get("continueOnError"):
@@ -536,6 +630,11 @@ class AutomationEngine:
             return 0, "", ""
         if kind == "wait_for_text":
             return self._wait_for_text(step)
+        if kind == "capture_text":
+            rc, out, err = self._page_text()
+            if rc != 0:
+                return rc, "", err or "could not read the page text"
+            return 0, out or "", ""
         if kind == "goto_url":
             return self.backend.goto_url(step["url"])
         if kind == "focus_window":
@@ -557,7 +656,7 @@ class AutomationEngine:
         attempts = 0
         while True:
             attempts += 1
-            rc, out, err = self.backend.page_text()
+            rc, out, err = self._page_text()
             found = rc == 0 and needle.lower() in (out or "").lower()
             if found != want_absent:
                 return 0, "matched after %d attempt(s)" % attempts, ""
@@ -598,6 +697,19 @@ class AutomationEngine:
                     json.dump(summary, handle, ensure_ascii=False, indent=2)
             except OSError:
                 pass
+
+
+def png_size(path: str) -> Optional[Dict[str, int]]:
+    """Width and height of a PNG, read from IHDR so no image library is needed."""
+    try:
+        with open(path, "rb") as handle:
+            head = handle.read(26)
+    except OSError:
+        return None
+    if len(head) < 24 or head[:8] != b"\x89PNG\r\n\x1a\n":
+        return None
+    width, height = struct.unpack(">II", head[16:24])
+    return {"width": int(width), "height": int(height)}
 
 
 class _Stopped(Exception):

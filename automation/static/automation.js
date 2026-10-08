@@ -428,6 +428,20 @@ function renderFlow() {
     ]),
     el('label', { class: 'mas-check' }, [
       el('input', {
+        type: 'checkbox', checked: settings.screenshotBeforeEachStep,
+        onChange: (e) => { settings.screenshotBeforeEachStep = e.target.checked; persistFlow(); },
+      }),
+      el('span', { text: t('screenshotBefore') }),
+    ]),
+    el('label', { class: 'mas-check' }, [
+      el('input', {
+        type: 'checkbox', checked: settings.screenshotOnError !== false,
+        onChange: (e) => { settings.screenshotOnError = e.target.checked; persistFlow(); },
+      }),
+      el('span', { text: t('screenshotOnError') }),
+    ]),
+    el('label', { class: 'mas-check' }, [
+      el('input', {
         type: 'checkbox', checked: settings.stopOnError,
         onChange: (e) => { settings.stopOnError = e.target.checked; persistFlow(); },
       }),
@@ -443,7 +457,7 @@ function renderFlow() {
     }),
     button(t('load'), loadFlowDialog),
     button('JSON ⇩', exportJson),
-    button('📋 ' + t('copyReport'), () => copyFrom('/report')),
+    button('📋 ' + t('copyReport'), copyReport, { class: 'mas-btn' }),
     button('🗑 ' + t('clearAll'), clearAllSteps, { class: 'mas-btn mas-danger' }),
   ]);
 
@@ -454,7 +468,95 @@ function renderFlow() {
     ])
     : null;
 
-  replace(pane, nameRow, addRow, errorBox, list, settingsBox, ioRow);
+  const libraryBox = el('details', { class: 'mas-settings' }, [
+    el('summary', { text: '📚 ' + t('library') }),
+    el('div', { id: 'mas-library' }),
+  ]);
+
+  replace(pane, nameRow, addRow, errorBox, list, settingsBox, libraryBox, ioRow);
+  renderLibrary();
+}
+
+/* ------------------------------------------------------------------ *
+ * Saved flows: one place that keeps the runs which worked
+ * ------------------------------------------------------------------ */
+
+async function renderLibrary() {
+  const box = document.getElementById('mas-library');
+  if (!box) return;
+  replace(box, el('p', { class: 'mas-lib-empty', text: '…' }));
+  let flows = [];
+  try {
+    const data = await api('/flows');
+    flows = data.flows || [];
+  } catch (error) {
+    replace(box, el('p', { class: 'mas-lib-empty', text: error.message }));
+    return;
+  }
+  if (!flows.length) {
+    replace(box, el('p', { class: 'mas-lib-empty', text: t('libraryEmpty') }));
+    return;
+  }
+  replace(box, el('div', { class: 'mas-library' }, flows.map((item) => el('div', {
+    class: 'mas-lib-row', dataset: { name: item.name },
+  }, [
+    el('div', { class: 'mas-lib-main' }, compact([
+      el('b', { text: item.name }),
+      el('span', {
+        class: 'mas-lib-meta',
+        text: `${item.steps} ${t('stepsWord')} · ${formatTime(item.updatedAt)}`,
+      }),
+      item.description ? el('span', { class: 'mas-lib-desc', text: item.description }) : null,
+    ])),
+    el('div', { class: 'mas-lib-actions' }, [
+      button('⤓', () => openSavedFlow(item.name), { title: t('load') }),
+      button('▶', () => runSavedFlow(item.name), { class: 'mas-btn mas-primary', title: t('run') }),
+      button('🗑', () => deleteSavedFlow(item.name), { class: 'mas-btn mas-danger', title: t('delete') }),
+    ]),
+  ]))));
+}
+
+async function openSavedFlow(name) {
+  try {
+    const detail = await api(`/flows/${encodeURIComponent(name)}`);
+    if (!detail.flow) throw new Error('empty flow');
+    state.flow = detail.flow;
+    state.openStepId = null;
+    persistFlow();
+    renderFlow();
+    toast(`${t('load')}: ${name}`, 'ok');
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function runSavedFlow(name) {
+  try {
+    const detail = await api(`/flows/${encodeURIComponent(name)}`);
+    if (!detail.flow) throw new Error('empty flow');
+    state.flow = detail.flow;
+    persistFlow();
+    renderFlow();
+    await runFlow();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function deleteSavedFlow(name) {
+  if (!window.confirm(t('deleteSavedConfirm').replace('{n}', name))) return;
+  try {
+    await api(`/flows/${encodeURIComponent(name)}`, { method: 'DELETE' });
+    toast(`${t('delete')}: ${name}`, 'ok');
+    renderLibrary();
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+/** The report with absolute screenshot links, so the model can open them. */
+function copyReport() {
+  return copyFrom('/report?base=' + encodeURIComponent(window.location.origin));
 }
 
 /** Delete every step, after asking. One at a time gets old by step ten. */
@@ -840,7 +942,7 @@ function renderRunPanel(raw, label) {
         text: `${done}/${total}${failed ? ` · ${failed} ✕` : ''}`,
       }),
       el('span', { class: 'mas-spacer' }),
-      button('📋 ' + t('copyReport'), () => copyFrom('/report')),
+      button('📋 ' + t('copyReport'), copyReport),
     ]),
     el('div', { class: 'mas-bar' }, [
       el('div', {

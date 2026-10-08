@@ -65,6 +65,9 @@ export const STEP_DEFS = [
   { type: 'goto_url', group: 'flow', fields: [{ key: 'url', kind: TEXT }] },
   { type: 'focus_window', group: 'flow', fields: [{ key: 'title', kind: TEXT }] },
   { type: 'screenshot', group: 'flow', fields: [{ key: 'name', kind: TEXT, optional: true }] },
+  // Read what the page says right now and put it in the run report, so the
+  // model can see the page instead of guessing.
+  { type: 'capture_text', group: 'flow', fields: [{ key: 'limit', kind: INT, optional: true }] },
 ];
 
 export const STEP_DEFAULTS = {
@@ -81,6 +84,7 @@ export const STEP_DEFAULTS = {
   goto_url: { url: 'https://' },
   focus_window: { title: 'Google Chrome' },
   screenshot: {},
+  capture_text: {},
 };
 
 export function stepDef(type) {
@@ -118,6 +122,7 @@ export function labelFor(step) {
     case 'goto_url': return `open ${truncate(step.url, 40)}`;
     case 'focus_window': return `focus ${truncate(step.title, 30)}`;
     case 'screenshot': return step.name ? `screenshot ${step.name}` : 'screenshot';
+    case 'capture_text': return step.limit ? `capture text (max ${step.limit})` : 'capture text';
     default: return step.type;
   }
 }
@@ -354,6 +359,10 @@ export const STRINGS = {
     aiRequestNone: 'هنوز صفحه‌ای شناسایی نشده؛ اول «شناسایی صفحه» را بزن.',
     openVnc: 'نمای مرورگر', openPanel: 'پنل بزرگ',
     copyReport: 'کپی گزارش اجرا', nowRunning: 'در حال اجرا:',
+    library: 'کتابخانه‌ی جریان‌ها', libraryEmpty: 'هنوز جریانی ذخیره نشده',
+    stepsWord: 'گام', deleteSavedConfirm: 'جریان «{n}» از کتابخانه پاک شود؟',
+    screenshotBefore: 'عکس قبل از هر گام',
+    screenshotOnError: 'عکس هنگام خطا',
     aiNotes: 'گفته‌های هوش مصنوعی (خلاصه و سؤال‌ها)',
     clearAll: 'پاک کردن همه', clearedAll: 'همه‌ی مراحل پاک شد',
     nothingToClear: 'مرحله‌ای برای پاک کردن نیست',
@@ -399,6 +408,10 @@ export const STRINGS = {
     aiRequestNone: 'No page detected yet; press Detect first.',
     openVnc: 'Browser view', openPanel: 'Full panel',
     copyReport: 'Copy run report', nowRunning: 'Running:',
+    library: 'Saved flows', libraryEmpty: 'Nothing saved yet',
+    stepsWord: 'steps', deleteSavedConfirm: 'Delete "{n}" from the library?',
+    screenshotBefore: 'Screenshot before each step',
+    screenshotOnError: 'Screenshot on error',
     aiNotes: "What the AI said (summary and questions)",
     clearAll: 'Clear all', clearedAll: 'All steps cleared',
     nothingToClear: 'There is nothing to clear',

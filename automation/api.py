@@ -385,9 +385,11 @@ class AutomationApi:
                 return text_response(200, handle.read(), "text/markdown; charset=utf-8")
         return text_response(200, _builtin_guide(self.viewport), "text/markdown; charset=utf-8")
 
-    def route_report(self, **_: Any) -> Response:
+    def route_report(self, *, query: Optional[Dict[str, List[str]]] = None,
+                     **_: Any) -> Response:
         """The last run, step by step, as the AI sees it."""
-        return text_response(200, _report_section(self.engine.status()) or
+        base = ((query or {}).get("base") or [""])[0].rstrip("/")
+        return text_response(200, _report_section(self.engine.status(), base) or
                              "هنوز اجرایی ثبت نشده است.")
 
     def route_prompt(self, *, body: bytes = b"", **_: Any) -> Response:
@@ -414,7 +416,7 @@ class AutomationApi:
         if flow:
             normalized, errors = schema.validate_flow(flow)
             parts.append(_flow_section(normalized if not errors else flow, errors))
-        report = _report_section(self.engine.status())
+        report = _report_section(self.engine.status(), public_base)
         if report:
             parts.append(report)
         parts.append(_reply_instructions())
@@ -541,7 +543,15 @@ def _previous_reply_section(text: str) -> str:
     ])
 
 
-def _report_section(status: Dict[str, Any]) -> str:
+def _shot_url(name: Optional[str], public_base: str) -> str:
+    if not name:
+        return ""
+    if public_base:
+        return "%s%s/public/shot/%s" % (public_base, API_PREFIX, name)
+    return "%s/public/shot/%s" % (API_PREFIX, name)
+
+
+def _report_section(status: Dict[str, Any], public_base: str = "") -> str:
     """Everything that actually happened on the desktop, step by step.
 
     This is the part that lets the model diagnose a run that stopped halfway:
@@ -568,21 +578,39 @@ def _report_section(status: Dict[str, Any]) -> str:
                      % (conf.get("index"), conf.get("label")))
 
     if results:
-        lines += ["", "| # | گام | نوع | نتیجه | زمان | خطا |",
-                  "|---|------|------|-------|------|------|"]
+        lines += ["", "| # | گام | نوع | نتیجه | زمان | تصویر | خطا |",
+                  "|---|------|------|-------|------|------|------|"]
         for row in results:
             outcome = _RESULT_FA.get(row.get("status"), row.get("status"))
             duration = row.get("durationMs")
             duration = "%dms" % duration if isinstance(duration, int) else "-"
             error = (row.get("error") or "").replace("|", "/").replace("\n", " ")[:160]
-            lines.append("| %s | %s | %s | %s | %s | %s |" % (
+            shots = row.get("shots") or {}
+            marks = []
+            for key, tag in (("before", "قبل"), ("after", "بعد"), ("error", "لحظه خطا")):
+                if shots.get(key):
+                    marks.append("[%s](%s)" % (tag, _shot_url(shots[key], public_base)))
+            image = row.get("image")
+            cell = " ".join(marks) or "-"
+            if image:
+                cell += " %dx%d" % (image.get("width", 0), image.get("height", 0))
+            lines.append("| %s | %s | %s | %s | %s | %s | %s |" % (
                 row.get("index"), (row.get("label") or "")[:60].replace("|", "/"),
-                row.get("type"), outcome, duration, error or "-"))
+                row.get("type"), outcome, duration, cell, error or "-"))
 
         last = results[-1]
         if status.get("status") in ("error", "stopped") and last:
             lines += ["", "اجرا روی گام **#%s (%s)** متوقف شد؛ گام‌های بعد از آن اجرا نشدند."
                       % (last.get("index"), last.get("label"))]
+
+        captured = [(r.get("index"), r.get("label"), r.get("text"))
+                    for r in results if r.get("text")]
+        if captured:
+            lines += ["", "### متن صفحه در لحظه‌ی ثبت",
+                      "", "این متن را خود سیستم از صفحه خوانده است، نه حدس."]
+            for index, label, text in captured:
+                lines += ["", "**گام #%s — %s**" % (index, label), "", "```",
+                          str(text)[:4000], "```"]
 
     entries = [e for e in (status.get("entries") or [])
                if e.get("level") in ("error", "warn", "ok", "step")][-40:]

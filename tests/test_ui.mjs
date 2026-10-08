@@ -43,6 +43,12 @@ function fakeApi(requests, posts = [], statusPayload = null) {
     if (path.endsWith('/status')) {
       return json(statusPayload || { runId: null, status: 'idle', entries: [], history: [] });
     }
+    if (path.endsWith('/flows')) {
+      return json({ flows: [
+        { name: 'Google Search', steps: 10, updatedAt: 1760000000, description: 'جستجو' },
+        { name: 'Arena', steps: 4, updatedAt: 1759990000, description: '' },
+      ] });
+    }
     return json({});
   };
 }
@@ -563,7 +569,12 @@ test('the flow tab can also copy the run report', async () => {
     assert.ok(button, 'no report button in the flow tab');
     button.dispatchEvent(new page.window.Event('click'));
     await page.wait(40);
-    assert.ok(page.requests.some((u) => u.endsWith('/report')), '/report was never fetched');
+    const report = page.requests.find((u) => u.includes('/report'));
+    assert.ok(report, '/report was never fetched');
+    // The origin must ride along, or the screenshot links in the report are
+    // only paths and the model cannot open them.
+    assert.ok(report.includes('base=https%3A%2F%2Fexample.trycloudflare.com'),
+      'the report was fetched without the origin: ' + report);
   } finally {
     await page.cleanup();
   }
@@ -667,6 +678,34 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
       'the JSON block should be stripped from the notes');
     assert.ok(notes.textContent.includes('کدام نتیجه را کلیک کنم؟'),
       'the model question was lost');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the saved flow library lists, loads, runs and deletes', async () => {
+  const page = await mount();
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    await page.wait(80);
+    const box = page.doc.getElementById('mas-library');
+    assert.ok(await page.until(() => box.querySelectorAll('.mas-lib-row').length === 2),
+      'the library never listed the flows: ' + box.textContent);
+
+    const rows = box.querySelectorAll('.mas-lib-row');
+    assert.equal(rows[0].dataset.name, 'Google Search');
+    assert.ok(rows[0].textContent.includes('10'), 'step count is missing');
+
+    const actions = rows[0].querySelectorAll('.mas-lib-actions button');
+    assert.equal(actions.length, 3, 'expected load / run / delete');
+
+    page.window.confirm = () => true;
+    actions[2].dispatchEvent(new page.window.Event('click'));
+    await page.wait(80);
+    assert.ok(page.requests.some((u) => u.includes('/flows/Google%20Search')),
+      'the delete never reached the server');
   } finally {
     await page.cleanup();
   }

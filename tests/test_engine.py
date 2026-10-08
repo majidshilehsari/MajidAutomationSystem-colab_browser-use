@@ -8,6 +8,7 @@ is the real code that runs on Colab.
 import json
 import os
 import shutil
+import struct
 import sys
 import tempfile
 import threading
@@ -31,6 +32,26 @@ class FakeClock:
 
     def sleep(self, seconds):
         self.now += seconds
+
+
+# Smallest thing png_size() will read: signature, IHDR length, "IHDR", 1366x768.
+PNG_BYTES = (b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + b"IHDR"
+             + struct.pack(">II", 1366, 768) + b"\x08\x06\x00\x00\x00")
+
+
+class FakeCdp:
+    """Stands in for automation.cdp: answers with a canned page text."""
+
+    def __init__(self, value="Search results are ready", error=None):
+        self.value = value
+        self.error = error
+        self.calls = []
+
+    def evaluate(self, expression, port=9222, timeout=8.0):
+        self.calls.append((expression, port))
+        if self.error:
+            raise self.error
+        return {"value": self.value, "url": "https://example.com/", "title": "T"}
 
 
 class FakeBackend(ControlBackend):
@@ -78,7 +99,18 @@ class FakeBackend(ControlBackend):
 
     def screenshot(self, name):
         self._record("screenshot", name)
-        return 0, os.path.join("/tmp", name), ""
+        if "screenshot" in self.fail_on:
+            return 1, "", "screenshot failed"
+        # Write a real PNG so publishing and dimension reading are exercised,
+        # not stubbed away.
+        target = os.path.join(self.screenshot_dir or tempfile.gettempdir(), name)
+        try:
+            os.makedirs(os.path.dirname(target), exist_ok=True)
+            with open(target, "wb") as handle:
+                handle.write(PNG_BYTES)
+        except OSError:
+            pass
+        return 0, target, ""
 
     def shell(self, command, timeout=30.0):
         self._record("shell", command)
@@ -210,7 +242,8 @@ class ErrorHandlingTest(EngineTestBase):
         status = self.run_to_completion(flow)
         self.assertEqual(status["status"], "error")
         self.assertIn("failed with rc=1", status["error"])
-        self.assertEqual(self.backend.names, ["paste"])
+        # A failing step is photographed, so one extra call is expected.
+        self.assertEqual(self.backend.names, ["paste", "screenshot"])
 
     def test_continue_on_error_keeps_going(self):
         self.backend.fail_on.add("paste")
@@ -220,7 +253,7 @@ class ErrorHandlingTest(EngineTestBase):
         ])
         status = self.run_to_completion(flow)
         self.assertEqual(status["status"], "done")
-        self.assertEqual(self.backend.names, ["paste", "click"])
+        self.assertEqual(self.backend.names, ["paste", "screenshot", "click"])
 
     def test_global_stop_on_error_false_keeps_going(self):
         self.backend.fail_on.add("paste")
@@ -230,7 +263,7 @@ class ErrorHandlingTest(EngineTestBase):
         ], stopOnError=False)
         status = self.run_to_completion(flow)
         self.assertEqual(status["status"], "done")
-        self.assertEqual(self.backend.names, ["paste", "click"])
+        self.assertEqual(self.backend.names, ["paste", "screenshot", "click"])
 
 
 class ControlTest(EngineTestBase):
@@ -461,6 +494,91 @@ if __name__ == "__main__":
 
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+class PageReadingTest(EngineTestBase):
+    """wait_for_text and capture_text must read the DOM, not the focused field."""
+
+    def test_wait_for_text_prefers_the_dom_over_the_clipboard(self):
+        cdp = FakeCdp(value="Google Search results")
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        # The clipboard route would find nothing: the caret sits in an input.
+        self.backend.page_text_value = ""
+        status = self._run(engine, build_flow([
+            {"type": "wait_for_text", "text": "Search", "timeoutMs": 2000},
+        ]))
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(cdp.calls[0][0], "document.body.innerText")
+        self.assertNotIn("page_text", self.backend.names,
+                         "the clipboard fallback should not have been needed")
+
+    def test_wait_for_text_falls_back_when_the_debugging_port_is_down(self):
+        cdp = FakeCdp(error=RuntimeError("port closed"))
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        self.backend.page_text_value = "Search"
+        status = self._run(engine, build_flow([
+            {"type": "wait_for_text", "text": "Search", "timeoutMs": 2000},
+        ]))
+        self.assertEqual(status["status"], "done")
+        self.assertIn("page_text", self.backend.names)
+
+    def test_capture_text_puts_the_page_text_in_the_report(self):
+        cdp = FakeCdp(value="Battle Arena\nStart game\nSettings")
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        status = self._run(engine, build_flow([{"type": "capture_text"}]))
+        rows = status["results"]
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "ok")
+        self.assertIn("Battle Arena", rows[0]["text"])
+        self.assertIn("Settings", rows[0]["text"])
+
+    def _run(self, engine, flow):
+        engine.start(flow)
+        ok = wait_until(lambda: engine.status()["status"] in
+                        ("done", "error", "stopped"), 5.0)
+        self.assertTrue(ok, "run did not finish")
+        return engine.status()
+
+
+class ScreenshotReportTest(EngineTestBase):
+    """A run must leave images the model can actually open."""
+
+    def test_a_failing_step_is_photographed_and_published(self):
+        self.backend.fail_on = {"paste"}
+        status = self.run_to_completion(build_flow([
+            {"type": "click", "x": 1, "y": 2},
+            {"type": "paste", "text": "x"},
+        ]))
+        failed = [r for r in status["results"] if r["status"] == "error"]
+        self.assertEqual(len(failed), 1)
+        shots = failed[0]["shots"]
+        self.assertIn("error", shots, "no failure screenshot was recorded")
+        public = os.path.join(self.engine.public_dir, shots["error"])
+        self.assertTrue(os.path.exists(public), "the shot was not published")
+        self.assertEqual(failed[0]["image"], {"width": 1366, "height": 768})
+
+    def test_screenshot_on_error_can_be_turned_off(self):
+        self.backend.fail_on = {"paste"}
+        status = self.run_to_completion(build_flow(
+            [{"type": "paste", "text": "x"}], screenshotOnError=False))
+        failed = [r for r in status["results"] if r["status"] == "error"][0]
+        self.assertFalse(failed.get("shots"))
+
+    def test_a_screenshot_step_is_published_for_the_report(self):
+        status = self.run_to_completion(build_flow([
+            {"type": "screenshot", "name": "after-navigation.png"},
+        ]))
+        row = status["results"][0]
+        self.assertEqual(row["shots"]["after"], "after-navigation.png")
+        self.assertTrue(os.path.exists(
+            os.path.join(self.engine.public_dir, "after-navigation.png")))
+        self.assertEqual(row["image"], {"width": 1366, "height": 768})
 
 
 class RunResultsTest(EngineTestBase):
