@@ -94,9 +94,11 @@ RUN set -eux; \
         curl \
         dbus-x11 \
         fluxbox \
+        fontconfig \
         fonts-liberation \
         iproute2 \
         novnc \
+        numlockx \
         openssl \
         procps \
         python3 \
@@ -105,6 +107,7 @@ RUN set -eux; \
         websockify \
         wmctrl \
         x11-utils \
+        x11-xkb-utils \
         x11vnc \
         xclip \
         xdotool \
@@ -120,6 +123,50 @@ RUN set -eux; \
             || python3 -m pip install --quiet websockify; \
     fi; \
     python3 -c 'import websockify.websocketproxy; print("websockify module: OK")'; \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Persian (and any other non-Latin) glyph coverage.
+#
+# Without an Arabic-script font Chrome draws every Persian character as an
+# empty box, and the operator cannot read the pages the automation works on.
+# Ubuntu 24.04 has no dedicated Persian font package - there is no
+# fonts-noto-naskh-arabic and nothing with "arabic" in its name that ships a
+# usable outline font - so instead of trusting one guessed package name this
+# layer installs candidates one at a time and gates the result on a real check:
+# fc-list must report at least one font covering Persian (lang=fa). A renamed
+# or missing package can then never ship a silently broken image; the build
+# stops with a readable message instead.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    apt-get update -qq; \
+    has_persian() { \
+        fc-cache -f >/dev/null 2>&1 || true; \
+        fc-list ':lang=fa' | grep -q .; \
+    }; \
+    for candidate in \
+        fonts-noto-core \
+        fonts-freefont-ttf \
+        fonts-kacst \
+        fonts-sil-scheherazade \
+        fonts-noto-extra; do \
+        if has_persian; then \
+            echo "Persian coverage already satisfied; not installing $candidate"; \
+            break; \
+        fi; \
+        echo "trying $candidate"; \
+        apt-get install -y -qq --no-install-recommends "$candidate" \
+            || echo "SKIP: $candidate is not available in this archive"; \
+    done; \
+    if ! has_persian; then \
+        echo "ERROR: no Persian-capable font could be installed." >&2; \
+        echo "       Chrome would render Persian text as empty boxes." >&2; \
+        echo "       families known to fontconfig right now:" >&2; \
+        fc-list : family 2>/dev/null | sort -u | head -20 >&2 || true; \
+        exit 1; \
+    fi; \
+    echo "Persian-capable font families:"; \
+    fc-list ':lang=fa' : family | sort -u | head -5; \
     rm -rf /var/lib/apt/lists/*
 
 # ---------------------------------------------------------------------------

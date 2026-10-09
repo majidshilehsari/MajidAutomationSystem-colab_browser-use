@@ -770,5 +770,90 @@ class TestSecretPrecedenceIsReal(unittest.TestCase):
         self.assertIn("VNC_PASSWORD=rotated99", read(self.secrets))
 
 
+class TestDesktopUsability(unittest.TestCase):
+    """Persian input and NumLock, both reported missing on the real deployment.
+
+    Chrome drew Persian as empty boxes (no Arabic-script font in the image),
+    there was no "fa" X layout to type it with (noVNC forwards raw keys, so the
+    X layout decides the character, not the operator's own OS layout), and a
+    fresh Xvfb session starts with NumLock off, which turns the keypad into
+    arrow keys.
+    """
+
+    def setUp(self):
+        self.dockerfile = read(DOCKERFILE)
+        self.mirror = read(ROOT_DOCKERFILE)
+        self.entrypoint = read(ENTRYPOINT)
+        start = self.dockerfile.find("# Persian (and any other non-Latin)")
+        end = self.dockerfile.find("# Google Chrome")
+        self.assertTrue(0 < start < end, "the font layer could not be located")
+        self.font_layer = self.dockerfile[start:end]
+        start = self.entrypoint.find("configure_keyboard() {")
+        end = self.entrypoint.find("start_chrome() {")
+        self.assertTrue(0 < start < end, "configure_keyboard could not be located")
+        self.keyboard = self.entrypoint[start:end]
+
+    def test_image_installs_the_keyboard_and_numlock_tools(self):
+        for package in ("x11-xkb-utils", "numlockx", "fontconfig"):
+            self.assertRegex(self.dockerfile,
+                             r"(?m)^\s*%s \\\s*$" % re.escape(package),
+                             "%s is missing from the apt list" % package)
+
+    def test_persian_font_coverage_is_verified_instead_of_assumed(self):
+        # Ubuntu 24.04 has no dedicated Persian font package, so the layer must
+        # prove the result rather than trust a package name.
+        self.assertIn("fc-list ':lang=fa'", self.font_layer)
+        self.assertIn("has_persian", self.font_layer)
+        self.assertIn("exit 1", self.font_layer,
+                      "a missing Persian font must fail the build, not ship boxes")
+        self.assertIn("no Persian-capable font", self.font_layer)
+
+    def test_font_install_does_not_bet_on_a_single_package_name(self):
+        for candidate in ("fonts-noto-core", "fonts-freefont-ttf", "fonts-kacst"):
+            self.assertIn(candidate, self.font_layer)
+        # A candidate that disappears from the archive must not break the build.
+        self.assertIn('|| echo "SKIP:', self.font_layer)
+        # And the loop must stop as soon as coverage exists, so the image does
+        # not grow by installing every candidate.
+        self.assertIn("break", self.font_layer)
+
+    def test_entrypoint_offers_a_persian_layout_with_a_familiar_toggle(self):
+        self.assertIn("XKB_LAYOUTS=${XKB_LAYOUTS:-us,fa}", self.entrypoint)
+        self.assertIn("XKB_OPTIONS=${XKB_OPTIONS:-grp:alt_shift_toggle}", self.entrypoint)
+        self.assertIn("setxkbmap", self.keyboard)
+
+    def test_entrypoint_turns_numlock_on_by_default(self):
+        self.assertIn("NUMLOCK=${NUMLOCK:-on}", self.entrypoint)
+        self.assertIn("numlockx on", self.keyboard)
+
+    def test_every_keyboard_knob_is_overridable_without_a_rebuild(self):
+        for knob in ("XKB_MODEL", "XKB_LAYOUTS", "XKB_OPTIONS", "NUMLOCK"):
+            self.assertRegex(self.entrypoint, r"(?m)^%s=\$\{%s:-" % (knob, knob),
+                             "%s cannot be overridden by an env var" % knob)
+
+    def test_keyboard_setup_runs_after_x_is_up_and_before_chrome(self):
+        main = self.entrypoint[self.entrypoint.find("main() {"):]
+        self.assertLess(main.find("start_xvfb"), main.find("configure_keyboard"))
+        self.assertLess(main.find("configure_keyboard"), main.find("start_chrome"))
+
+    def test_keyboard_setup_cannot_stop_the_container(self):
+        # A missing convenience must never take the desktop down with it.
+        self.assertNotIn("die ", self.keyboard)
+        self.assertIn("command -v setxkbmap", self.keyboard)
+        self.assertIn("command -v numlockx", self.keyboard)
+        self.assertIn("WARN", self.keyboard)
+
+    def test_the_root_mirror_carries_the_same_layers(self):
+        for marker in ("fc-list ':lang=fa'", "numlockx", "x11-xkb-utils"):
+            self.assertIn(marker, self.mirror,
+                          "the root mirror is stale: %s is missing" % marker)
+
+    def test_the_unicode_type_path_is_documented_in_the_shared_script(self):
+        script = read(os.path.join(REPO_ROOT, "browser_control.sh"))
+        self.assertIn("*[![:ascii:]]*", script,
+                      "browser_control.sh must route non-ASCII text to the clipboard")
+        self.assertIn("xclip -selection clipboard", script)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

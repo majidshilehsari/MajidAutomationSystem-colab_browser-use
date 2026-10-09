@@ -40,6 +40,15 @@ DISPLAY_ID=${DISPLAY:-:1}
 SCREEN_SIZE=${SCREEN:-1366x768x24}
 START_URL=${START_URL:-https://www.google.com/}
 EXTRA_CHROME_FLAGS=${EXTRA_CHROME_FLAGS:-}
+# Keyboard: noVNC forwards raw keys to X, so the X layout decides which
+# character Chrome receives. "us,fa" gives English plus Persian with Alt+Shift
+# as the toggle, which is what a Windows-trained operator already reaches for.
+XKB_MODEL=${XKB_MODEL:-pc104}
+XKB_LAYOUTS=${XKB_LAYOUTS:-us,fa}
+XKB_OPTIONS=${XKB_OPTIONS:-grp:alt_shift_toggle}
+# A fresh Xvfb session starts with NumLock off, so the keypad sends arrows
+# instead of digits. "on" (default) enables it; anything else leaves it alone.
+NUMLOCK=${NUMLOCK:-on}
 NOVNC_DIR=${NOVNC_DIR:-/usr/share/novnc}
 CHECK_INTERVAL=${CHECK_INTERVAL:-15}
 STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-120}
@@ -273,6 +282,45 @@ start_vnc() {
   log "x11vnc on 127.0.0.1:$VNC_PORT (private)"
 }
 
+configure_keyboard() {
+  # Persian typing and NumLock.
+  #
+  # The operator types through noVNC, which sends raw key events to the X
+  # server; the character that reaches Chrome is decided by the X keyboard
+  # layout, not by the operator's own OS layout. Without an "fa" group there is
+  # simply no way to produce Persian characters, and without NumLock the
+  # numeric keypad emits arrows instead of digits.
+  #
+  # Both are best-effort on purpose: a missing tool costs one convenience and
+  # must never stop the container from serving the desktop.
+  local args=(-model "$XKB_MODEL" -layout "$XKB_LAYOUTS")
+  if [[ -n "$XKB_OPTIONS" ]]; then
+    args+=(-option "$XKB_OPTIONS")
+  fi
+
+  if command -v setxkbmap >/dev/null 2>&1; then
+    if setxkbmap "${args[@]}" 2>>"$LOG_DIR/keyboard.log"; then
+      log "keyboard layouts: $XKB_LAYOUTS (toggle: ${XKB_OPTIONS:-none})"
+    else
+      log "WARN: setxkbmap failed; Persian typing may not work (see $LOG_DIR/keyboard.log)"
+    fi
+  else
+    log "WARN: setxkbmap is missing; the X layout stays at its default"
+  fi
+
+  if [[ "$NUMLOCK" == "on" ]]; then
+    if command -v numlockx >/dev/null 2>&1; then
+      if numlockx on 2>>"$LOG_DIR/keyboard.log"; then
+        log "NumLock: on"
+      else
+        log "WARN: 'numlockx on' failed; the keypad will send arrows (see $LOG_DIR/keyboard.log)"
+      fi
+    else
+      log "WARN: numlockx is missing; the keypad will send arrows"
+    fi
+  fi
+}
+
 start_chrome() {
   # Same flags as the Colab launcher: software WebGL, no first-run dialogs, and
   # --disable-dev-shm-usage, which matters even more here because a Kubernetes
@@ -455,6 +503,7 @@ main() {
   start_xvfb
   start_window_manager
   start_vnc
+  configure_keyboard
   start_chrome
   start_server
 

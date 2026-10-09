@@ -17,6 +17,9 @@ Commands:
   doubleclick X Y         Move and double-click.
   drag X1 Y1 X2 Y2 [BTN] Drag between two points (default: left button).
   type [--delay-ms N] TEXT  Type text; fixed per-key delay 0-250ms (default 15).
+                            Non-ASCII text (Persian, emoji) is pasted through
+                            the clipboard instead, because xdotool cannot type
+                            characters outside the active X keyboard layout.
   paste TEXT              Paste text through the X clipboard (Unicode-safe).
   key KEY...              Send one or more xdotool key combinations.
   scroll AMOUNT           Scroll down if positive, up if negative.
@@ -129,7 +132,20 @@ case "$command" in
       shift 2
     fi
     [[ $# -ge 1 ]] || { usage >&2; exit 2; }
-    xdotool type --clearmodifiers --delay "$delay_ms" -- "$*"
+    text="$*"
+    if [[ $text == *[![:ascii:]]* ]]; then
+      # xdotool type replays XTest keysyms, so it can only produce characters
+      # the active X keyboard layout maps to. Persian, Arabic and emoji arrive
+      # as nothing at all, or as the wrong glyph, which makes `type` look broken
+      # for exactly the scripts an operator here is most likely to need. Route
+      # such text through the clipboard, the same way `paste` and `url` already
+      # do. The per-key delay is meaningless for a single paste, so it is
+      # dropped; ASCII text keeps the original xdotool path untouched.
+      printf '%s' "$text" | xclip -selection clipboard >/dev/null 2>&1
+      xdotool key --clearmodifiers ctrl+v
+    else
+      xdotool type --clearmodifiers --delay "$delay_ms" -- "$text"
+    fi
     ;;
   paste)
     [[ $# -ge 1 ]] || { usage >&2; exit 2; }
