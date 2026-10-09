@@ -420,13 +420,65 @@ https://<دامنهٔ اپ>/vnc.html?autoconnect=true&resize=scale&path=websocki
    (`openssl rand -hex 8` برای توکن و `openssl rand -hex 4` برای رمز VNC —
    همان طول‌هایی که مسیر Colab تولید می‌کند).
 
-خواندن secretها:
+### خواندن secretها
+
+> ⚠️ **در داشبورد، صفحهٔ اپ هیچ تب shell ندارد** (تب‌ها فقط Overview، Envs،
+> Domains، Logs، Metrics و Volumes هستند). دسترسی shell در Hostim از راه
+> **Bastion** پروژه است، نه از راه مرورگر. سه راه دارید:
+
+**راه ۱ — Bastion SSH (بدون نصب هیچ چیز، حتی volume را مستقیم می‌خواند):**
+
+1. در کنسول: **Project → تب Bastion (SSH)** → کلید عمومی SSH خودتان را اضافه
+   کنید (محتوای `~/.ssh/id_ed25519.pub` یا `~/.ssh/id_rsa.pub`).
+2. وصل شوید (شناسهٔ پروژه و region خودتان؛ مثال زیر region `eu-center` است):
 
 ```bash
-hostim exec browser -- cat /data/secrets.env
-# یا از راه Bastion، بدون exec:
-ssh <bastion> ...        # مسیر /volumes/automation-data/secrets.env
+ssh <project-id>@ssh.eu-center.hostim.dev
+# مثال:  ssh hpr-48a20eb8@ssh.eu-center.hostim.dev
 ```
+
+3. حالا **دو** گزینه دارید:
+
+```bash
+# الف) مستقیم از روی volume — ساده‌ترین راه، وارد کانتینر هم نمی‌شود
+cat /volumes/automation-data/secrets.env
+
+# ب) shell تعاملی داخل خودِ اپ
+shell <app-name>            # مثال: shell app-masc
+cat /data/secrets.env
+ss -ltn                     # همان‌جا چک گام ۳ را هم می‌توانید بزنید
+/app/hostim/healthcheck.sh
+```
+
+> نام volume همان چیزی است که در تب **Volumes** می‌بینید؛ اگر `automation-data`
+> نگذاشته‌اید، نام واقعی خودتان را جایگزین کنید. نام اپ هم از فهرست **Apps**
+> یا از DNS داخلی (`<app-name>-service`) قابل تشخیص است.
+>
+> انگشت‌های host key رسمی Bastion در
+> `hostim.dev/docs/services/bastion/` منتشر شده‌اند؛ اولین بار که SSH می‌پرسد
+> آن را با همان مقایسه کنید.
+
+**راه ۲ — CLI (اگر `hostim` را نصب دارید):**
+
+```bash
+hostim exec -y <app-name> -- cat /data/secrets.env
+```
+
+**راه ۳ — بدون هیچ shell: رمز را خودتان تعیین کنید.** در تب **Envs** اپ یک
+متغیر به نام `VNC_PASSWORD` (و در صورت نیاز `AUTOMATION_TOKEN`) با مقدار
+دلخواه خودتان بسازید و اپ را restart/redeploy کنید. طبق بند ۱ اولویت بالا،
+همان مقدار استفاده می‌شود و فایل `/data/secrets.env` هم با مقدار واقعی
+به‌روز می‌ماند — پس دیگر لازم نیست رمزی را که نمی‌دانید از جایی بخوانید.
+رمز VNC حداکثر ۸ بایت مؤثر است (x11vnc بقیه را می‌بُرد).
+
+> ⚠️ این راه ۳ تا commit `79ea138` به‌بعد کار می‌کند. پیش از آن یک باگ در
+> entrypoint بود: `source /data/secrets.env` **بعد از** خواندن env اجرا می‌شد
+> و مقدار فایل، مقدار env را بازنویسی می‌کرد. یعنی رمز را در Envs
+> می‌گذاشتید ولی کانتینر همان رمز تصادفی قبلی را استفاده می‌کرد و شما هیچ
+> راهی برای فهمیدنش نداشتید. رفع شد و حالا تست رفتاری
+> `TestSecretPrecedenceIsReal` تابع واقعی را در bash اجرا می‌کند تا این
+> اولویت دیگر نشکند. اگر اپ شما از commit قدیمی‌تر ساخته شده، یک **Rebuild**
+> لازم است.
 
 چرا در لاگ چاپ نمی‌شوند: لاگ کانتینر توسط پلتفرم جمع‌آوری و تا ۷ روز نگه‌داری
 می‌شود؛ چاپ secret در لاگ یعنی نشت آن به جایی که کنترلش دست شما نیست. این
@@ -438,13 +490,16 @@ ssh <bastion> ...        # مسیر /volumes/automation-data/secrets.env
 > در `/proc/<pid>/cmdline` آن فرایند دیده می‌شود (دقیقاً مثل مسیر Colab).
 > توکن API این مشکل را ندارد، چون از راه محیط به سرور داده می‌شود.
 
-چرخش secretها:
+### چرخش secretها
 
 ```bash
-hostim env set AUTOMATION_TOKEN='<مقدار جدید>' -a browser   # → اپ restart می‌شود
-# یا فایل را از volume پاک کنید تا در اجرای بعدی secret تازه ساخته شود:
-hostim exec browser -- rm -f /data/secrets.env
-hostim apps restart browser
+# ساده‌ترین راه: همان راه ۳ بالا — مقدار تازه در تب Envs و restart اپ
+
+# یا از راه Bastion/CLI، فایل را پاک کنید تا در اجرای بعدی secret تازه ساخته شود
+shell <app-name>            # از داخل Bastion
+rm -f /data/secrets.env
+exit
+# سپس اپ را از داشبورد restart کنید؛ secret تازه ساخته می‌شود
 ```
 
 ---

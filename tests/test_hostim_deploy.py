@@ -434,8 +434,19 @@ class TestSecretHandling(unittest.TestCase):
 
     def test_environment_overrides_the_generated_secret(self):
         # Hostim can inject AUTOMATION_TOKEN/VNC_PASSWORD as app env vars; that
-        # must win over the generated file.
-        self.assertRegex(read(ENTRYPOINT), r"AUTOMATION_TOKEN=\$\{AUTOMATION_TOKEN:-\}")
+        # must win over the generated file. The entrypoint sources the file, so
+        # the env values have to be captured BEFORE the source and restored
+        # after it - otherwise the file silently wins. This shipped broken once;
+        # TestSecretPrecedenceIsReal runs the function to prove the behaviour.
+        body = read(ENTRYPOINT)
+        capture = body.find('local env_token="${AUTOMATION_TOKEN:-}"')
+        source = body.find('source "$SECRETS_FILE"')
+        restore = body.find('AUTOMATION_TOKEN="${env_token:-$file_token}"')
+        self.assertNotEqual(capture, -1, "the env token is never captured")
+        self.assertNotEqual(source, -1)
+        self.assertNotEqual(restore, -1, "the env token is never restored after sourcing")
+        self.assertLess(capture, source, "the env value must be captured before the file is sourced")
+        self.assertLess(source, restore, "the env value must be restored after the file is sourced")
 
     def test_no_literal_secret_is_committed(self):
         literal = re.compile(
@@ -623,6 +634,140 @@ class TestGuide(unittest.TestCase):
 
     def test_guide_does_not_send_the_reader_to_a_tunnel(self):
         self.assertNotIn("cloudflared tunnel --url", self.body)
+
+
+class TestSecretPrecedenceIsReal(unittest.TestCase):
+    """Runs the real load_or_create_secrets in bash and checks what it produces.
+
+    Static assertions cannot catch this class of bug: the previous version of
+    the function contained the text "AUTOMATION_TOKEN=${AUTOMATION_TOKEN:-}" and
+    still let the secrets file overwrite an env var the platform had injected,
+    because `source "$SECRETS_FILE"` assigns those very same names. So the
+    function is extracted verbatim from the entrypoint and executed.
+    """
+
+    def setUp(self):
+        self.bash = shutil.which("bash")
+        if not self.bash:
+            self.skipTest("bash is not available")
+        if not shutil.which("openssl"):
+            self.skipTest("openssl is not available")
+        if not shutil.which("sed"):
+            self.skipTest("sed is not available")
+        self.tmp = tempfile.mkdtemp(prefix="hostim-secrets-")
+        self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.secrets = os.path.join(self.tmp, "secrets.env")
+        self.vncpass = os.path.join(self.tmp, "vnc.pass")
+        self.function = subprocess.run(
+            ["sed", "-n", "/^load_or_create_secrets()/,/^}/p", ENTRYPOINT],
+            capture_output=True, text=True).stdout
+        self.assertIn("openssl rand", self.function,
+                      "could not extract load_or_create_secrets from the entrypoint")
+
+    def run_it(self, env=None):
+        """Execute the real function with stubs for log/x11vnc; return state."""
+        script = "\n".join([
+            "set -uo pipefail",
+            # Mirror the real log() but send it to stderr, so the function's own
+            # logging can be inspected for secret leaks while stdout stays free
+            # for the values this harness prints on purpose.
+            'log() { printf \'LOG: %s\\n\' "$*" >&2; }',
+            "x11vnc() { :; }",           # no real VNC binary in a test run
+            'SECRETS_FILE="%s"' % self.secrets,
+            'VNC_PASS_FILE="%s"' % self.vncpass,
+            self.function,
+            "load_or_create_secrets",
+            'printf "%s\\n%s\\n" "$AUTOMATION_TOKEN" "$VNC_PASSWORD"',
+        ])
+        environment = dict(os.environ)
+        environment.pop("AUTOMATION_TOKEN", None)
+        environment.pop("VNC_PASSWORD", None)
+        environment.update(env or {})
+        result = subprocess.run([self.bash, "-c", script], capture_output=True,
+                                text=True, env=environment)
+        self.assertEqual(result.returncode, 0,
+                         "load_or_create_secrets failed: %s" % result.stderr)
+        token, password = result.stdout.strip().split("\n")
+        stored = {}
+        if os.path.exists(self.secrets):
+            for line in read(self.secrets).splitlines():
+                if "=" in line:
+                    key, value = line.split("=", 1)
+                    stored[key] = value
+        return token, password, stored, result.stderr
+
+    def test_first_boot_generates_and_locks_down_the_file(self):
+        token, password, stored, _ = self.run_it()
+        self.assertRegex(token, r"^[0-9a-f]{16}$")
+        self.assertRegex(password, r"^[0-9a-f]{8}$")
+        self.assertEqual(stored, {"AUTOMATION_TOKEN": token, "VNC_PASSWORD": password})
+        self.assertEqual(stat.S_IMODE(os.stat(self.secrets).st_mode), 0o600)
+
+    def test_second_boot_reuses_the_file_unchanged(self):
+        first = self.run_it()[:2]
+        before = read(self.secrets)
+        second = self.run_it()[:2]
+        self.assertEqual(first, second, "secrets were regenerated on restart")
+        self.assertEqual(read(self.secrets), before, "the file was rewritten for no reason")
+
+    def test_env_wins_over_an_existing_file(self):
+        self.run_it()
+        stored_token = read(self.secrets).split("AUTOMATION_TOKEN=")[1].split("\n")[0]
+        token, password, stored, _ = self.run_it(
+            {"VNC_PASSWORD": "rotatedpw"})
+        self.assertEqual(password, "rotatedpw",
+                         "the secrets file overwrote the platform-provided VNC_PASSWORD")
+        self.assertEqual(token, stored_token,
+                         "the token must stay the one already on the volume")
+        self.assertEqual(stored["VNC_PASSWORD"], "rotatedpw",
+                         "the file was not updated to the password actually in use")
+
+    def test_env_can_rotate_both_secrets_at_once(self):
+        self.run_it()
+        token, password, stored, _ = self.run_it(
+            {"AUTOMATION_TOKEN": "a" * 16, "VNC_PASSWORD": "b" * 8})
+        self.assertEqual((token, password), ("a" * 16, "b" * 8))
+        self.assertEqual(stored, {"AUTOMATION_TOKEN": "a" * 16, "VNC_PASSWORD": "b" * 8})
+
+    def test_env_alone_on_a_fresh_volume_is_kept_and_persisted(self):
+        token, password, stored, _ = self.run_it({"AUTOMATION_TOKEN": "c" * 16})
+        self.assertEqual(token, "c" * 16)
+        self.assertRegex(password, r"^[0-9a-f]{8}$", "the password should still be generated")
+        self.assertEqual(stored["AUTOMATION_TOKEN"], "c" * 16)
+
+    def test_the_function_logs_the_path_but_never_the_values(self):
+        token, password, _, logged = self.run_it()
+        self.assertIn("LOG: secrets:", logged, "the function did not log at all")
+        self.assertIn(self.secrets, logged, "the log should say where the file is")
+        self.assertNotIn(password, logged, "the VNC password reached the container log")
+        self.assertNotIn(token, logged, "the automation token reached the container log")
+        self.assertIn("hostim exec", logged,
+                      "the log should tell the operator how to read the secrets")
+
+    def test_a_rotated_password_reaches_x11vnc_and_the_file(self):
+        # x11vnc -storepasswd is what makes the password real; prove the value
+        # handed to it is the effective one, not the stale file value.
+        script = "\n".join([
+            "set -uo pipefail",
+            "log() { :; }",
+            'x11vnc() { printf "X11VNC %s\\n" "$*" >&2; }',
+            'SECRETS_FILE="%s"' % self.secrets,
+            'VNC_PASS_FILE="%s"' % self.vncpass,
+            self.function,
+            "load_or_create_secrets",
+        ])
+        environment = dict(os.environ)
+        environment.pop("AUTOMATION_TOKEN", None)
+        environment.pop("VNC_PASSWORD", None)
+        subprocess.run([self.bash, "-c", script], capture_output=True,
+                       text=True, env=environment)
+        environment["VNC_PASSWORD"] = "rotated99"
+        result = subprocess.run([self.bash, "-c", script], capture_output=True,
+                                text=True, env=environment)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn('-storepasswd rotated99', result.stderr,
+                      "x11vnc was not given the rotated password")
+        self.assertIn("VNC_PASSWORD=rotated99", read(self.secrets))
 
 
 if __name__ == "__main__":

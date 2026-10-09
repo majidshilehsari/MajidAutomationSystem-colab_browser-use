@@ -137,32 +137,42 @@ prepare_directories() {
 # by the platform (Hostim keeps 7 days), so printing a secret there would leak
 # it into a place the operator does not control.
 load_or_create_secrets() {
-  AUTOMATION_TOKEN=${AUTOMATION_TOKEN:-}
-  VNC_PASSWORD=${VNC_PASSWORD:-}
+  # An environment value provided by the platform must win over the file, so
+  # the password can be rotated from Hostim's Envs tab without needing a shell
+  # inside the container. Capture it FIRST: sourcing the file below assigns
+  # these very same names and would otherwise silently overwrite whatever the
+  # platform injected (that bug shipped once already).
+  local env_token="${AUTOMATION_TOKEN:-}"
+  local env_pass="${VNC_PASSWORD:-}"
+  local file_token="" file_pass=""
 
   if [[ -f "$SECRETS_FILE" ]]; then
     # The file contains only KEY=value lines that this script wrote itself.
     # shellcheck disable=SC1090
     source "$SECRETS_FILE"
-    AUTOMATION_TOKEN=${AUTOMATION_TOKEN:-}
-    VNC_PASSWORD=${VNC_PASSWORD:-}
+    file_token="${AUTOMATION_TOKEN:-}"
+    file_pass="${VNC_PASSWORD:-}"
   fi
 
-  local generated=no
+  AUTOMATION_TOKEN="${env_token:-$file_token}"
+  VNC_PASSWORD="${env_pass:-$file_pass}"
+
+  # 8 hex characters for the VNC password: x11vnc truncates it to 8 bytes
+  # anyway, and this matches what start_colab_browser.sh generates.
   if [[ -z "$AUTOMATION_TOKEN" ]]; then
     AUTOMATION_TOKEN=$(openssl rand -hex 8)
-    generated=yes
   fi
   if [[ -z "$VNC_PASSWORD" ]]; then
-    # 8 hex characters: x11vnc truncates a VNC password to 8 bytes anyway, and
-    # this matches what start_colab_browser.sh generates.
     VNC_PASSWORD=$(openssl rand -hex 4)
-    generated=yes
   fi
 
-  if [[ "$generated" == yes ]] || [[ ! -f "$SECRETS_FILE" ]]; then
+  # Keep the file in sync with the values actually in use. Otherwise a later
+  # restart without the env override would fall back to a stale password and
+  # nobody could tell which one x11vnc is using.
+  if [[ ! -f "$SECRETS_FILE" || "$AUTOMATION_TOKEN" != "$file_token" ||
+    "$VNC_PASSWORD" != "$file_pass" ]]; then
     (umask 077; printf 'AUTOMATION_TOKEN=%s\nVNC_PASSWORD=%s\n' \
-        "$AUTOMATION_TOKEN" "$VNC_PASSWORD" >"$SECRETS_FILE")
+      "$AUTOMATION_TOKEN" "$VNC_PASSWORD" >"$SECRETS_FILE")
     chmod 600 "$SECRETS_FILE" 2>/dev/null || true
   fi
 
