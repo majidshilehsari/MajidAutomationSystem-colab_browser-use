@@ -1,0 +1,157 @@
+# syntax=docker/dockerfile:1
+#
+# خلاصهٔ فارسی: image کانتینر مخصوص مسیر Hostim. Ubuntu 24.04 + میزکار مجازی
+# (Xvfb، fluxbox، x11vnc، noVNC) + Google Chrome + سرور پایتون، بدون cloudflared.
+# فقط یک پورت (6080) منتشر می‌شود؛ 5901 و 9222 خصوصی می‌مانند. کانتینر با
+# کاربر غیرroot اجرا می‌شود و tini به‌عنوان PID 1 زامبی‌ها را جمع می‌کند.
+# build context ریشهٔ مخزن است:
+#   docker build -f hostim/Dockerfile -t majid-automation-hostim:local .
+# در Hostim: مسیر Dockerfile را hostim/Dockerfile بدهید و Command Override را
+# خالی بگذارید (وگرنه tini و سوپروایزر از بین می‌روند).
+# راهنمای کامل: hostim/GUIDE.fa.md
+#
+# Container image for the Hostim (hostim.dev) deployment track.
+#
+# This file belongs to the Hostim add-on only. The Google Colab path keeps
+# using install.sh + start_colab_browser.sh + a Cloudflare Quick Tunnel and is
+# not touched by anything inside hostim/.
+#
+# The build context is the REPOSITORY ROOT, because the image needs
+# automation/ and browser_control.sh:
+#
+#   docker build -f hostim/Dockerfile -t majid-automation-hostim:local .
+#
+# On Hostim, deploy from Git with "Dockerfile path" = hostim/Dockerfile.
+#
+# Deliberate differences from the Colab launcher:
+#   * no cloudflared and no Cloudflare Quick Tunnel - Hostim terminates HTTPS
+#     on its own ingress and gives the app a domain,
+#   * the single public port is 0.0.0.0:$PORT instead of 127.0.0.1:6080,
+#   * x11vnc (5901) and Chrome CDP (9222) stay on loopback and are NOT exposed,
+#   * persistent state lives on a mounted volume at /data instead of .runtime/,
+#   * the container runs as a non-root user.
+
+FROM ubuntu:24.04
+
+# Hostim nodes are linux/amd64 only. An arm64 image fails with "exec format
+# error" and produces no logs at all, so refuse to build one by accident.
+ARG TARGETARCH
+ENV DEBIAN_FRONTEND=noninteractive
+
+# One HTTP port carries noVNC, the sidebar, the JSON API and the VNC WebSocket.
+# PORT must match the app's httpPort in the Hostim app settings.
+ENV PORT=6080 \
+    DISPLAY=:1 \
+    VNC_PORT=5901 \
+    CDP_PORT=9222 \
+    SCREEN=1366x768x24 \
+    APP_DIR=/app \
+    DATA_DIR=/data \
+    START_URL=https://www.google.com/ \
+    HOME=/home/automation \
+    LANG=C.UTF-8 \
+    LC_ALL=C.UTF-8
+
+# ---------------------------------------------------------------------------
+# Desktop, browser and VNC dependencies - the same package set install.sh uses
+# on Colab, minus cloudflared, plus tini (PID 1 that reaps zombies) and
+# python3 itself, which the bare ubuntu image does not ship.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    apt-get update -qq; \
+    apt-get install -y -qq --no-install-recommends \
+        ca-certificates \
+        curl \
+        dbus-x11 \
+        fluxbox \
+        fonts-liberation \
+        iproute2 \
+        novnc \
+        openssl \
+        procps \
+        python3 \
+        scrot \
+        tini \
+        websockify \
+        wmctrl \
+        x11-utils \
+        x11vnc \
+        xclip \
+        xdotool \
+        xvfb; \
+    # automation/server.py imports websockify as a Python module (it drives
+    # top_new_client itself), so the CLI package alone is not enough. Fall back
+    # to pip only when the distribution package does not provide the module,
+    # and fail the build loudly if it is still missing: a missing module means
+    # the whole sidebar and API would be dead at runtime.
+    if ! python3 -c 'import websockify.websocketproxy' 2>/dev/null; then \
+        apt-get install -y -qq --no-install-recommends python3-pip; \
+        python3 -m pip install --quiet --break-system-packages websockify \
+            || python3 -m pip install --quiet websockify; \
+    fi; \
+    python3 -c 'import websockify.websocketproxy; print("websockify module: OK")'; \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
+# Google Chrome, the same amd64 .deb install.sh downloads on Colab.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    arch="$(dpkg --print-architecture)"; \
+    if [ "$arch" != "amd64" ]; then \
+        echo "ERROR: this image must be built for linux/amd64 (Hostim nodes are amd64); got: $arch" >&2; \
+        echo "       build with: docker buildx build --platform linux/amd64 -f hostim/Dockerfile ." >&2; \
+        exit 1; \
+    fi; \
+    curl -fsSL -o /tmp/google-chrome.deb \
+        https://dl.google.com/linux/direct/google-chrome-stable_current_amd64.deb; \
+    apt-get update -qq; \
+    apt-get install -y -qq --no-install-recommends /tmp/google-chrome.deb; \
+    rm -f /tmp/google-chrome.deb; \
+    rm -rf /var/lib/apt/lists/*; \
+    google-chrome --version
+
+# ---------------------------------------------------------------------------
+# Non-root runtime user. Hostim's docs do not state which user an app runs as,
+# so the image does not depend on being root: everything below works as uid
+# 1000, and Chrome runs with --no-sandbox exactly like the Colab launcher.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    groupadd --system --gid 1000 automation; \
+    useradd --system --uid 1000 --gid 1000 --create-home --home-dir /home/automation \
+        --shell /bin/bash automation
+
+WORKDIR /app
+
+# Only what the runtime needs. The Colab launchers (install.sh,
+# start_colab_browser.sh, stop_colab_browser.sh), the tests and the docs stay
+# out of the image, so nothing in here can change Colab behaviour.
+COPY automation/ /app/automation/
+COPY browser_control.sh /app/browser_control.sh
+COPY hostim/ /app/hostim/
+
+RUN set -eux; \
+    chmod 0755 /app/browser_control.sh /app/hostim/*.sh; \
+    # /data is the volume mount point. Hostim makes a freshly attached volume
+    # writable when the app starts; pre-creating it only helps `docker run`.
+    mkdir -p /data /home/automation; \
+    chown -R automation:automation /app /data /home/automation; \
+    find /app -name '__pycache__' -type d -prune -exec rm -rf {} +
+
+# The only port this image publishes. 5901 (x11vnc) and 9222 (Chrome CDP) are
+# deliberately absent: Hostim exposes a single HTTP port per app anyway, and
+# the automation server proxies both of them from inside the container.
+EXPOSE 6080
+
+# Kubernetes (and therefore Hostim) ignores a Dockerfile HEALTHCHECK; Hostim
+# uses its own readiness probe, which should point at /automation/api/info.
+# This line still makes `docker run` / `docker compose` report health locally.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=120s --retries=3 \
+    CMD ["/app/hostim/healthcheck.sh"]
+
+USER automation
+
+# tini stays PID 1 so orphaned Chrome helpers are reaped instead of piling up
+# as zombies, and forwards SIGTERM to the entrypoint, which shuts the whole
+# process tree down in order. Do NOT set a Hostim "Command Override": it
+# replaces ENTRYPOINT and CMD completely and would drop tini.
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/hostim/docker-entrypoint.sh"]

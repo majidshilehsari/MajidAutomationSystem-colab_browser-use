@@ -1,0 +1,56 @@
+# خلاصهٔ فارسی: این فایل فقط برای تست محلی با docker compose است و Hostim از
+# آن استفاده نمی‌کند (Hostim از hostim-template.yaml یا داشبورد یا
+# `hostim deploy` استفاده می‌کند). فقط پورت 6080 منتشر می‌شود؛ 5901 و 9222
+# عمداً منتشر نمی‌شوند. داده‌ها روی volume به نام automation-data می‌نشینند.
+#   docker compose -f hostim/compose.yaml up --build
+#   docker compose -f hostim/compose.yaml exec browser cat /data/secrets.env
+#
+# Local test harness for the Hostim image.
+#
+# This file is for `docker compose` on a developer machine. Hostim does not use
+# it - Hostim uses hostim/hostim-template.yaml, or the dashboard, or
+# `hostim deploy`. It is kept next to the Dockerfile so the image can be
+# verified before it is pushed anywhere.
+#
+#   docker compose -f hostim/compose.yaml up --build
+#   # then open  http://localhost:6080/vnc.html?autoconnect=true&resize=scale&path=websockify
+#   # secrets:   docker compose -f hostim/compose.yaml exec browser cat /data/secrets.env
+#   docker compose -f hostim/compose.yaml down          # keeps the volume
+#   docker compose -f hostim/compose.yaml down -v       # also deletes the data
+#
+# The build context is the repository root (resolved relative to this file),
+# because the image needs automation/ and browser_control.sh.
+
+name: majid-automation-hostim
+
+services:
+  browser:
+    build:
+      context: ..
+      dockerfile: hostim/Dockerfile
+    image: majid-automation-hostim:local
+    restart: unless-stopped
+
+    # Exactly one published port, the same one Hostim would route to.
+    # 5901 (x11vnc) and 9222 (Chrome CDP) are deliberately NOT published: they
+    # must stay private, and the automation server proxies both of them.
+    ports:
+      - "${LOCAL_PORT:-6080}:6080"
+
+    environment:
+      PORT: "6080"
+      # Set these only to override the generated secrets for a local test.
+      # AUTOMATION_TOKEN: ""
+      # VNC_PASSWORD: ""
+      # START_URL: "https://example.com/"
+
+    volumes:
+      - automation-data:/data
+
+    # Chrome wants a large /dev/shm. On a local Docker host this can be raised;
+    # on Hostim it cannot be configured from the app settings, which is why the
+    # entrypoint also passes --disable-dev-shm-usage.
+    shm_size: 1gb
+
+volumes:
+  automation-data:

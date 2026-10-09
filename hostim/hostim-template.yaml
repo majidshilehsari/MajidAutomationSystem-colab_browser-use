@@ -1,0 +1,99 @@
+# خلاصهٔ فارسی: template بومی Hostim برای کل پشته (یک اپ + یک volume).
+# با `hostim templates validate -f hostim/hostim-template.yaml` آفلاین بررسی‌اش
+# کنید و با `hostim templates apply -f hostim/hostim-template.yaml` مستقرش کنید.
+# نکته‌های حیاتی: replicas حتماً ۱ (دسکتاپ stateful است)، healthCheckPath روی
+# /automation/api/info (تنها مسیر بدون توکن)، mountPath روی /data، شاخهٔ
+# hostim-deploy (هرگز colab-stable)، و Command Override خالی (تا tini و
+# سوپروایزر حفظ شوند).
+#
+# Native Hostim stack template for the Majid Automation System browser.
+#
+# Validate it offline first (no API calls, nothing is created):
+#   hostim templates validate -f hostim/hostim-template.yaml
+# Then deploy:
+#   hostim use <your-project>
+#   hostim templates apply -f hostim/hostim-template.yaml
+# Into a brand new project instead:
+#   hostim templates apply -f hostim/hostim-template.yaml \
+#     --new-project browser-automation --region eu-center
+#
+# The equivalent one-liner, if you prefer not to use a template:
+#   hostim volumes create automation-data --plan vol-1
+#   hostim deploy browser \
+#     --git https://github.com/majidshilehsari/MajidAutomationSystem-colab_browser-use \
+#     --branch hostim-deploy --dockerfile hostim/Dockerfile \
+#     --plan sa-2-2 --port 6080 --replicas 1 \
+#     --health-check-path /automation/api/info \
+#     --volume automation-data:/data --env PORT=6080
+
+id: majid-automation-browser
+name: Majid Automation Browser
+description: >-
+  Graphical Google Chrome on Xvfb, watched through noVNC and driven through a
+  JSON automation API. noVNC, the sidebar, the API and the VNC WebSocket all
+  share the single published HTTP port; x11vnc (5901) and Chrome CDP (9222)
+  stay private inside the container.
+
+components:
+  volumes:
+    # Persistent state: the Chrome profile, saved flows, run logs, detected
+    # pages, screenshots, the runtime logs and the generated secrets file.
+    # `vol-1` is 5 GB (EUR 1/month). List the real plan ids for your region
+    # with: hostim regions pricing eu-center --for volume
+    - name: automation-data
+      plan: vol-1
+
+  postgres: []
+  mysql: []
+  redis: []
+
+  apps:
+    - name: browser
+      # 2 vCPU / 2 GB. Chrome + Xvfb + x11vnc + the Python server is very
+      # tight on the 1 GB sa-1-1 plan; sa-3-4 or da-1-4 is more comfortable.
+      plan: sa-2-2
+
+      # MUST stay 1. A graphical desktop is stateful: two replicas would mean
+      # two independent Xvfb displays behind one domain with no session
+      # affinity, and the WebSocket would land on a different browser than the
+      # API call that drives it.
+      replicas: 1
+
+      public: true
+      httpPort: 6080
+
+      # The only API route that does not need X-Automation-Token, so the
+      # platform's readiness probe can call it without a secret. It answers 200
+      # as soon as the HTTP front is serving.
+      healthCheckPath: /automation/api/info
+
+      domains: []
+
+      # No `command` on purpose: Hostim's Command Override replaces the image
+      # ENTRYPOINT *and* CMD completely, which would drop tini (PID 1, zombie
+      # reaping, SIGTERM forwarding) and the whole supervisor. Leave it empty.
+      deploymentSource:
+        type: git
+        git:
+          url: https://github.com/majidshilehsari/MajidAutomationSystem-colab_browser-use
+          branch: hostim-deploy
+          dockerfilepath: hostim/Dockerfile
+
+      envVars:
+        - name: PORT
+          value: "6080"
+        # Optional: change the page Chrome opens at startup.
+        # - name: START_URL
+        #   value: "https://example.com/"
+        # Optional: supply the secrets yourself instead of letting the
+        # entrypoint generate them into /data/secrets.env on first boot.
+        # A template may also use Hostim's own generator: GENERATE_ME_32
+        # - name: AUTOMATION_TOKEN
+        #   value: GENERATE_ME_32
+
+      volumeMounts:
+        # Never mount over /app or over a binary path: Hostim documents that a
+        # volume mounted over the program hides it and the container then fails
+        # to start with no logs at all. /data is a neutral path.
+        - name: automation-data
+          mountPath: /data
