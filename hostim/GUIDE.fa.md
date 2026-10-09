@@ -625,6 +625,7 @@ hostim backups download ...      # از کنسول یا CLI
 |---|---|---|
 | لاگ کاملاً خالی | build تمام نشده / image غیر amd64 / Command Override اشتباه / volume روی باینری | تب **Build** را ببینید؛ Command Override را خالی کنید؛ `mountPath` را فقط `/data` بگذارید |
 | `failed to read dockerfile: open Dockerfile: no such file or directory` | builder پلتفرم Dockerfile را در ریشهٔ context می‌خواهد و مسیر زیرپوشه را اعمال نکرده | **رفع شده:** `Dockerfile` ریشه یک mirror از `hostim/Dockerfile` است. اگر باز هم دیدید، شاخهٔ انتخابی واقعاً آن فایل را ندارد (بخش «mirror ریشه») |
+| `groupadd: GID '1000' already exists` (کد خروج ۴) | image پایهٔ ubuntu:24.04 یک حساب stock روی uid/gid 1000 دارد | **رفع شده:** شناسه اول با `getent` پرس‌وجو و حساب stock حذف می‌شود، بعد `automation` روی ۱۰۰۰ ساخته می‌شود. اگر باز دیدید، لاگ همان `RUN` را بفرستید |
 | `exec format error` | image برای arm64 ساخته شده | `docker buildx build --platform linux/amd64 -f hostim/Dockerfile .` |
 | `FATAL: /data is not writable` | volume تازه هنوز writable نشده یا mount نشده | volume را به اپ attach کنید و یک بار start بزنید؛ یا از Bastion: `chmod -R a+rwX /volumes/automation-data` |
 | اپ `unhealthy` | پروب جواب ۲۰۰ نمی‌دهد | `hostim exec browser -- /app/hostim/healthcheck.sh` و سپس لاگ سرور |
@@ -668,7 +669,7 @@ hostim backups download ...      # از کنسول یا CLI
 **تست‌شده در محیط من:**
 
 - ✅ کل تست‌های مخزن: `./run_tests.sh` → `ALL CHECKS PASSED`
-  (۱۵۵ تست پایتون، ۲۰ تست `test_core.mjs`، ۳۰ تست jsdom، بررسی نحو همهٔ
+  (۲۱۲ تست پایتون، ۲۰ تست `test_core.mjs`، ۳۰ تست jsdom، بررسی نحو همهٔ
   اسکریپت‌ها) — جزئیات دقیق در گزارش نهایی.
 - ✅ `tests/test_hostim_deploy.py` (تست قراردادهای Hostim + تست واقعی مسیر
   health روی `AutomationApi` واقعی).
@@ -684,25 +685,53 @@ hostim backups download ...      # از کنسول یا CLI
   کامل پشته هنگام مرگ یک سرویس هسته‌ای (کد خروج ۱) و خاموش شدن تمیز با
   SIGTERM، بدون هیچ zombie.
 
+**تأییدشده توسط build واقعی روی خودِ Hostim (نه در محیط من):**
+
+دو build واقعی روی Hostim انجام شد. لاگ build دوم این موارد را از «تأییدنشده»
+به «تأییدشده» تبدیل کرد:
+
+- ✅ **builder پلتفرم واقعاً BuildKit است** و منبع git را به شکل
+  `<repo>.git#<commit>` می‌دهد؛ پس context **ریشهٔ مخزن** است و Dockerfile هم
+  از ریشه خوانده می‌شود (دلیل افزودن mirror ریشه).
+- ✅ **`apt-get install` کامل موفق بود** — یعنی هر ۱۹ بسته روی Ubuntu 24.04
+  (noble) وجود دارد و نصب می‌شود: `novnc`، `websockify`، `x11vnc`، `xvfb`،
+  `fluxbox`، `dbus-x11`، `wmctrl`، `xdotool`، `xclip`، `scrot`، `x11-utils`،
+  `fonts-liberation`، `iproute2`، `procps`، `openssl`، `curl`،
+  `ca-certificates`، `python3` و **`tini`**.
+- ✅ **بررسی سختِ ماژول websockify پاس شد** — یعنی `import
+  websockify.websocketproxy` داخل image کار می‌کند و fallback به pip لازم
+  نشد. بدون این ماژول، sidebar و API کامل مرده بودند.
+- ✅ **نصب `.deb` گوگل کروم موفق بود**: `Google Chrome 155.0.8059.39` و
+  `update-alternatives` برای `google-chrome`. یعنی `dl.google.com` از محیط
+  buildِ Hostim قابل دسترسی است و وابستگی‌های کروم (libnss3، libgtk-3، …) هم
+  حل شدند.
+- ✅ **شبکهٔ build و registry کار می‌کنند** و لایه‌ها بین تلاش‌ها cache
+  می‌شوند (build دوم از مرحلهٔ apt جلو نیفتاد).
+
 **تست‌نشده (و ادعایی درباره‌شان ندارم):**
 
-- ❌ **محتوای Dockerfile هنوز هرگز واقعاً build نشده.** اولین build واقعی روی
-  Hostim انجام شد و تا مرحلهٔ خواندن Dockerfile پیش رفت: clone و checkout درست
-  بود (`HEAD is now at <commit>` و همان commit مخزن)، ولی builder با
-  `failed to read dockerfile: open Dockerfile: no such file or directory` شکست
-  خورد، چون فایل در `hostim/` بود و context همان ریشهٔ مخزن. یعنی
-  **`apt-get`، نصب `.deb` کروم، ساخت کاربر غیرroot و اندازهٔ نهایی image هنوز
-  اجرا نشده‌اند** و برای اولین بار در build بعدی آزموده می‌شوند. رفع این مورد:
-  mirror ریشه (بخش «mirror ریشه» در بخش ۲).
-- ⚠️ **استقرار واقعی شروع شد ولی کامل نشد** — build در همان گام اول شکست خورد
-  و وضعیت اپ `Never built / Never deployed` ماند. من وارد حساب شما نشدم و
-  credential ندارم؛ لاگ build را شما در اختیارم گذاشتید.
+- ⚠️ **build هنوز تا انتها نرسیده.** در تلاش دوم، مرحلهٔ ساخت کاربر غیرroot
+  با `groupadd: GID '1000' already exists` (کد خروج ۴) شکست خورد، چون image
+  پایهٔ ubuntu:24.04 یک حساب پیش‌فرض روی uid/gid 1000 دارد. **رفع شد** (بخش
+  «mirror ریشه» و تست `TestRuntimeUserIsRobust`): حالا شناسه اول با `getent`
+  پرس‌وجو می‌شود، حساب stock به‌صورت عمومی (بدون فرض نام `ubuntu`) حذف
+  می‌شود و بعد `automation` روی همان ۱۰۰۰ ساخته و با `id automation`
+  راستی‌آزمایی می‌شود.
+- ❌ **اندازهٔ نهایی image تأیید نشد** (باید زیر ۴ گیگابایت باشد). لایه‌های
+  apt و کروم موفق بودند، ولی جمع نهایی هنوز اندازه‌گیری نشده.
+- ❌ **هیچ کانتینری تا به حال روی Hostim اجرا نشده** — پس entrypoint، Xvfb،
+  fluxbox، x11vnc و کرومِ **واقعی** در آن محیط آزموده نشده‌اند. رفتار
+  entrypoint فقط با سرویس‌های stub در محیط من آزموده شده (بالا).
+
+- ❌ **هنوز هیچ image ای از این مخزن با موفقیت ساخته نشده.** build اول با
+  `open Dockerfile: no such file or directory` و build دوم با
+  `groupadd: GID '1000' already exists` شکست خورد؛ هر دو رفع شدند، ولی build
+  سومی که تا انتها برود هنوز انجام نشده. وضعیت اپ فعلاً
+  `Never built / Never deployed` است.
 - ❌ در محیط کاری خودم نه `docker` هست و نه `podman` و دسترسی شبکه به Ubuntu
-  archives و Docker Hub بسته است، پس نمی‌توانستم build را محلی جایگزین کنم.
-  تنها بسته‌ای که خودم اضافه کرده بودم و در مسیر Colab آزموده نشده بود
-  (`tini`) را جداگانه بررسی کردم: در Ubuntu 24.04 (noble/universe) با نسخهٔ
-  `0.19.0-1` وجود دارد و باینری‌اش `/usr/bin/tini` است، یعنی همان مسیری که در
-  `ENTRYPOINT` آمده.
+  archives و Docker Hub بسته است، پس هیچ‌وقت نتوانستم build را محلی جایگزین
+  کنم. همهٔ موارد «تأییدشده توسط build واقعی» از لاگی است که شما از داشبورد
+  Hostim فرستادید. من وارد حساب شما نشدم و credential ندارم.
 - ❌ Chrome و Xvfb **واقعی** اجرا نشدند (فقط stub). رندر swiftshader، رفتار
   `--no-sandbox` داخل Kata، و اندازهٔ `/dev/shm` تأیید نشده‌اند.
 - ❌ عبور WebSocket از Traefik واقعی Hostim و هرگونه idle timeout تأیید نشد.

@@ -100,6 +100,11 @@ class TestHostimFilesPresent(unittest.TestCase):
                          "unexpected Dockerfile-shaped files at the repository root: %s"
                          % sorted(added))
 
+    def test_scripts_are_executable(self):
+        for path in (ENTRYPOINT, HEALTHCHECK):
+            mode = os.stat(path).st_mode
+            self.assertTrue(mode & stat.S_IXUSR, "%s is not executable" % path)
+
 
 class TestRootMirrorOfHostimDockerfile(unittest.TestCase):
     """The root Dockerfile must be a byte-for-byte mirror of hostim/Dockerfile.
@@ -166,10 +171,64 @@ class TestRootMirrorOfHostimDockerfile(unittest.TestCase):
         self.assertIn("/app/hostim/docker-entrypoint.sh", self.mirror)
         self.assertIn('CMD ["/app/hostim/healthcheck.sh"]', self.mirror)
 
-    def test_scripts_are_executable(self):
-        for path in (ENTRYPOINT, HEALTHCHECK):
-            mode = os.stat(path).st_mode
-            self.assertTrue(mode & stat.S_IXUSR, "%s is not executable" % path)
+
+class TestRuntimeUserIsRobust(unittest.TestCase):
+    """The real Hostim build died here: ubuntu:24.04 already has a stock
+    account on uid/gid 1000, so an unconditional `groupadd --gid 1000` exits 4
+    with "GID '1000' already exists". These tests pin the fix down."""
+
+    def setUp(self):
+        self.body = read(DOCKERFILE)
+
+    def test_uid_1000_is_looked_up_before_it_is_claimed(self):
+        guard = self.body.find("if getent passwd 1000")
+        groupadd = self.body.find("groupadd --system --gid 1000")
+        self.assertNotEqual(guard, -1, "the Dockerfile must check whether uid 1000 is taken")
+        self.assertNotEqual(groupadd, -1)
+        self.assertLess(guard, groupadd,
+                        "groupadd runs before the uid/gid 1000 guard, so it will "
+                        "fail again on a base image that ships a stock account")
+
+    def test_gid_1000_is_looked_up_before_it_is_claimed(self):
+        guard = self.body.find("if getent group 1000")
+        groupadd = self.body.find("groupadd --system --gid 1000")
+        self.assertNotEqual(guard, -1)
+        self.assertLess(guard, groupadd)
+
+    def test_the_stock_account_is_removed_by_id_not_by_guessed_name(self):
+        # The base image's account is "ubuntu" today; nothing should depend on
+        # that name staying true.
+        self.assertRegex(self.body, r'stock_user="\$\(getent passwd 1000 \| cut -d: -f1\)"')
+        self.assertRegex(self.body, r'stock_group="\$\(getent group 1000 \| cut -d: -f1\)"')
+        self.assertNotRegex(self.body, r"(?m)^\s*(userdel|groupdel)\s+ubuntu\b",
+                            "do not hard-code the stock account's name")
+
+    def test_userdel_has_a_fallback_when_the_home_cannot_be_removed(self):
+        self.assertIn('userdel -r "$stock_user" || userdel "$stock_user"', self.body)
+
+    def test_the_user_creation_runs_in_strict_mode_and_is_verified(self):
+        block = self.body[self.body.find("if getent passwd 1000"):]
+        block = block[:block.find("\n\n")]
+        self.assertIn("id automation", block, "prove the account really exists")
+        self.assertIn("test -d /home/automation", block, "prove the home directory exists")
+        # The RUN that owns this block must be strict, or the guards are theatre.
+        self.assertRegex(self.body, r"(?m)^RUN set -eux; \\\n\s*if getent passwd 1000")
+
+    def test_ownership_is_granted_by_name_so_a_uid_change_cannot_strand_files(self):
+        self.assertIn("chown -R automation:automation", self.body)
+        self.assertNotRegex(self.body, r"chown\s+-R\s+\d+:\d+",
+                            "chown by numeric id would break if the uid ever moves")
+
+    def test_user_instruction_and_home_agree_with_the_created_account(self):
+        self.assertRegex(self.body, r"(?m)^USER\s+automation\s*$")
+        self.assertIn("--home-dir /home/automation", self.body)
+        self.assertRegex(self.body, r"(?m)^\s*HOME=/home/automation\s*\\?\s*$")
+
+    def test_the_image_still_does_not_need_root(self):
+        # Everything the runtime writes lives under /data and /home/automation,
+        # both chowned to the unprivileged account.
+        self.assertRegex(self.body, r"chown -R automation:automation /app /data /home/automation")
+        self.assertNotRegex(self.body, r"(?m)^USER\s+root\s*$")
 
 
 class TestShellScriptsParse(unittest.TestCase):

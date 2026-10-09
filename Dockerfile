@@ -144,11 +144,31 @@ RUN set -eux; \
 # Non-root runtime user. Hostim's docs do not state which user an app runs as,
 # so the image does not depend on being root: everything below works as uid
 # 1000, and Chrome runs with --no-sandbox exactly like the Colab launcher.
+#
+# ubuntu:24.04 ships a stock "ubuntu" account already sitting on uid/gid 1000,
+# so a plain `groupadd --gid 1000` dies with "GID '1000' already exists" (exit
+# code 4) - which is exactly what the first real Hostim build did. Take the id
+# over instead of inventing a new one, and do it generically (look the id up,
+# never assume the account is called "ubuntu"): a deterministic uid keeps the
+# files already on the /data volume owned by the same account after a rebuild,
+# which matters because secrets.env is mode 0600 and unreadable to anyone else.
 # ---------------------------------------------------------------------------
 RUN set -eux; \
+    if getent passwd 1000 >/dev/null; then \
+        stock_user="$(getent passwd 1000 | cut -d: -f1)"; \
+        echo "uid 1000 is taken by the stock account '$stock_user'; removing it"; \
+        userdel -r "$stock_user" || userdel "$stock_user"; \
+    fi; \
+    if getent group 1000 >/dev/null; then \
+        stock_group="$(getent group 1000 | cut -d: -f1)"; \
+        echo "gid 1000 is taken by the stock group '$stock_group'; removing it"; \
+        groupdel "$stock_group"; \
+    fi; \
     groupadd --system --gid 1000 automation; \
     useradd --system --uid 1000 --gid 1000 --create-home --home-dir /home/automation \
-        --shell /bin/bash automation
+        --shell /bin/bash automation; \
+    id automation; \
+    test -d /home/automation
 
 WORKDIR /app
 
