@@ -223,7 +223,31 @@ hostim use <نام پروژه>
 > `HOSTIM_TOKEN` را هرگز در چت یا در مخزن نگذارید. برای CI از secret خودِ
 > GitHub Actions استفاده کنید.
 
-### ۵.۲ ساخت volume و استقرار
+### ۵.۲ از کدام شاخه deploy کنیم؟
+
+Hostim مخزن را از GitHub clone می‌کند و هر شاخه‌ای را می‌پذیرد؛ تنها شرط این
+است که **همان شاخه واقعاً `hostim/Dockerfile` را داشته باشد**. مخزن عمومی است،
+پس به git token نیازی نیست.
+
+دو حالت:
+
+| حالت | `BRANCH` | کی |
+|---|---|---|
+| **شاخهٔ کاری فعلی (بدون merge)** | `arena/19c5b0b6-majidautomationsystem-colab-br` | همین حالا؛ سریع‌ترین راه برای اولین تست واقعی |
+| شاخهٔ استقرار | `hostim-deploy` | بعد از اینکه PR #1 merge شد؛ این همان شاخه‌ای است که `hostim-template.yaml` به‌صورت پیش‌فرض نشانه رفته |
+
+> اگر از template استفاده می‌کنید و هنوز PR را merge نکرده‌اید، خط
+> `branch: hostim-deploy` را در `hostim/hostim-template.yaml` به شاخهٔ کاری
+> عوض کنید — وگرنه Hostim شاخه‌ای را build می‌کند که `hostim/Dockerfile` در آن
+> وجود ندارد و build با خطای «فایل پیدا نشد» شکست می‌خورد.
+
+```bash
+# یکی از این دو را انتخاب کنید:
+BRANCH=arena/19c5b0b6-majidautomationsystem-colab-br   # بدون merge، همین حالا
+# BRANCH=hostim-deploy                                 # بعد از merge شدن PR #1
+```
+
+### ۵.۳ ساخت volume و استقرار
 
 ```bash
 # فهرست پلن‌های واقعی region خودتان
@@ -233,10 +257,10 @@ hostim regions pricing eu-center --for apps
 # volume پایدار
 hostim volumes create automation-data --plan vol-1
 
-# استقرار از شاخهٔ hostim-deploy با Dockerfile داخل پوشهٔ hostim/
+# استقرار با Dockerfile داخل پوشهٔ hostim/
 hostim deploy browser \
   --git https://github.com/majidshilehsari/MajidAutomationSystem-colab_browser-use \
-  --branch hostim-deploy \
+  --branch "$BRANCH" \
   --dockerfile hostim/Dockerfile \
   --plan sa-2-2 \
   --port 6080 \
@@ -250,11 +274,14 @@ hostim deploy browser \
 کد غیرصفر خارج می‌شود. در حالت موفق، دامنهٔ app را می‌بینید
 (`<نام>-<رشته>.hostim.dev`).
 
+لاگ build را با `hostim logs browser --build -f` دنبال کنید؛ اگر جایی شکست،
+همان لاگ را (بدون secret) نگه دارید — برای رفع خطا لازم است.
+
 > ⚠️ **Command Override را خالی بگذارید.** در Hostim این فیلد هم `ENTRYPOINT`
 > و هم `CMD` را کامل جایگزین می‌کند؛ اگر چیزی بنویسید، `tini` و کل سوپروایزر
 > از کار می‌افتند.
 
-### ۵.۳ به‌روزرسانی
+### ۵.۴ به‌روزرسانی
 
 ```bash
 hostim apps rebuild browser      # build دوباره از همان منبع
@@ -310,7 +337,9 @@ hostim templates apply -f hostim/hostim-template.yaml \
 3. **Create Service → New App**:
    - Deployment Type: **Git**
    - Git URL: `https://github.com/majidshilehsari/MajidAutomationSystem-colab_browser-use`
-   - Branch: **`hostim-deploy`** (نه `colab-stable`)
+   - Branch: **شاخه‌ای که `hostim/Dockerfile` را دارد** — یا
+     `arena/19c5b0b6-majidautomationsystem-colab-br` (بدون merge، همین حالا) یا
+     `hostim-deploy` (بعد از merge شدن PR). **هرگز `colab-stable`**
    - Dockerfile path: **`hostim/Dockerfile`**
    - Plan: `sa-2-2` یا بالاتر، Replicas: **۱**
    - HTTP port: **۶۰۸۰**

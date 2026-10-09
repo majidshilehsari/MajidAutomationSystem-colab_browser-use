@@ -76,6 +76,10 @@ components:
         type: git
         git:
           url: https://github.com/majidshilehsari/MajidAutomationSystem-colab_browser-use
+          # این شاخه باید واقعاً hostim/Dockerfile را داشته باشد. اگر هنوز PR
+          # مربوطه را به hostim-deploy merge نکرده‌اید، این خط را به شاخهٔ کاری
+          # فعلی عوض کنید، وگرنه build با «فایل پیدا نشد» شکست می‌خورد.
+          # هرگز colab-stable نگذارید: آن شاخهٔ پایدار Colab است.
           branch: hostim-deploy
           dockerfilepath: hostim/Dockerfile
 
