@@ -76,12 +76,17 @@ components:
         type: git
         git:
           url: https://github.com/majidshilehsari/MajidAutomationSystem-colab_browser-use
-          # این شاخه باید واقعاً hostim/Dockerfile را داشته باشد. اگر هنوز PR
-          # مربوطه را به hostim-deploy merge نکرده‌اید، این خط را به شاخهٔ کاری
-          # فعلی عوض کنید، وگرنه build با «فایل پیدا نشد» شکست می‌خورد.
+          # این شاخه باید واقعاً Dockerfile را داشته باشد. اگر هنوز PR مربوطه
+          # را به hostim-deploy merge نکرده‌اید، این خط را به شاخهٔ کاری فعلی
+          # عوض کنید، وگرنه build با «فایل پیدا نشد» شکست می‌خورد.
           # هرگز colab-stable نگذارید: آن شاخهٔ پایدار Colab است.
           branch: hostim-deploy
-          dockerfilepath: hostim/Dockerfile
+          # `Dockerfile` ریشه یک mirror بایت‌به‌بایت از hostim/Dockerfile است.
+          # build واقعی Hostim نشان داد که منبع git به شکل «<repo>.git#<commit>»
+          # به BuildKit داده می‌شود، یعنی context ریشهٔ مخزن و نام Dockerfile
+          # همان پیش‌فرضِ ریشه. این مقدار در هر دو حالت کار می‌کند؛ اگر
+          # پلتفرم مسیر را واقعاً اعمال کند، hostim/Dockerfile هم درست است.
+          dockerfilepath: Dockerfile
 
       envVars:
         - name: PORT

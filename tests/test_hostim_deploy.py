@@ -37,6 +37,17 @@ COMPOSE = os.path.join(HOSTIM_DIR, "compose.yaml")
 TEMPLATE = os.path.join(HOSTIM_DIR, "hostim-template.yaml")
 GUIDE = os.path.join(HOSTIM_DIR, "GUIDE.fa.md")
 
+# Hostim hands a git-source build to BuildKit as "<repo>.git#<commit>", which
+# means the build context is the repository root and the Dockerfile name is the
+# default "Dockerfile" in that root. The real deployment proved it:
+#   failed to read dockerfile: open Dockerfile: no such file or directory
+# So the root carries a mirror of hostim/Dockerfile. hostim/ stays canonical.
+ROOT_DOCKERFILE = os.path.join(REPO_ROOT, "Dockerfile")
+ROOT_DOCKERIGNORE = os.path.join(REPO_ROOT, "Dockerfile.dockerignore")
+MIRROR_NOTE = re.compile(
+    r"(?ms)^# ===== BEGIN hostim-root-mirror-note =====\n.*?"
+    r"^# ===== END hostim-root-mirror-note =====\n")
+
 PUBLIC_PORT = "6080"
 VNC_PORT = "5901"
 CDP_PORT = "9222"
@@ -70,13 +81,90 @@ class TestHostimFilesPresent(unittest.TestCase):
             self.assertTrue(os.path.isfile(path), "missing deliverable: %s" % path)
 
     def test_hostim_files_live_in_their_own_directory(self):
-        # Separation rule: the Hostim track stays inside hostim/ and does not
-        # add files to the repository root, which the Colab branch shares.
+        # Separation rule: the Hostim track stays inside hostim/. The only two
+        # files it may add to the repository root are the Dockerfile mirror and
+        # its ignore file, because Hostim's git build reads "Dockerfile" from
+        # the context root. Everything else - the entrypoint, the supervisor,
+        # the compose harness, the template, the guide - belongs in hostim/.
         root_entries = set(os.listdir(REPO_ROOT))
-        for forbidden in ("Dockerfile", "docker-entrypoint.sh", "compose.yaml",
-                          "docker-compose.yml", ".dockerignore"):
+        for forbidden in ("docker-entrypoint.sh", "entrypoint.sh", "compose.yaml",
+                          "docker-compose.yml", "hostim-template.yaml", ".dockerignore"):
             self.assertNotIn(forbidden, root_entries,
                              "%s belongs in hostim/, not in the repository root" % forbidden)
+
+    def test_the_root_mirror_files_are_the_only_hostim_addition_to_the_root(self):
+        tracked = subprocess.run(["git", "-C", REPO_ROOT, "ls-files"],
+                                 capture_output=True, text=True).stdout.split()
+        added = {p for p in tracked if "/" not in p and p.startswith(("Dockerfile",))}
+        self.assertEqual(added, {"Dockerfile", "Dockerfile.dockerignore"},
+                         "unexpected Dockerfile-shaped files at the repository root: %s"
+                         % sorted(added))
+
+
+class TestRootMirrorOfHostimDockerfile(unittest.TestCase):
+    """The root Dockerfile must be a byte-for-byte mirror of hostim/Dockerfile.
+
+    Duplication is the price of Hostim's git build reading the default
+    "Dockerfile" from the context root. These tests make the duplication safe:
+    the two files cannot drift apart without the suite going red.
+    """
+
+    def setUp(self):
+        self.canonical = read(DOCKERFILE)
+        self.mirror = read(ROOT_DOCKERFILE)
+
+    def test_mirror_is_byte_identical_after_stripping_its_note(self):
+        stripped = MIRROR_NOTE.sub("", self.mirror)
+        self.assertEqual(stripped, self.canonical,
+                         "Dockerfile drifted from hostim/Dockerfile; regenerate the "
+                         "mirror (see hostim/GUIDE.fa.md, section 'mirror ریشه')")
+
+    def test_note_is_present_and_points_at_the_canonical_file(self):
+        self.assertRegex(self.mirror, MIRROR_NOTE,
+                         "the root mirror must carry the BEGIN/END note explaining "
+                         "why it exists")
+        note = MIRROR_NOTE.search(self.mirror).group(0)
+        self.assertIn("hostim/Dockerfile", note)
+        self.assertIn("TestRootMirrorOfHostimDockerfile", note)
+
+    def test_syntax_directive_is_still_the_first_line(self):
+        # BuildKit only honours "# syntax=" when it is the very first line, so
+        # the note must be inserted after it, never before.
+        self.assertEqual(self.mirror.splitlines()[0], "# syntax=docker/dockerfile:1")
+        self.assertEqual(self.canonical.splitlines()[0], "# syntax=docker/dockerfile:1")
+
+    def test_dockerignore_is_an_exact_copy(self):
+        self.assertEqual(read(ROOT_DOCKERIGNORE),
+                         read(os.path.join(HOSTIM_DIR, "Dockerfile.dockerignore")))
+
+    def test_mirror_exposes_only_the_single_public_port(self):
+        exposed = re.findall(r"(?m)^EXPOSE\s+(.+)$", self.mirror)
+        self.assertEqual(exposed, [PUBLIC_PORT],
+                         "the root mirror must publish exactly one port")
+
+    def test_mirror_runs_as_non_root_behind_tini(self):
+        self.assertRegex(self.mirror, r"(?m)^USER\s+automation\s*$")
+        self.assertIn('ENTRYPOINT ["/usr/bin/tini", "--", '
+                      '"/app/hostim/docker-entrypoint.sh"]', self.mirror)
+
+    def test_mirror_has_no_cloudflare_in_its_code_lines(self):
+        pattern = re.compile(r"cloudflared|trycloudflare", re.I)
+        for line in self.mirror.splitlines():
+            stripped = line.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            self.assertIsNone(pattern.search(line),
+                              "the root mirror runs Cloudflare: %s" % stripped)
+
+    def test_mirror_does_not_copy_the_colab_launchers(self):
+        copies = re.findall(r"(?m)^COPY\s+(\S+)", self.mirror)
+        self.assertEqual(copies, ["automation/", "browser_control.sh", "hostim/"])
+
+    def test_mirror_keeps_the_hostim_entrypoint_and_healthcheck(self):
+        # The image still runs the hostim/ copies even when built from the root
+        # Dockerfile, because COPY hostim/ puts them at /app/hostim/.
+        self.assertIn("/app/hostim/docker-entrypoint.sh", self.mirror)
+        self.assertIn('CMD ["/app/hostim/healthcheck.sh"]', self.mirror)
 
     def test_scripts_are_executable(self):
         for path in (ENTRYPOINT, HEALTHCHECK):
@@ -371,7 +459,10 @@ class TestHostimManifests(unittest.TestCase):
         self.assertRegex(body, r"(?m)^\s*public:\s*true\s*$")
         self.assertRegex(body, r"(?m)^\s*httpPort:\s*%s\s*$" % PUBLIC_PORT)
         self.assertRegex(body, r"(?m)^\s*mountPath:\s*/data\s*$")
-        self.assertIn("dockerfilepath: hostim/Dockerfile", body)
+        # The root mirror, because Hostim's git build resolves "Dockerfile" in
+        # the build context root. See TestRootMirrorOfHostimDockerfile.
+        self.assertIn("dockerfilepath: Dockerfile", body)
+        self.assertNotIn("dockerfilepath: hostim/Dockerfile", body)
 
     def test_template_does_not_deploy_the_stable_colab_branch(self):
         branch = re.search(r"(?m)^\s*branch:\s*(\S+)\s*$", read(TEMPLATE))

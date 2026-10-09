@@ -84,9 +84,11 @@
 ## ۲. فایل‌های این مسیر
 
 ```text
+Dockerfile                     # mirror بایت‌به‌بایت hostim/Dockerfile (چرا؟ پایین)
+Dockerfile.dockerignore        # کپی hostim/Dockerfile.dockerignore برای همان mirror
 hostim/
-├── Dockerfile                 # image اتمی: Ubuntu 24.04 + میزکار + Chrome، بدون cloudflared
-├── Dockerfile.dockerignore    # کوچک‌سازی build context (کنار Dockerfile، نه در ریشه)
+├── Dockerfile                 # منبع حقیقت: image اتمی Ubuntu 24.04 + میزکار + Chrome، بدون cloudflared
+├── Dockerfile.dockerignore    # کوچک‌سازی build context وقتی با -f hostim/Dockerfile می‌سازید
 ├── docker-entrypoint.sh       # سوپروایزر: ترتیب راه‌اندازی، health، راه‌اندازی مجدد، خروج تمیز
 ├── healthcheck.sh             # پروب سلامت داخل کانتینر (برای docker و برای hostim exec)
 ├── compose.yaml               # فقط برای تست محلی با docker compose
@@ -96,11 +98,54 @@ tests/
 └── test_hostim_deploy.py      # تست قراردادهای بالا؛ با run_tests.sh خودکار اجرا می‌شود
 ```
 
-نکته دربارهٔ `Dockerfile.dockerignore`: BuildKit پیش از
-`<context>/.dockerignore` فایل `<مسیر Dockerfile>.dockerignore` را می‌خواند،
-پس مجبور نبودیم فایلی به ریشهٔ مخزن (که با شاخهٔ Colab مشترک است) اضافه کنیم.
-اگر builder پلتفرم این قرارداد را پشتیبانی نکند هم چیزی خراب نمی‌شود، چون
-Dockerfile فقط مسیرهای مشخص را `COPY` می‌کند و هرگز `COPY . .` ندارد.
+### mirror ریشه: `Dockerfile`
+
+`Dockerfile` در ریشهٔ مخزن **فقط یک کپی بایت‌به‌بایت از `hostim/Dockerfile`**
+است و منبع حقیقت همان `hostim/Dockerfile` می‌ماند. دلیلش تجربهٔ واقعی اولین
+build روی Hostim است. BuildKit منبع git را به این شکل می‌گیرد:
+
+```text
+#1 [internal] load git source https://github.com/<repo>.git#<commit>
+error: failed to solve: failed to read dockerfile: open Dockerfile: no such file or directory
+```
+
+در این syntax، fragment می‌تواند `#<ref>:<subdir>` باشد تا context یک
+زیرپوشه شود، ولی Hostim فقط `#<commit>` می‌فرستد. نتیجه: **context ریشهٔ مخزن
+است و نام Dockerfile هم پیش‌فرضِ `Dockerfile` در همان ریشه** — یعنی مسیر
+`hostim/Dockerfile` در این حالت اعمال نمی‌شود. خبر خوب اینکه context دقیقاً
+همان چیزی است که Dockerfile ما فرض کرده (`COPY automation/ ...`)، پس فقط جای
+فایل مسئله بود نه محتوایش.
+
+**نگهداری:** هر تغییری را اول در `hostim/Dockerfile` بدهید، بعد mirror را
+بازتولید کنید:
+
+```bash
+python3 - <<'PY'
+import re
+canon = open("hostim/Dockerfile", encoding="utf-8").read()
+lines = canon.splitlines(keepends=True)
+NOTE = re.compile(r"(?ms)^# ===== BEGIN hostim-root-mirror-note =====\n.*?"
+                  r"^# ===== END hostim-root-mirror-note =====\n")
+note = NOTE.search(open("Dockerfile", encoding="utf-8").read()).group(0)
+open("Dockerfile", "w", encoding="utf-8").write(lines[0] + note + "".join(lines[1:]))
+open("Dockerfile.dockerignore", "w", encoding="utf-8").write(
+    open("hostim/Dockerfile.dockerignore", encoding="utf-8").read())
+print("mirror regenerated")
+PY
+```
+
+اگر این کار را نکنید هم چیزی بی‌سروصدا خراب نمی‌شود: تست
+`TestRootMirrorOfHostimDockerfile` در `tests/test_hostim_deploy.py` برابری
+بایت‌به‌بایت این دو را بررسی می‌کند و در صورت جدا شدنشان `run_tests.sh` قرمز
+می‌شود. همان تست بررسی می‌کند که `# syntax=docker/dockerfile:1` حتماً خط اول
+بماند (وگرنه BuildKit آن را نادیده می‌گیرد).
+
+> نکته دربارهٔ `Dockerfile.dockerignore`: BuildKit پیش از
+> `<context>/.dockerignore` فایل `<مسیر Dockerfile>.dockerignore` را می‌خواند.
+> این قرارداد برای build محلی مهم است (`node_modules` بیرون می‌ماند)، ولی برای
+> build از منبع Git تقریباً بی‌اثر است چون کل مخزنِ commit‌شده فقط ~۵۴۵
+> کیلوبایت است و `node_modules` در Git نیست. Dockerfile هم هرگز `COPY . .`
+> ندارد و فقط مسیرهای صریح را کپی می‌کند.
 
 ---
 
@@ -238,8 +283,8 @@ Hostim مخزن را از GitHub clone می‌کند و هر شاخه‌ای ر�
 
 > اگر از template استفاده می‌کنید و هنوز PR را merge نکرده‌اید، خط
 > `branch: hostim-deploy` را در `hostim/hostim-template.yaml` به شاخهٔ کاری
-> عوض کنید — وگرنه Hostim شاخه‌ای را build می‌کند که `hostim/Dockerfile` در آن
-> وجود ندارد و build با خطای «فایل پیدا نشد» شکست می‌خورد.
+> عوض کنید — وگرنه Hostim شاخه‌ای را build می‌کند که `Dockerfile` در آن وجود
+> ندارد و build با خطای «فایل پیدا نشد» شکست می‌خورد.
 
 ```bash
 # یکی از این دو را انتخاب کنید:
@@ -257,11 +302,11 @@ hostim regions pricing eu-center --for apps
 # volume پایدار
 hostim volumes create automation-data --plan vol-1
 
-# استقرار با Dockerfile داخل پوشهٔ hostim/
+# استقرار؛ Dockerfile از ریشهٔ build context خوانده می‌شود (mirror ریشه)
 hostim deploy browser \
   --git https://github.com/majidshilehsari/MajidAutomationSystem-colab_browser-use \
   --branch "$BRANCH" \
-  --dockerfile hostim/Dockerfile \
+  --dockerfile Dockerfile \
   --plan sa-2-2 \
   --port 6080 \
   --replicas 1 \
@@ -322,7 +367,7 @@ hostim templates apply -f hostim/hostim-template.yaml \
 | `httpPort` | `6080` | همان `PORT` داخل کانتینر |
 | `healthCheckPath` | `/automation/api/info` | تنها مسیر API که توکن نمی‌خواهد، پس پروب پلتفرم می‌تواند بدون secret صدا بزند |
 | `mountPath` | `/data` | مسیر خنثی؛ هرگز volume را روی باینری یا مسیر سیستمی mount نکنید |
-| `dockerfilepath` | `hostim/Dockerfile` | جداسازی کامل از فایل‌های Colab |
+| `dockerfilepath` | `Dockerfile` | همان mirror ریشه؛ در هر دو حالت (چه پلتفرم مسیر را اعمال کند چه نکند) کار می‌کند |
 | `branch` | `hostim-deploy` | **هرگز** `colab-stable` |
 | `command` | (تنظیم نشده) | تا `tini` و سوپروایزر حفظ شوند |
 
@@ -337,10 +382,13 @@ hostim templates apply -f hostim/hostim-template.yaml \
 3. **Create Service → New App**:
    - Deployment Type: **Git**
    - Git URL: `https://github.com/majidshilehsari/MajidAutomationSystem-colab_browser-use`
-   - Branch: **شاخه‌ای که `hostim/Dockerfile` را دارد** — یا
+   - Branch: **شاخه‌ای که `Dockerfile` را دارد** — یا
      `arena/19c5b0b6-majidautomationsystem-colab-br` (بدون merge، همین حالا) یا
      `hostim-deploy` (بعد از merge شدن PR). **هرگز `colab-stable`**
-   - Dockerfile path: **`hostim/Dockerfile`**
+   - Dockerfile path: **`Dockerfile`** (همان پیش‌فرض). اگر فیلد را خالی
+     بگذارید هم همین اتفاق می‌افتد. `hostim/Dockerfile` هم محتوای یکسانی دارد،
+     ولی تجربهٔ واقعی نشان داد builder پلتفرم از روی context ریشه می‌خواند —
+     بخش «mirror ریشه» را ببینید.
    - Plan: `sa-2-2` یا بالاتر، Replicas: **۱**
    - HTTP port: **۶۰۸۰**
    - Health check path: **`/automation/api/info`**
@@ -576,11 +624,12 @@ hostim backups download ...      # از کنسول یا CLI
 | نشانه | علت احتمالی | کار |
 |---|---|---|
 | لاگ کاملاً خالی | build تمام نشده / image غیر amd64 / Command Override اشتباه / volume روی باینری | تب **Build** را ببینید؛ Command Override را خالی کنید؛ `mountPath` را فقط `/data` بگذارید |
+| `failed to read dockerfile: open Dockerfile: no such file or directory` | builder پلتفرم Dockerfile را در ریشهٔ context می‌خواهد و مسیر زیرپوشه را اعمال نکرده | **رفع شده:** `Dockerfile` ریشه یک mirror از `hostim/Dockerfile` است. اگر باز هم دیدید، شاخهٔ انتخابی واقعاً آن فایل را ندارد (بخش «mirror ریشه») |
 | `exec format error` | image برای arm64 ساخته شده | `docker buildx build --platform linux/amd64 -f hostim/Dockerfile .` |
 | `FATAL: /data is not writable` | volume تازه هنوز writable نشده یا mount نشده | volume را به اپ attach کنید و یک بار start بزنید؛ یا از Bastion: `chmod -R a+rwX /volumes/automation-data` |
 | اپ `unhealthy` | پروب جواب ۲۰۰ نمی‌دهد | `hostim exec browser -- /app/hostim/healthcheck.sh` و سپس لاگ سرور |
 | build شکست: `websockify module` | ماژول پایتون websockify در image نیست | Dockerfile عمداً اینجا build را می‌شکند؛ چون بدون آن sidebar و API کامل مرده‌اند |
-| build شکست: image بزرگ‌تر از ۴ گیگابایت | Chrome + میزکار سنگین است | `hostim/Dockerfile.dockerignore` فعال است؟ stage نهایی فقط `automation/` و `browser_control.sh` را COPY می‌کند |
+| build شکست: image بزرگ‌تر از ۴ گیگابایت | Chrome + میزکار سنگین است | `Dockerfile.dockerignore` (ریشه و `hostim/`) فعال است؟ stage نهایی فقط `automation/`، `browser_control.sh` و `hostim/` را COPY می‌کند |
 | تصویر noVNC نمی‌آید ولی API کار می‌کند | WebSocket در ingress قطع می‌شود | گام ۶؛ به پشتیبانی Hostim گزارش دهید (این مورد در مستندات تأیید نشده) |
 | `Port ... is already occupied` | فقط در اجرای محلی | `LOCAL_PORT=7080 docker compose -f hostim/compose.yaml up` |
 | کروم مدام restart می‌شود | RAM کم (پلن `sa-1-1`) | پلن را به `sa-2-2` یا بالاتر ببرید |
@@ -637,11 +686,23 @@ hostim backups download ...      # از کنسول یا CLI
 
 **تست‌نشده (و ادعایی درباره‌شان ندارم):**
 
-- ❌ **`docker build` این Dockerfile هرگز اجرا نشد** — در این محیط نه `docker`
-  هست و نه `podman`، و دسترسی شبکه به Ubuntu archives و Docker Hub بسته است.
-  پس نام بسته‌ها، نصب `.deb` کروم و اندازهٔ نهایی image تأیید نشده‌اند.
-- ❌ **هیچ استقرار واقعی روی Hostim انجام نشد** — طبق خواستهٔ شما وارد حساب
-  نشدم و credential ندارم.
+- ❌ **محتوای Dockerfile هنوز هرگز واقعاً build نشده.** اولین build واقعی روی
+  Hostim انجام شد و تا مرحلهٔ خواندن Dockerfile پیش رفت: clone و checkout درست
+  بود (`HEAD is now at <commit>` و همان commit مخزن)، ولی builder با
+  `failed to read dockerfile: open Dockerfile: no such file or directory` شکست
+  خورد، چون فایل در `hostim/` بود و context همان ریشهٔ مخزن. یعنی
+  **`apt-get`، نصب `.deb` کروم، ساخت کاربر غیرroot و اندازهٔ نهایی image هنوز
+  اجرا نشده‌اند** و برای اولین بار در build بعدی آزموده می‌شوند. رفع این مورد:
+  mirror ریشه (بخش «mirror ریشه» در بخش ۲).
+- ⚠️ **استقرار واقعی شروع شد ولی کامل نشد** — build در همان گام اول شکست خورد
+  و وضعیت اپ `Never built / Never deployed` ماند. من وارد حساب شما نشدم و
+  credential ندارم؛ لاگ build را شما در اختیارم گذاشتید.
+- ❌ در محیط کاری خودم نه `docker` هست و نه `podman` و دسترسی شبکه به Ubuntu
+  archives و Docker Hub بسته است، پس نمی‌توانستم build را محلی جایگزین کنم.
+  تنها بسته‌ای که خودم اضافه کرده بودم و در مسیر Colab آزموده نشده بود
+  (`tini`) را جداگانه بررسی کردم: در Ubuntu 24.04 (noble/universe) با نسخهٔ
+  `0.19.0-1` وجود دارد و باینری‌اش `/usr/bin/tini` است، یعنی همان مسیری که در
+  `ENTRYPOINT` آمده.
 - ❌ Chrome و Xvfb **واقعی** اجرا نشدند (فقط stub). رندر swiftshader، رفتار
   `--no-sandbox` داخل Kata، و اندازهٔ `/dev/shm` تأیید نشده‌اند.
 - ❌ عبور WebSocket از Traefik واقعی Hostim و هرگونه idle timeout تأیید نشد.

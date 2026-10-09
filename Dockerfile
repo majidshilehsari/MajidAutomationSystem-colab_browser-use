@@ -1,4 +1,26 @@
 # syntax=docker/dockerfile:1
+# ===== BEGIN hostim-root-mirror-note =====
+# This root Dockerfile is a byte-for-byte MIRROR of hostim/Dockerfile.
+#
+# چرا این فایل در ریشهٔ مخزن هست؟
+# Hostim یک build از منبع Git را به BuildKit به شکل «<repo>.git#<commit>»
+# می‌دهد. در این syntax، fragment می‌تواند «#<ref>:<subdir>» باشد تا context
+# یک زیرپوشه شود، ولی Hostim فقط «#<commit>» می‌فرستد؛ پس context ریشهٔ مخزن
+# است و نام Dockerfile هم پیش‌فرضِ «Dockerfile» در همان ریشه. اولین build
+# واقعی دقیقاً به همین دلیل شکست خورد:
+#   failed to read dockerfile: open Dockerfile: no such file or directory
+# چون فایل ما hostim/Dockerfile بود.
+#
+# این فایل فقط برای باز کردن همان مسیر پیش‌فرض است. **منبع حقیقت
+# hostim/Dockerfile است**؛ هر تغییری را اول آنجا بدهید و بعد این فایل را
+# بازتولید کنید (دستورش در hostim/GUIDE.fa.md، بخش «mirror ریشه»). اگر این دو
+# از هم جدا شوند تست
+# tests/test_hostim_deploy.py::TestRootMirrorOfHostimDockerfile
+# بلافاصله شکست می‌خورد، پس نمی‌تواند بی‌سروصدا کهنگه بماند.
+#
+# مسیر Google Colab هیچ تغییری نکرده است: Colab هیچ image ای build نمی‌کند و
+# install.sh / start_colab_browser.sh / stop_colab_browser.sh دست‌نخورده‌اند.
+# ===== END hostim-root-mirror-note =====
 #
 # خلاصهٔ فارسی: image کانتینر مخصوص مسیر Hostim. Ubuntu 24.04 + میزکار مجازی
 # (Xvfb، fluxbox، x11vnc، noVNC) + Google Chrome + سرور پایتون، بدون cloudflared.
