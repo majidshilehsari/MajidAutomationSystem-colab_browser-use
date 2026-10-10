@@ -92,6 +92,49 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false) {
     if (clean.endsWith('/agent/telegram/targets')) {
       return json({ targets: [{ id: -100999, title: 'Found group', type: 'supergroup' }] });
     }
+    if (clean.endsWith('/agent/telegram/log')) {
+      return json({ counts: { all: 2, queued: 0, sent: 1, failed: 1, cancelled: 0 },
+        messages: [
+          { id: 2, created_at: 1760000100, status: 'failed', channel: 'bot',
+            purpose: 'manual', target: '\u06af\u0631\u0648\u0647 \u0645\u0646',
+            body: '\u067e\u06cc\u0627\u0645 \u062f\u0648\u0645', error: 'blocked' },
+          { id: 1, created_at: 1760000000, status: 'sent', channel: 'bot',
+            purpose: 'manual', target: '\u06af\u0631\u0648\u0647 \u0645\u0646',
+            body: '\u0633\u0644\u0627\u0645', error: '' },
+        ] });
+    }
+    if (clean.endsWith('/agent/backups')) {
+      return json({
+        backups: [{ name: 'mas-backup-test.tar.gz', size: 2048, sizeText: '2.0 KB',
+          createdAt: 1760000000, createdAtText: '2026-10-10 10:00:00' }],
+        stats: { dbSizeText: '88 KB', flows: 2, backups: 1, backupSizeText: '2.0 KB',
+          tables: { chat: 3, jobs: 1 }, dir: '/data/backups',
+          lastBackup: { name: 'mas-backup-test.tar.gz', createdAt: 1760000000 },
+          config: { enabled: false, scheduleKind: 'cron', schedule: '', keep: 7,
+            telegramTarget: '', telegramChannel: '', includeSecrets: false,
+            notifyAfterBackup: false, lastJobStatus: '' } } });
+    }
+    if (clean.endsWith('/agent/browser')) {
+      return json({
+        ok: true, cdpPort: 9223,
+        profile: { key: 'agent', fa: '\u06a9\u0631\u0648\u0645 \u0627\u06cc\u062c\u0646\u062a', dir: '/data/ai-profile' },
+        version: { ok: true, Browser: 'Chrome/155.0.8059.39' },
+        tabs: { ok: true, count: 1, tabs: [{ id: 'T1', title: 'DeepSeek',
+          url: 'https://chat.deepseek.com/' }] },
+        history: { ok: true, totals: { visits: 2 }, visits: [{ url: 'https://old.example/',
+          title: '\u0635\u0641\u062d\u0647\u0654 \u0628\u0633\u062a\u0647', at: 1759990000,
+          timeText: '2026-10-10 07:00', visitCount: 1, transition: '\u0644\u06cc\u0646\u06a9' }],
+          searches: [{ term: 'deepseek', timeText: '' }], downloads: [] },
+        closedTabs: [{ url: 'https://old.example/', title: '\u0635\u0641\u062d\u0647\u0654 \u0628\u0633\u062a\u0647',
+          timeText: '2026-10-10 07:00' }],
+        closedTabsNote: 'derived from history' });
+    }
+    if (clean.endsWith('/agent/browser/tabs')) {
+      return json({ ok: true, tabs: [{ id: 'T1', title: 'DeepSeek', url: 'https://chat.deepseek.com/' }] });
+    }
+    if (clean.endsWith('/agent/browser/history')) {
+      return json({ ok: true, visits: [], searches: [], downloads: [], totals: {} });
+    }
     if (clean.endsWith('/agent/notes')) {
       return json({ notes: [{ id: 'note-1', kind: 'note',
         body: '\u06cc\u0627\u062f\u062f\u0627\u0634\u062a', created_at: 1760000000 }] });
@@ -579,8 +622,10 @@ test('step list shows no numbering and options are styled dark', async () => {
     await page.wait(10);
     const list = page.doc.querySelector('.mas-steps');
     assert.equal(page.window.getComputedStyle(list).listStyleType, 'none');
-    assert.ok(page.window.getComputedStyle(page.doc.querySelector('select.mas-input'))
-      .backgroundColor.startsWith('rgb(18, 21, 26)'), 'the select must not be white');
+    const selectBg = page.window.getComputedStyle(
+      page.doc.querySelector('select.mas-input')).backgroundColor;
+    assert.ok(selectBg.startsWith('rgb(20, 24, 30)'),
+      `the select must not be white, got ${selectBg}`);
   } finally {
     await page.cleanup();
   }
@@ -588,7 +633,7 @@ test('step list shows no numbering and options are styled dark', async () => {
 
 /** Tabs by name. Chat is first and the library comes before the stages. */
 const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages', 'shots', 'texts',
-  'agent', 'log'];
+  'db', 'agent', 'log'];
 
 function tab(page, name) {
   const node = Array.from(page.doc.querySelectorAll('.mas-tab'))
@@ -1093,8 +1138,8 @@ test('record layer stays hidden until recording starts', async () => {
  * The coworker agent tab
  * ------------------------------------------------------------------ */
 
-const AGENT_SUB_LABELS = ['کلید ایجنت', 'تلگرام', 'نشانگر', 'وظایف', 'کپچا',
-  'اسکریپت', 'داده‌ها', 'کلیدها'];
+const AGENT_SUB_LABELS = ['کلید ایجنت', 'تلگرام', 'مرورگر', 'نشانگر', 'وظایف',
+  'کپچا', 'اسکریپت', 'داده‌ها', 'کلیدها'];
 
 /** Open the panel, authenticate, switch to the agent tab and one sub-pane. */
 async function openAgentSub(page, label) {

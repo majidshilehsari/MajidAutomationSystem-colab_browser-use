@@ -34,7 +34,9 @@ from typing import Any, Dict, List, Optional
 
 from automation import schema
 from automation.agent_store import AgentStore, SCRIPT_APPROVED
+from automation import browser_info
 from automation.ai_browser import AiBrowser, AiBrowserError
+from automation.backup import BackupError, BackupManager
 from automation.captcha import CaptchaError, CaptchaSolver
 from automation.llm import (LlmClient, LlmError, PROVIDER_BROWSER,
                             extract_json)
@@ -264,6 +266,44 @@ API_INDEX = [
                                    "می‌شود تا بتوانی در تلگرام یا به مدل دیگری بدهی.",
      "The public link to one screenshot; opens without a token, so it can be "
      "pasted into Telegram or handed to another model."),
+    # the coworker agent's eyes on Chrome
+    ("GET", "/agent/browser", "🌐 همه‌چیز کروم در یک پاسخ: تب‌های باز، نسخه، "
+                              "سابقهٔ کامل پروفایل و تب‌های بسته‌شدهٔ اخیر.",
+     "Everything about Chrome in one answer: open tabs, version, the full "
+     "profile history and recently closed tabs."),
+    ("GET", "/agent/browser/tabs", "🌐 فهرست تب‌های باز همین لحظه (از پورت دیباگ).",
+     "The tabs open right now, from the debugging port."),
+    ("GET", "/agent/browser/history", "🕘 سابقهٔ کروم: بازدیدها، جست‌وجوها و "
+                                      "دانلودها با فیلتر متن و بازهٔ زمانی.",
+     "Chrome history: visits, searches and downloads, filterable."),
+    ("POST", "/agent/browser/tab", "🌐 باز کردن/فعال کردن/بستن یک تب کروم.",
+     "Open, activate or close one Chrome tab."),
+    # continuous database backups
+    ("GET", "/agent/backups", "🗄 فهرست پشتیبان‌ها + آمار دیتابیس + تنظیمات "
+                              "پشتیبان‌گیری.",
+     "Backup list plus database stats and backup settings."),
+    ("POST", "/agent/backups", "🗄 گرفتن یک پشتیبان همین حالا (tar.gz روی volume).",
+     "Take one backup right now (a tar.gz on the volume)."),
+    ("GET", "/agent/backup-download", "📥 دانلود یک پشتیبان برای نگهداری بیرون.",
+     "Download one backup archive."),
+    ("POST", "/agent/backup-delete", "🗄 حذف یک پشتیبان.", "Delete one backup."),
+    ("POST", "/agent/backup-send", "🗄 فرستادن یک پشتیبان به تلگرام (کانال/چت "
+                                   "دلخواه).",
+     "Upload one backup to a Telegram chat or channel."),
+    ("POST", "/agent/backup-config", "🗄 تنظیم پشتیبان‌گیری: زمان‌بندی خودکار، "
+                                     "تعداد نگه‌داشته، مقصد تلگرام.",
+     "Configure backups: automatic schedule, retention, Telegram target."),
+    # the trustworthy telegram test
+    ("GET", "/agent/telegram/log", "✉️ صندوق پیام‌های تلگرام: هر تلاش ارسال با "
+                                   "وضعیت، مقصد، زمان و متن + شمارش کل/رفته/"
+                                   "ناموفق.",
+     "The Telegram mailbox: every delivery attempt with status, target, time "
+     "and text, plus the counters."),
+    ("POST", "/agent/telegram/diagnose", "🩺 تست مرحله‌به‌مرحلهٔ تلگرام: حالت، "
+                                         "اتصال ربات، نشست حساب، مقصد و یک "
+                                         "ارسال واقعی.",
+     "Step-by-step Telegram test: mode, bot login, account session, target "
+     "and one real send."),
 ]
 
 
@@ -336,6 +376,11 @@ class AgentHub:
             clock=clock, image_size=_png_size)
         self.scheduler = scheduler if scheduler is not None else Scheduler(
             self.store, self._run_job, clock=clock, sleep=sleep)
+        # Continuous database backups live on the same volume as the database
+        # itself, and reuse the scheduler for the automatic part.
+        self.backups = BackupManager(
+            self.store, data_dir=data_dir, notifier=self.notifier, clock=clock,
+            flows_dir=getattr(flows, "dir", None), hub=self)
 
     # -- lifecycle ------------------------------------------------------
     def start(self) -> None:
@@ -749,6 +794,231 @@ class AgentHub:
                                                                  or [])))
         return result
 
+    def _run_telegram_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """A scheduled Telegram message («برنامه‌ها» in the Telegram pane).
+
+        ``until`` (unix seconds) and ``maxRuns`` live in the payload; when one
+        of them is spent the job disables itself instead of firing forever.
+        """
+        payload = dict(job.get("payload") or {})
+        until = float(payload.get("until") or 0)
+        max_runs = int(payload.get("maxRuns") or 0)
+        runs = int(payload.get("runs") or 0)
+        if until and self._clock() > until:
+            self._expire_job(job, "the until-date has passed")
+            return {"status": "done", "note": "expired"}
+        if max_runs and runs >= max_runs:
+            self._expire_job(job, "the run limit was reached")
+            return {"status": "done", "note": "limit reached"}
+        text = str(payload.get("text") or job.get("target") or "").strip()
+        if not text:
+            raise AgentError("this program has no message text", 400)
+        result = self.notifier.send(text, purpose="jobs")
+        payload["runs"] = runs + 1
+        try:
+            self.store.upsert_job({"payload": payload}, job_id=job["id"],
+                                  actor="scheduler")
+        except Exception:  # the run itself already happened; keep its outcome
+            pass
+        if not result.get("sent"):
+            return {"status": "failed",
+                    "error": str(result.get("reason") or "nothing was sent")}
+        if max_runs and runs + 1 >= max_runs:
+            self._expire_job(job, "the run limit was reached")
+        return {"status": "done", "sent": result.get("sent", 0)}
+
+    def _expire_job(self, job: Dict[str, Any], why: str) -> None:
+        try:
+            self.store.upsert_job({"enabled": False}, job_id=job["id"],
+                                  actor="scheduler")
+            self.store.audit("scheduler", "job.expired",
+                             "%s: %s" % (job.get("id"), why))
+        except Exception:
+            pass
+
+    def telegram_log(self, limit: int = 100) -> Dict[str, Any]:
+        return {"messages": self.store.list_telegram_log(limit),
+                "counts": self.store.telegram_counts()}
+
+    # -- continuous database backups ---------------------------------------
+    def _run_backup_job(self, job: Dict[str, Any]) -> Dict[str, Any]:
+        """The scheduler's `backup` action: snapshot, prune, maybe ship."""
+        info = self.backup_create(actor="scheduler", label="زمان‌بندی‌شده")
+        pruned = self.backups.prune(actor="scheduler")
+        shipped: Dict[str, Any] = {}
+        if str(self.backups.config().get("telegramTarget") or ""):
+            try:
+                shipped = self.backups.send(name=info["name"], actor="scheduler")
+            except BackupError as exc:
+                shipped = {"sent": 0, "error": str(exc)}
+        if self.backups.config().get("notifyAfterBackup"):
+            try:
+                self.notifier.notify_result(
+                    "پشتیبان‌گیری خودکار دیتابیس", info["name"],
+                    "done" if not shipped.get("error") else "failed",
+                    str(shipped.get("error") or ""))
+            except Exception:  # a notification problem must not fail the job
+                pass
+        return {"status": "done", "backup": info["name"],
+                "sizeText": info["sizeText"], "pruned": pruned, "telegram": shipped}
+
+    def backup_stats(self) -> Dict[str, Any]:
+        return self.backups.stats()
+
+    def backup_list(self) -> Dict[str, Any]:
+        return {"backups": self.backups.list(), "stats": self.backups.stats()}
+
+    def backup_create(self, include_secrets: Optional[bool] = None,
+                      label: str = "", actor: str = "operator") -> Dict[str, Any]:
+        info = self.backups.create(include_secrets=include_secrets, actor=actor,
+                                   label=label)
+        self.backups.prune(actor=actor)
+        return info
+
+    def backup_delete(self, name: str, actor: str = "operator") -> Dict[str, Any]:
+        try:
+            return self.backups.delete(name, actor=actor)
+        except BackupError as exc:
+            raise AgentError(str(exc), exc.status)
+
+    def backup_read(self, name: str) -> bytes:
+        try:
+            return self.backups.read(name)
+        except BackupError as exc:
+            raise AgentError(str(exc), exc.status)
+
+    def backup_send(self, name: str = "", target: str = "", channel: str = "",
+                    actor: str = "operator") -> Dict[str, Any]:
+        try:
+            return self.backups.send(name=name, target=target, channel=channel,
+                                     actor=actor)
+        except BackupError as exc:
+            raise AgentError(str(exc), exc.status)
+
+    def backup_configure(self, values: Dict[str, Any],
+                         actor: str = "operator") -> Dict[str, Any]:
+        try:
+            return self.backups.configure(values, actor=actor)
+        except BackupError as exc:
+            raise AgentError(str(exc), exc.status)
+
+    # -- everything Chrome -------------------------------------------------
+    def browser_overview(self, profile: str = "", port: Optional[int] = None,
+                         limit: int = 200, query: str = "",
+                         days: float = 0.0) -> Dict[str, Any]:
+        return browser_info.summary(profile=profile, port=port, limit=limit,
+                                    query=query, days=days)
+
+    def browser_tabs(self, port: Optional[int] = None) -> Dict[str, Any]:
+        return browser_info.open_tabs(int(port or self.ai_port or 9223))
+
+    def browser_history(self, profile: str = "", limit: int = 200, query: str = "",
+                        days: float = 0.0) -> Dict[str, Any]:
+        return browser_info.read_history(profile, limit=limit, query=query,
+                                          days=days)
+
+    def browser_tab(self, action: str, target_id: str = "", url: str = "",
+                    port: Optional[int] = None) -> Dict[str, Any]:
+        try:
+            return browser_info.tab_action(action, target_id=target_id, url=url,
+                                           port=int(port or self.ai_port or 9223))
+        except browser_info.BrowserError as exc:
+            raise AgentError(str(exc), exc.status)
+
+    # -- the step-by-step Telegram test -------------------------------------
+    def telegram_diagnose(self, target: Any = "", channel: str = "",
+                          text: str = "") -> Dict[str, Any]:
+        """Walk the whole delivery path one step at a time.
+
+        The user asked for a test they can actually trust, so this answers
+        "where exactly would it break" instead of a single yes/no: mode ->
+        bot login -> account session -> destination -> a real send.
+        """
+        steps: List[Dict[str, Any]] = []
+        mode = self.notifier.mode()
+        steps.append({
+            "step": "mode", "fa": "حالت تلگرام",
+            "ok": mode != MODE_OFF,
+            "detail": ("حالت فعلی: %s" % mode) if mode != MODE_OFF
+                      else "تلگرام خاموش است؛ از جعبهٔ «حالت» یکی از ربات/حساب/هر دو "
+                           "را انتخاب و ذخیره کن.",
+        })
+        channels = [channel] if channel in CHANNELS else self.notifier.channels("manual")
+        steps.append({
+            "step": "channels", "fa": "مسیرهای فعال",
+            "ok": bool(channels),
+            "detail": ("پیام از مسیرهای: %s رد می‌شود." % "، ".join(channels))
+                      if channels else "هیچ مسیری فعال نیست (حالت یا مسیر هدف).",
+        })
+        if MODE_BOT in channels:
+            detail, ok = "", False
+            try:
+                me = self.notifier.transport(MODE_BOT).whoami()
+                ok = True
+                detail = "ربات وصل است: @%s" % (me.get("username") or "?")
+            except TelegramError as exc:
+                detail = "ربات جواب نداد: %s" % exc
+            steps.append({"step": "bot", "fa": "اتصال ربات (getMe)", "ok": ok,
+                          "detail": detail})
+        if MODE_ACCOUNT in channels:
+            ok, detail = False, ""
+            try:
+                account = self.notifier.transport(MODE_ACCOUNT)
+                if account.authorized():
+                    me = account.whoami()
+                    ok = True
+                    detail = "حساب کاربری وارد شده: %s" % (
+                        me.get("username") or me.get("phone") or "?")
+                else:
+                    detail = ("حساب کاربری هنوز وارد نشده؛ از بخش «ورود با حساب» "
+                              "شماره و کد را بده.")
+            except TelegramError as exc:
+                detail = "حساب کاربری در دسترس نیست: %s" % exc
+            steps.append({"step": "account", "fa": "نشست حساب کاربری", "ok": ok,
+                          "detail": detail})
+        wanted: Any = target
+        if target not in (None, ""):
+            try:
+                wanted = int(target)
+            except (TypeError, ValueError):
+                pass
+        saved = self.notifier.targets()
+        chosen = ([item for item in saved if item.get("id") == wanted]
+                  if target not in (None, "") else list(saved))
+        steps.append({
+            "step": "targets", "fa": "مقصد پیام",
+            "ok": bool(chosen),
+            "detail": ("مقصد: %s" % ", ".join(str(i.get("title") or i.get("id"))
+                                              for i in chosen[:3]))
+                      if chosen else "هیچ مقصدی انتخاب نشده؛ اول «پیدا کردن چت‌ها» "
+                                     "یا یک آی‌دی/نام کانال بده.",
+        })
+        sent_result: Dict[str, Any] = {}
+        if channels and chosen:
+            message = str(text or "🩺 تست سلامت تلگرام از سامانهٔ اتوماسیون")
+            try:
+                sent_result = self.notifier.send(message, targets=chosen,
+                                                 purpose="manual",
+                                                 channel=channel or None)
+                ok = bool(sent_result.get("sent"))
+                detail = ("%d پیام فرستاده شد%s"
+                          % (sent_result.get("sent", 0),
+                             ("؛ خطا: %s" % sent_result["reason"])
+                             if sent_result.get("reason") else ""))
+            except TelegramError as exc:
+                ok, detail = False, "فرستادن ناموفق: %s" % exc
+            steps.append({"step": "send", "fa": "فرستادن پیام واقعی", "ok": ok,
+                          "detail": detail})
+        else:
+            steps.append({"step": "send", "fa": "فرستادن پیام واقعی", "ok": False,
+                          "skipped": True,
+                          "detail": "به دلیل مشکل مرحله‌های قبل انجام نشد."})
+        all_ok = all(bool(s.get("ok")) for s in steps)
+        self.store.audit("operator", "telegram.diagnose",
+                         "ok=%s steps=%d" % (all_ok, len(steps)))
+        return {"ok": all_ok, "steps": steps, "send": sent_result,
+                "mode": mode, "channels": channels}
+
     # -- the pointer and the click ripple -----------------------------------
     def cursor_info(self) -> Dict[str, Any]:
         return {
@@ -924,10 +1194,11 @@ class AgentHub:
             merged["payload"] = payload
             data = merged
         action = str((data.get("payload") or {}).get("action") or "flow")
-        if action not in ("flow", "script", "prompt"):
-            raise AgentError("payload.action must be flow, script or prompt")
+        if action not in ("flow", "script", "prompt", "backup", "telegram"):
+            raise AgentError("payload.action must be flow, script, prompt, "
+                             "backup or telegram")
         target = str(data.get("target") or "")
-        if action != "prompt" and not target:
+        if action not in ("prompt", "backup", "telegram") and not target:
             raise AgentError("this job needs a target")
         if action == "flow" and self.flows is not None and target:
             if self.flows.get(target) is None:
@@ -1030,6 +1301,12 @@ class AgentHub:
         action = str(payload.get("action") or "flow")
         target = str(job.get("target") or "")
         name = str(job.get("name") or target or job["id"])
+
+        if action == "backup":
+            return self._run_backup_job(job)
+
+        if action == "telegram":
+            return self._run_telegram_job(job)
 
         if action == "script":
             result = self.scripts.run(target, actor="scheduler")

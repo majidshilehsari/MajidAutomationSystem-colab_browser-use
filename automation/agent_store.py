@@ -119,7 +119,20 @@ CREATE TABLE IF NOT EXISTS operations (
     run_count   INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE TABLE IF NOT EXISTS telegram_log (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    status     TEXT NOT NULL DEFAULT 'queued',
+    channel    TEXT NOT NULL DEFAULT '',
+    purpose    TEXT NOT NULL DEFAULT 'manual',
+    target     TEXT NOT NULL DEFAULT '',
+    body       TEXT NOT NULL DEFAULT '',
+    error      TEXT NOT NULL DEFAULT ''
+);
+
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit (at);
+CREATE INDEX IF NOT EXISTS idx_tglog_at ON telegram_log (created_at);
 CREATE INDEX IF NOT EXISTS idx_jobs_next ON jobs (enabled, next_run_at);
 CREATE INDEX IF NOT EXISTS idx_scripts_status ON scripts (status);
 CREATE INDEX IF NOT EXISTS idx_chat_created ON chat (created_at);
@@ -539,6 +552,53 @@ class AgentStore:
         self._execute("DELETE FROM chat")
         self.audit(actor, "chat.cleared", "%d message(s)" % count)
         return {"cleared": count}
+
+    # -- telegram message log ----------------------------------------------
+    def log_telegram(self, status: str, channel: str, purpose: str,
+                     target: Any, body: str, error: str = "") -> int:
+        """Remember one delivery attempt so «لیست پیام‌ها» can show it."""
+        now = round(self._clock(), 3)
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO telegram_log (created_at, updated_at, status, channel,"
+                " purpose, target, body, error) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (now, now, str(status), str(channel), str(purpose),
+                 str(target if target is not None else ""), str(body)[:2000],
+                 str(error)[:500]))
+            self._db.commit()
+            return int(cursor.lastrowid or 0)
+
+    def update_telegram_log(self, log_id: int, status: str,
+                            error: str = "", channel: str = "") -> None:
+        now = round(self._clock(), 3)
+        with self._lock:
+            if channel:
+                self._db.execute(
+                    "UPDATE telegram_log SET updated_at=?, status=?, error=?,"
+                    " channel=? WHERE id=?",
+                    (now, str(status), str(error)[:500], str(channel), int(log_id)))
+            else:
+                self._db.execute(
+                    "UPDATE telegram_log SET updated_at=?, status=?, error=?"
+                    " WHERE id=?",
+                    (now, str(status), str(error)[:500], int(log_id)))
+            self._db.commit()
+
+    def list_telegram_log(self, limit: int = 100) -> List[Dict[str, Any]]:
+        return self._query(
+            "SELECT * FROM telegram_log ORDER BY created_at DESC, id DESC LIMIT ?",
+            (max(1, min(500, int(limit))),))
+
+    def telegram_counts(self) -> Dict[str, int]:
+        rows = self._query(
+            "SELECT status, count(*) AS n FROM telegram_log GROUP BY status")
+        counts = {str(row["status"]): int(row["n"]) for row in rows}
+        total = sum(counts.values())
+        return {"all": total,
+                "queued": counts.get("queued", 0),
+                "sent": counts.get("sent", 0) + counts.get("partial", 0),
+                "failed": counts.get("failed", 0),
+                "cancelled": counts.get("cancelled", 0)}
 
     # -- the operations library -------------------------------------------
     def list_operations(self) -> List[Dict[str, Any]]:

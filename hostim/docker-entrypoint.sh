@@ -277,6 +277,66 @@ start_window_manager() {
   log "fluxbox started"
 }
 
+prepare_desktop() {
+  # A calmer, Windows-10-flavoured desktop: our own fluxbox style (dark taskbar
+  # at the bottom, gradient background, Persian right-click menu) plus a few
+  # session keys (Persian workspace names, toolbar layout). Only cosmetic: if
+  # anything here fails the window manager still starts with its defaults.
+  local home_dir="${HOME:-/home/automation}"
+  local fb_dir="$home_dir/.fluxbox"
+  mkdir -p "$fb_dir" 2>/dev/null || true
+  if [[ -f "$APP_DIR/hostim/fluxbox-style" ]]; then
+    cp -f "$APP_DIR/hostim/fluxbox-style" "$fb_dir/mas-style" 2>/dev/null || true
+  fi
+  if [[ -f "$APP_DIR/hostim/fluxbox-menu" ]]; then
+    cp -f "$APP_DIR/hostim/fluxbox-menu" "$fb_dir/mas-menu" 2>/dev/null || true
+  fi
+  # An optional wallpaper image on the volume wins over the gradient.
+  if [[ -n "${DESKTOP_BACKGROUND:-}" && -f "${DESKTOP_BACKGROUND}" ]]; then
+    {
+      printf '\nbackground: fullscreen\n'
+      printf 'background.pixmap: %s\n' "$DESKTOP_BACKGROUND"
+    } >> "$fb_dir/mas-style" 2>/dev/null || true
+    log "desktop background: $DESKTOP_BACKGROUND"
+  fi
+  python3 - "$fb_dir" <<'PY' 2>/dev/null || log "WARN: desktop keys not written"
+import sys
+from pathlib import Path
+fb = Path(sys.argv[1])
+init = fb / "init"
+keys = {
+    "session.styleFile": str(fb / "mas-style"),
+    "session.menuFile": str(fb / "mas-menu"),
+    "session.screen0.toolbar.visible": "true",
+    "session.screen0.toolbar.autoHide": "false",
+    "session.screen0.toolbar.placement": "BottomCenter",
+    "session.screen0.toolbar.widthPercent": "100",
+    "session.screen0.toolbar.height": "34",
+    "session.screen0.toolbar.tools":
+        "prevworkspace, workspacename, nextworkspace, iconbar, systemtray, clock",
+    "session.screen0.workspaceNames":
+        "ورک‌اسپیس ۱, ورک‌اسپیس ۲, ورک‌اسپیس ۳, ورک‌اسپیس ۴",
+    "session.screen0.tabs.usePixmap": "false",
+    "session.screen0.focusModel": "ClickFocus",
+    "session.autoRaise": "true",
+}
+lines = init.read_text(encoding="utf-8").splitlines() if init.exists() else []
+out, seen = [], set()
+for line in lines:
+    name = line.split(":", 1)[0].strip()
+    if name in keys:
+        out.append("%s: %s" % (name, keys[name]))
+        seen.add(name)
+    else:
+        out.append(line)
+for name, value in keys.items():
+    if name not in seen:
+        out.append("%s: %s" % (name, value))
+init.write_text("\n".join(out) + "\n", encoding="utf-8")
+PY
+  log "desktop style prepared (taskbar + Persian menu + gradient background)"
+}
+
 start_vnc() {
   # -localhost keeps 5901 private: the only way in is the automation server's
   # /websockify proxy on the single published HTTP port.
@@ -576,6 +636,7 @@ main() {
   trap shutdown TERM INT
 
   start_xvfb
+  prepare_desktop
   start_window_manager
   start_vnc
   configure_keyboard

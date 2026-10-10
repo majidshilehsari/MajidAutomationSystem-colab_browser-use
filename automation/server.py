@@ -62,6 +62,70 @@ def cache_query(static_dir: str) -> str:
     return "?v=%s" % digest
 
 
+#: The viewer must always fill the window: no page scroll, noVNC scaled to the
+#: viewport. A classic script in <head> runs before noVNC's deferred module, so
+#: the resize setting is already right when noVNC reads it.
+VIEW_MARKER = "<!-- automation-view -->"
+VIEW_END_MARKER = "<!-- /automation-view -->"
+VIEW_BLOCK = (
+    VIEW_MARKER + "\n"
+    "<script>\n"
+    "(function () {\n"
+    "  try {\n"
+    "    // \"scale\" keeps the whole desktop visible at any window size;\n"
+    "    // overwriting on every start is deliberate: always full screen.\n"
+    "    localStorage.setItem('noVNC_setting_resize', 'scale');\n"
+    "  } catch (error) { /* private mode: the CSS below still applies */ }\n"
+    "})();\n"
+    "</script>\n"
+    "<style>\n"
+    "  html, body { height: 100% !important; margin: 0 !important;\n"
+    "               overflow: hidden !important; }\n"
+    "  #noVNC_container, #noVNC_screen { position: fixed !important;\n"
+    "    inset: 0 !important; width: 100vw !important; height: 100vh !important; }\n"
+    "</style>\n"
+    + VIEW_END_MARKER
+)
+VIEW_INJECT = re.compile(
+    re.escape(VIEW_MARKER) + r".*?" + re.escape(VIEW_END_MARKER), re.S)
+
+#: `import ... from './core.mjs'` inside the copied sidebar script. The hash on
+#: panel.html only versions automation.js itself; without this, a browser that
+#: cached core.mjs once keeps pairing a new sidebar with old label tables and
+#: shows raw keys like "tabChat" - exactly the bug the operator reported.
+MODULE_IMPORT = re.compile(r"(from\s*['\"])(\./[A-Za-z0-9_.-]+\.mjs)(['\"])")
+
+
+def _file_hash(path: str) -> str:
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()[:10]
+
+
+def version_module_imports(auto_dir: str) -> int:
+    """Rewrite relative module imports of the copied files to carry ?v=hash."""
+    patched = 0
+    for name in sorted(os.listdir(auto_dir)):
+        if not name.endswith((".js", ".mjs")):
+            continue
+        full = os.path.join(auto_dir, name)
+        with open(full, encoding="utf-8") as handle:
+            source = handle.read()
+
+        def add_query(match: "re.Match[str]") -> str:
+            target = os.path.join(auto_dir, os.path.basename(match.group(2)))
+            if not os.path.exists(target):
+                return match.group(0)
+            return "%s%s?v=%s%s" % (match.group(1), match.group(2),
+                                    _file_hash(target), match.group(3))
+
+        updated = MODULE_IMPORT.sub(add_query, source)
+        if updated != source:
+            with open(full, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+            patched += 1
+    return patched
+
+
 def inject_block(static_dir: str) -> str:
     """The sidebar tags, with a content hash so a new build cannot be served
     from the browser's cache. Rewritten on every start, so it never goes stale.
@@ -119,6 +183,8 @@ def prepare_web_root(web_root: str, novnc_dir: str, static_dir: str) -> Dict[str
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(web_root, "automation", name))
                 report["staticCopied"].append(name)
+    report["versionedImports"] = version_module_imports(
+        os.path.join(web_root, "automation"))
 
     guide = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_guide.md")
     if os.path.exists(guide):
@@ -142,6 +208,11 @@ def prepare_web_root(web_root: str, novnc_dir: str, static_dir: str) -> Dict[str
     if os.path.exists(target_vnc):
         with open(target_vnc, encoding="utf-8") as handle:
             html = handle.read()
+        if VIEW_INJECT.search(html):
+            html = VIEW_INJECT.sub(lambda _: VIEW_BLOCK, html, count=1)
+        elif "</head>" in html:
+            html = html.replace("</head>", VIEW_BLOCK + "</head>", 1)
+            report["viewPatched"] = True
         block = inject_block(static_dir)
         if INJECT_BLOCK.search(html):
             # Replace rather than skip: the hash may have changed since the last

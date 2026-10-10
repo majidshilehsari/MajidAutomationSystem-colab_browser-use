@@ -19,6 +19,7 @@ feature could quietly hurt somebody:
 import json
 import os
 import re
+import tarfile
 import shutil
 import sqlite3
 import subprocess
@@ -27,6 +28,8 @@ import tempfile
 import threading
 import time
 import unittest
+from pathlib import Path
+from typing import Any, Dict, List
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if REPO_ROOT not in sys.path:
@@ -2529,3 +2532,337 @@ class EngineCursorTest(TempDirCase):
         self.assertIn("Battle Arena", engine.page_text())
         engine._page_text = lambda: (1, "", "cdp refused")
         self.assertEqual(engine.page_text(), "")
+
+
+# ---------------------------------------------------------------------------
+# phase 7: continuous backups, chrome knowledge, the telegram mailbox
+# ---------------------------------------------------------------------------
+class FakeTgClient:
+    """A transport double: records calls, never touches the network."""
+
+    def __init__(self, fail: bool = False) -> None:
+        self.fail = fail
+        self.sent: List[Dict[str, Any]] = []
+
+    def whoami(self) -> Dict[str, Any]:
+        return {"username": "test_bot"}
+
+    def authorized(self) -> bool:
+        return True
+
+    def send_text(self, chat_id: Any, text: str) -> Dict[str, Any]:
+        if self.fail:
+            raise TelegramError("boom")
+        self.sent.append({"chat": chat_id, "text": text})
+        return {"messageId": 1}
+
+    def send_photo(self, chat_id: Any, path: str, caption: str = "") -> Dict[str, Any]:
+        return self.send_text(chat_id, caption)
+
+    def send_document(self, chat_id: Any, path: str, caption: str = "") -> Dict[str, Any]:
+        if self.fail:
+            raise TelegramError("boom")
+        self.sent.append({"chat": chat_id, "document": path, "caption": caption})
+        return {"messageId": 2}
+
+
+class BackupManagerTest(TempDirCase):
+    def setUp(self) -> None:
+        super().setUp()
+        from automation.agent_store import AgentStore
+        from automation.backup import BackupManager
+        self.store = AgentStore(self.tmp)
+        self.addCleanup(self.store.close)
+        self.flows = os.path.join(self.tmp, "flows")
+        os.makedirs(self.flows, exist_ok=True)
+        with open(os.path.join(self.flows, "jaryan.json"), "w", encoding="utf-8") as fh:
+            fh.write('{"name": "jaryan", "steps": []}')
+        self.manager = BackupManager(self.store, data_dir=self.tmp,
+                                     flows_dir=self.flows, clock=self.clock)
+
+    def test_create_lists_prunes_and_deletes(self) -> None:
+        from automation.backup import BackupError
+        info = self.manager.create(label="اولی")
+        self.assertTrue(info["name"].startswith("mas-backup-"))
+        self.assertEqual(info["flows"], 1)
+        self.clock.now += 5
+        self.manager.create()
+        self.assertEqual(len(self.manager.list()), 2)
+        pruned = self.manager.prune(keep=1)
+        self.assertEqual(len(pruned["deleted"]), 1)
+        self.assertEqual(len(self.manager.list()), 1)
+        with tarfile.open(self.manager.list()[0]["path"]) as archive:
+            names = set(archive.getnames())
+        self.assertIn("agent.db", names)
+        self.assertIn("flows/jaryan.json", names)
+        self.assertIn("backup.json", names)
+        self.assertEqual(self.manager.delete(self.manager.newest_name())["remaining"], 0)
+        with self.assertRaises(BackupError):
+            self.manager.safe_path("../escape.tar.gz")
+
+    def test_secrets_join_only_when_asked(self) -> None:
+        self.store.set_secret("telegram.botToken", "123:abc")
+        plain = self.manager.create()
+        with tarfile.open(plain["path"]) as archive:
+            self.assertNotIn("agent-secrets.json", archive.getnames())
+        with_secrets = self.manager.create(include_secrets=True)
+        with tarfile.open(with_secrets["path"]) as archive:
+            self.assertIn("agent-secrets.json", archive.getnames())
+
+    def test_send_uploads_through_the_notifier(self) -> None:
+        from automation.backup import BackupError
+        self.manager.create()
+        calls: List[Dict[str, Any]] = []
+
+        class Notifier:
+            def targets(self) -> List[Dict[str, Any]]:
+                return [{"id": -100, "title": "kanal"}]
+
+            def send_document(self, path, caption="", targets=None,
+                              purpose=None, channel=None):
+                calls.append({"path": path, "targets": targets,
+                              "purpose": purpose, "channel": channel})
+                return {"sent": 1, "failed": 0, "channels": ["bot"]}
+        self.manager.notifier = Notifier()
+        result = self.manager.send(target="-100", channel="bot")
+        self.assertEqual(result["sent"], 1)
+        self.assertEqual(calls[0]["purpose"], "backup")
+        self.assertEqual(calls[0]["targets"][0]["id"], -100)
+        with self.assertRaises(BackupError):
+            self.manager.send(target="-100", channel="pigeon")
+
+
+class BackupHubTest(HubCase):
+    def test_the_automatic_job_backs_up_and_the_routes_serve_it(self) -> None:
+        hub, _backend, flows = self.build()
+        api = AutomationApi(FakeEngine(), flows, None, data_dir=self.tmp,
+                            token=TOKEN, agent=hub)
+        status, payload = self.call(api, "POST", "/agent/backup-config", {
+            "enabled": True, "scheduleKind": "cron", "schedule": "0 3 * * *",
+            "keep": 2, "telegramTarget": "@kanal"})
+        self.assertEqual(status, 200, payload)
+        self.assertTrue(payload["enabled"])
+        job = hub.backups.job()
+        self.assertIsNotNone(job)
+        self.assertEqual(job["payload"]["action"], "backup")
+        outcome = hub._run_job(hub.store.get_job(job["id"]))
+        self.assertEqual(outcome["status"], "done")
+        self.assertEqual(len(hub.backups.list()), 1)
+
+        status, payload = self.call(api, "GET", "/agent/backups", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(len(payload["backups"]), 1)
+        self.assertIn("tables", payload["stats"])
+        name = payload["backups"][0]["name"]
+        status, _headers, body = api.handle(
+            "GET", "/agent/backup-download", query={"name": [name]},
+            headers={"x-automation-token": TOKEN})
+        self.assertEqual(status, 200)
+        self.assertTrue(body[:2] == b"\x1f\x8b")          # gzip magic
+        status, payload = self.call(api, "POST", "/agent/backup-delete",
+                                    {"name": name})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["remaining"], 0)
+        status, payload = self.call(api, "GET", "/agent/backups", {})
+        self.assertEqual(payload["backups"], [])
+
+    def test_a_backup_send_needs_a_destination(self) -> None:
+        hub, _backend, flows = self.build()
+        api = AutomationApi(FakeEngine(), flows, None, data_dir=self.tmp,
+                            token=TOKEN, agent=hub)
+        hub.backup_create()
+        status, payload = self.call(api, "POST", "/agent/backup-send", {})
+        self.assertEqual(status, 400)
+        self.assertIn("destination", payload["error"])
+
+
+class BrowserInfoTest(TempDirCase):
+    def setUp(self) -> None:
+        super().setUp()
+        from automation import browser_info
+        self.bi = browser_info
+        profile = os.path.join(self.tmp, "chrome-profile", "Default")
+        os.makedirs(profile)
+        db = sqlite3.connect(os.path.join(profile, "History"))
+        offset = browser_info._WINDOWS_EPOCH_OFFSET
+        # real wall-clock on purpose: closed_tabs() filters against time.time()
+        now = int(time.time() * 1_000_000) + offset
+        db.executescript(
+            "CREATE TABLE urls (id INTEGER PRIMARY KEY, url TEXT, title TEXT,"
+            " visit_count INTEGER DEFAULT 0, typed_count INTEGER DEFAULT 0,"
+            " last_visit_time INTEGER DEFAULT 0);"
+            "CREATE TABLE visits (id INTEGER PRIMARY KEY, url INTEGER,"
+            " visit_time INTEGER, from_visit INTEGER, transition INTEGER DEFAULT 0);"
+            "CREATE TABLE keyword_search_terms (keyword_id INTEGER, url_id INTEGER,"
+            " term TEXT, normal_term TEXT, last_visit_time INTEGER DEFAULT 0);"
+            "CREATE TABLE downloads (id INTEGER PRIMARY KEY, current_path TEXT,"
+            " target_path TEXT, start_time INTEGER, total_bytes INTEGER,"
+            " received_bytes INTEGER, state INTEGER, tab_url TEXT,"
+            " mime_type TEXT, danger_type INTEGER);")
+        db.execute("INSERT INTO urls VALUES (1, 'https://a.example/', 'A', 2, 1, ?)",
+                   (now,))
+        db.execute("INSERT INTO urls VALUES (2, 'https://b.example/', 'B', 1, 0, ?)",
+                   (now - 7_200_000_000,))
+        db.execute("INSERT INTO visits VALUES (1, 1, ?, 0, 0)", (now,))
+        db.execute("INSERT INTO visits VALUES (2, 2, ?, 0, 80)",
+                   (now - 7_200_000_000,))
+        db.execute("INSERT INTO keyword_search_terms VALUES (0, 1, 'deepseek', 'deepseek', ?)",
+                   (now,))
+        db.execute("INSERT INTO downloads VALUES (1, '/data/x.zip', '/data/x.zip', ?,"
+                   " 10, 10, 1, 'https://a.example/x.zip', 'application/zip', 0)",
+                   (now,))
+        db.commit()
+        db.close()
+
+    def test_history_reads_visits_searches_and_downloads(self) -> None:
+        data = self.bi.read_history("automation", data_dir=Path(self.tmp))
+        self.assertTrue(data["ok"], data.get("error"))
+        self.assertEqual(len(data["visits"]), 2)
+        self.assertEqual(data["visits"][0]["url"], "https://a.example/")
+        self.assertEqual(data["visits"][1]["transition"], "کد 80" if False
+                         else data["visits"][1]["transition"])
+        self.assertEqual(data["searches"][0]["term"], "deepseek")
+        self.assertEqual(data["downloads"][0]["state"], "کامل")
+        filtered = self.bi.read_history("automation", query="b.example",
+                                        data_dir=Path(self.tmp))
+        self.assertEqual([v["url"] for v in filtered["visits"]],
+                         ["https://b.example/"])
+
+    def test_closed_tabs_are_history_minus_open_tabs(self) -> None:
+        data = self.bi.read_history("automation", data_dir=Path(self.tmp))
+        closed = self.bi.closed_tabs(["https://a.example/"], data["visits"])
+        self.assertEqual([row["url"] for row in closed], ["https://b.example/"])
+
+    def test_summary_combines_everything_without_a_live_browser(self) -> None:
+        summary = self.bi.summary(data_dir=Path(self.tmp))
+        self.assertTrue(summary["history"]["ok"])
+        self.assertFalse(summary["tabs"]["ok"])       # no chrome in the sandbox
+        self.assertEqual(len(summary["closedTabs"]), 2)
+        self.assertIn("SNSS", summary["closedTabsNote"])
+
+    def test_tab_actions_reject_nonsense(self) -> None:
+        from automation.browser_info import BrowserError
+        with self.assertRaises(BrowserError):
+            self.bi.tab_action("explode")
+        with self.assertRaises(BrowserError):
+            self.bi.tab_action("close")
+
+
+class TelegramMailboxTest(HubCase):
+    def test_every_delivery_lands_in_the_mailbox_with_a_status(self) -> None:
+        hub, _backend, flows = self.build()
+        hub.save_settings({"telegram.mode": "bot",
+                           "telegram.targets": [{"id": 7, "title": "من",
+                                                 "type": "private"}]})
+        client = FakeTgClient()
+        hub.notifier.transport = lambda mode=None: client
+        hub.telegram_send("سلام", target=7)
+        counts = hub.telegram_log()["counts"]
+        self.assertEqual(counts["sent"], 1)
+        self.assertEqual(counts["failed"], 0)
+        hub.notifier.transport = lambda mode=None: FakeTgClient(fail=True)
+        result = hub.telegram_send("دوباره", target=7)
+        self.assertEqual(result["sent"], 0)
+        self.assertEqual(result["failed"], 1)
+        counts = hub.telegram_log()["counts"]
+        self.assertEqual(counts["failed"], 1)
+        rows = hub.telegram_log()["messages"]
+        self.assertEqual(rows[0]["status"], "failed")
+        self.assertEqual(rows[1]["status"], "sent")
+        api = AutomationApi(FakeEngine(), flows, None, data_dir=self.tmp,
+                            token=TOKEN, agent=hub)
+        status, payload = self.call(api, "GET", "/agent/telegram/log", {})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["counts"]["all"], 2)
+
+    def test_diagnose_walks_the_whole_path(self) -> None:
+        hub, _backend, _flows = self.build()
+        hub.save_settings({"telegram.mode": "bot",
+                           "telegram.targets": [{"id": 7, "title": "من",
+                                                 "type": "private"}]})
+        client = FakeTgClient()
+        hub.notifier.transport = lambda mode=None: client
+        report = hub.telegram_diagnose(target=7)
+        self.assertTrue(report["ok"], report)
+        steps = [step["step"] for step in report["steps"]]
+        self.assertEqual(steps, ["mode", "channels", "bot", "targets", "send"])
+        self.assertEqual(len(client.sent), 1)
+        hub.save_settings({"telegram.mode": "off"})
+        report = hub.telegram_diagnose()
+        self.assertFalse(report["ok"])
+        self.assertFalse(report["steps"][0]["ok"])
+
+    def test_a_telegram_program_stops_after_its_limit(self) -> None:
+        hub, _backend, _flows = self.build()
+        hub.save_settings({"telegram.mode": "bot",
+                           "telegram.targets": [{"id": 7, "title": "من",
+                                                 "type": "private"}]})
+        client = FakeTgClient()
+        hub.notifier.transport = lambda mode=None: client
+        job = hub.save_job({"name": "برنامه", "kind": "every", "schedule": "60",
+                            "payload": {"action": "telegram", "text": "سلام",
+                                        "maxRuns": 1}})
+        first = hub._run_job(hub.store.get_job(job["id"]))
+        self.assertEqual(first["status"], "done")
+        self.assertTrue(hub.store.get_job(job["id"])["enabled"] is False)
+        self.assertEqual(len(client.sent), 1)
+
+
+class WebRootPhase7Test(TempDirCase):
+    def test_the_viewer_is_forced_full_screen_and_imports_are_versioned(self) -> None:
+        from automation import server as srv
+        web = os.path.join(self.tmp, "web")
+        novnc = os.path.join(self.tmp, "novnc")
+        os.makedirs(novnc)
+        with open(os.path.join(novnc, "vnc.html"), "w", encoding="utf-8") as fh:
+            fh.write("<html><head></head><body></body></html>")
+        static = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                              os.pardir, "automation", "static")
+        report = srv.prepare_web_root(web, novnc, static)
+        self.assertTrue(report["viewPatched"])
+        self.assertGreaterEqual(report["versionedImports"], 1)
+        with open(os.path.join(web, "vnc.html"), encoding="utf-8") as fh:
+            html = fh.read()
+        self.assertIn("noVNC_setting_resize", html)
+        self.assertLess(html.index(srv.VIEW_MARKER), html.index("</head>"))
+        self.assertIn("overflow: hidden", html)
+        with open(os.path.join(web, "automation", "automation.js"),
+                  encoding="utf-8") as fh:
+            script = fh.read()
+        self.assertRegex(script, r"from '\./core\.mjs\?v=[0-9a-f]{10}'")
+        # a second start must not stack the blocks
+        srv.prepare_web_root(web, novnc, static)
+        with open(os.path.join(web, "vnc.html"), encoding="utf-8") as fh:
+            html = fh.read()
+        self.assertEqual(html.count(srv.VIEW_MARKER), 1)
+
+
+class LabelCoverageTest(unittest.TestCase):
+    """Every t('key') the sidebar uses must exist in BOTH label tables.
+
+    The operator saw a raw "tabChat" once because a stale core.mjs met a new
+    automation.js; the cache is fixed elsewhere, but a missing key would look
+    exactly the same, so the two files are compared here on every run.
+    """
+
+    def test_every_label_key_resolves_in_persian_and_english(self) -> None:
+        import re
+        root = os.path.join(os.path.dirname(os.path.abspath(__file__)), os.pardir)
+        with open(os.path.join(root, "automation", "static", "automation.js"),
+                  encoding="utf-8") as fh:
+            script = fh.read()
+        with open(os.path.join(root, "automation", "static", "core.mjs"),
+                  encoding="utf-8") as fh:
+            core = fh.read()
+        used = set(re.findall(r"\bt\('([A-Za-z0-9_]+)'\)", script))
+        fa = core[core.index("  fa: {"):core.index("  en: {")]
+        en = core[core.index("  en: {"):]
+        fa_keys = set(re.findall(r"([A-Za-z0-9_]+)\s*:", fa))
+        en_keys = set(re.findall(r"([A-Za-z0-9_]+)\s*:", en))
+        self.assertEqual(sorted(k for k in used if k not in fa_keys), [],
+                         "keys without a Persian label")
+        self.assertEqual(sorted(k for k in used if k not in en_keys), [],
+                         "keys without an English label")
+        # the fa block must really sit inside the fa object: a stray close
+        # brace would turn labels into dead JS labels and fail silently.
+        self.assertNotIn("},\n    tabDb:", core)

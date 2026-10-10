@@ -15,7 +15,7 @@ import {
 
 /** Tab order, and the tab the panel opens on. */
 const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages', 'shots',
-  'texts', 'agent', 'log'];
+  'texts', 'db', 'agent', 'log'];
 const DEFAULT_TAB = 'chat';
 
 /** The tab the panel opens on: the remembered one, else the first. */
@@ -228,6 +228,7 @@ function buildPanel() {
       el('section', { id: 'mas-tab-pages', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-shots', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-texts', class: 'mas-tabpane', hidden: true }),
+      el('section', { id: 'mas-tab-db', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-agent', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-log', class: 'mas-tabpane', hidden: true }),
     ]),
@@ -320,6 +321,7 @@ function selectTab(name) {
   if (name === 'shots') renderShots();
   if (name === 'texts') renderTexts();
   if (name === 'log') renderLog();
+  if (name === 'db') renderDatabase();
   if (name === 'agent') renderAgent();
   if (name === 'flow') renderFlow();
   if (name === 'record') renderRecord();
@@ -338,11 +340,11 @@ async function refreshAgentTabs() {
   } catch (error) {
     missing = error.status === 404;
   }
-  for (const name of ['chat', 'library']) {
+  for (const name of ['chat', 'library', 'db']) {
     const node = document.querySelector(`.mas-tab[data-tab="${name}"]`);
     if (node) node.hidden = missing;
   }
-  if (missing && ['chat', 'library'].includes(currentTab())) selectTab('flow');
+  if (missing && ['chat', 'library', 'db'].includes(currentTab())) selectTab('flow');
   return !missing;
 }
 
@@ -1782,8 +1784,8 @@ async function buildPrompt() {
  * so a failure in one cannot blank the others.
  * ------------------------------------------------------------------ */
 
-const AGENT_SUBS = ['agentkey', 'telegram', 'cursor', 'jobs', 'captcha',
-  'scripts', 'data', 'keys'];
+const AGENT_SUBS = ['agentkey', 'telegram', 'browser', 'cursor', 'jobs',
+  'captcha', 'scripts', 'data', 'keys'];
 
 const AGENT_RENDERERS = {
   agentkey: renderAgentKey,
@@ -1791,6 +1793,7 @@ const AGENT_RENDERERS = {
   jobs: renderAgentJobs,
   captcha: renderAgentCaptcha,
   telegram: renderAgentTelegram,
+  browser: renderAgentBrowser,
   scripts: renderAgentScripts,
   data: renderAgentData,
   keys: renderAgentKeys,
@@ -2174,23 +2177,46 @@ async function renderAgentCaptcha(host) {
 
 /* -- telegram -------------------------------------------------------- */
 
+/* Time in Tehran, the way the sample menus show it: Persian digits and the
+ * Asia/Tehran zone, whatever zone the server or the browser happens to be in. */
+function tehranWhen(epoch) {
+  if (!epoch) return '';
+  try {
+    return new Intl.DateTimeFormat('fa-IR', {
+      timeZone: 'Asia/Tehran', dateStyle: 'medium', timeStyle: 'short',
+    }).format(new Date(Number(epoch) * 1000));
+  } catch (_) {
+    return formatDateTime ? formatDateTime(epoch) : String(epoch);
+  }
+}
+
+function tgStatusText(status) {
+  return t('tgSt' + String(status || '').charAt(0).toUpperCase()
+    + String(status || '').slice(1)) || String(status);
+}
+
+function tgPurposeText(purpose) {
+  const key = 'tgPurpose' + String(purpose || 'manual').charAt(0).toUpperCase()
+    + String(purpose || 'manual').slice(1);
+  return t(key);
+}
+
 async function renderAgentTelegram(host) {
   replace(host, el('p', { class: 'mas-empty', text: '\u2026' }));
-  let status;
+  let status; let mailbox = { messages: [], counts: {} };
   try {
     status = await api('/agent/telegram/status');
+    mailbox = await api('/agent/telegram/log?limit=60');
   } catch (error) { return agentError(host, error); }
 
   const targets = status.targets || [];
   const channels = status.channels || {};
   const routing = status.routing || {};
   const purposes = status.purposes || ['handoff', 'captcha', 'jobs', 'manual'];
+  const counts = mailbox.counts || {};
   const draft = { mode: status.mode, routing: Object.assign({}, routing) };
   const test = { target: '', channel: '', text: '' };
   const send = { target: '', channel: '', text: '', purpose: 'manual' };
-  // Both transports are offered everywhere: the bot is the easy one, the
-  // personal account is the one that can write to any chat, and "both" sends
-  // through whichever is usable.
   const wantsAccount = draft.mode === 'account' || draft.mode === 'both';
 
   const channelLabel = (name) => t('tgChannel' + name.charAt(0).toUpperCase() + name.slice(1));
@@ -2201,7 +2227,43 @@ async function renderAgentTelegram(host) {
     { value: 'both', label: t('tgModeBoth') },
   ];
 
-  /* -- 1. channels and who gets what -------------------------------- */
+  /* -- the status card: one glance answers "is it working?" ------------- */
+  const botInfo = channels.bot || {};
+  const accountInfo = channels.account || {};
+  const modeBadge = { off: '⛔', bot: '🤖', account: '👤', both: '🤖' }[draft.mode] || '❔';
+  const statusCard = el('div', { class: 'mas-box mas-card mas-tg-status' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '📡 ' + t('tgStatusTitle') }),
+      el('span', { class: 'mas-chip mas-chip-ok', text: modeBadge + ' ' + t('tgModeLine') + ': ' + t('tgMode' + draft.mode.charAt(0).toUpperCase() + draft.mode.slice(1)) }),
+      el('span', { class: 'mas-chip', text: '🤖 ' + (botInfo.configured ? t('tgReady') : t('tgNotReady')) }),
+      el('span', { class: 'mas-chip', text: '👤 ' + (accountInfo.sessionExists ? t('tgReady') : t('tgNotReady')) }),
+    ]),
+    el('div', { class: 'mas-row mas-wrap mas-chips' }, [
+      el('span', { class: 'mas-chip', text: t('tgCountAll') + ' ' + (counts.all || 0) }),
+      el('span', { class: 'mas-chip', text: '⏳ ' + t('tgCountQueued') + ' ' + (counts.queued || 0) }),
+      el('span', { class: 'mas-chip mas-chip-ok', text: '📤 ' + t('tgCountSent') + ' ' + (counts.sent || 0) }),
+      el('span', { class: 'mas-chip mas-chip-bad', text: '❌ ' + t('tgCountFailed') + ' ' + (counts.failed || 0) }),
+      el('span', { class: 'mas-chip', text: '🚫 ' + t('tgCountCancelled') + ' ' + (counts.cancelled || 0) }),
+    ]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('agentTgMode'), agentSelect([
+        { value: 'off', label: t('tgModeOff') },
+        { value: 'bot', label: t('tgModeBot') },
+        { value: 'account', label: t('tgModeAccount') },
+        { value: 'both', label: t('tgModeBoth') },
+      ], draft.mode, (event) => { draft.mode = event.target.value; })),
+      el('span', { class: 'mas-hint', text: t('tgLastUpdate') + ' ' + tehranWhen(Math.floor(Date.now() / 1000)) }),
+    ]),
+    el('details', { class: 'mas-help' }, [
+      el('summary', { text: '📖 ' + t('tgHelpTitle') }),
+      el('p', { text: t('tgHelpMode') }),
+      el('p', { text: t('tgHelpChannels') }),
+      el('p', { text: t('tgHelpRouting') }),
+    ]),
+    status.error ? el('p', { class: 'mas-warn', text: status.error }) : null,
+  ]);
+
+  /* -- settings: channels, routing, credentials, targets ---------------- */
   const channelRows = ['bot', 'account'].map((name) => {
     const info = channels[name] || {};
     const ready = name === 'bot' ? info.configured : info.sessionExists;
@@ -2212,22 +2274,6 @@ async function renderAgentTelegram(host) {
       info.sessionPath ? String(info.sessionPath) : '',
     ];
   });
-
-  /* -- 2. the test message, which needs a target --------------------- */
-  const targetSelect = el('select', {
-    class: 'mas-input',
-    onChange: (event) => { test.target = event.target.value; },
-  }, targets.length
-    ? targets.map((target) => el('option',
-      { value: String(target.id) },
-      `${target.title || target.id} (${target.type || '?'})`))
-    : [el('option', { value: '' }, t('tgTestNoTargets'))]);
-  if (targets.length) test.target = String(targets[0].id);
-
-  /* -- 3. chats found through getUpdates ------------------------------ */
-  // Kept apart from the saved targets on purpose: this list is a picker, and
-  // rendering the saved targets here showed the operator their own list back
-  // and made discovery look broken.
   const found = state.agentTgFound || [];
   const foundRows = found.map((target) => [
     String(target.id), target.title || '', target.type || '',
@@ -2241,7 +2287,6 @@ async function renderAgentTelegram(host) {
       } catch (error) { toast(error.message, 'error'); }
     }, { class: 'mas-btn mas-primary' }),
   ]);
-
   const saveSettings = async (extra) => {
     const body = Object.assign({ 'telegram.mode': draft.mode }, extra || {});
     for (const purpose of purposes) {
@@ -2253,77 +2298,49 @@ async function renderAgentTelegram(host) {
       renderAgentSub('telegram');
     } catch (error) { toast(error.message, 'error'); }
   };
-
-  replace(host,
-    el('div', { class: 'mas-box' }, [
-      el('b', { text: '1. ' + t('tgChannels') }),
-      el('p', { class: 'mas-hint', text: t('tgChannelsHint') }),
-      agentField(t('agentTgMode'), agentSelect([
-        { value: 'off', label: t('tgModeOff') },
-        { value: 'bot', label: t('tgModeBot') },
-        { value: 'account', label: t('tgModeAccount') },
-        { value: 'both', label: t('tgModeBoth') },
-      ], draft.mode, (event) => { draft.mode = event.target.value; })),
-      agentTable([t('tgChannel'), t('tgState'), t('tgNeeds'), t('tgSession')], channelRows),
-      el('div', { class: 'mas-row mas-wrap' }, [
-        button('💾 ' + t('agentSave'), () => saveSettings(),
-          { class: 'mas-btn mas-primary' }),
-        button('🩺 probe', async () => {
-          try {
-            const probe = await api('/agent/telegram/status?probe=1');
-            toast(probe.error || JSON.stringify(probe.identity || {}),
-              probe.error ? 'error' : 'ok');
-          } catch (error) { toast(error.message, 'error'); }
-        }),
+  const settingsCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '⚙️ ' + t('tgSettingsTitle') })]),
+    el('p', { class: 'mas-hint', text: t('tgChannelsHint') }),
+    agentTable([t('tgChannel'), t('tgState'), t('tgNeeds'), t('tgSession')], channelRows),
+    el('b', { class: 'mas-subhead', text: '🔀 ' + t('tgRouting') }),
+    el('p', { class: 'mas-hint', text: t('tgRoutingHint') }),
+    purposes.map((purpose) => el('div', { class: 'mas-row mas-wrap mas-tg-route' }, [
+      el('span', {
+        class: 'mas-tg-purpose',
+        text: t('tgPurpose' + purpose.charAt(0).toUpperCase() + purpose.slice(1)),
+      }),
+      agentSelect(routeOptions, draft.routing[purpose] || '', (event) => {
+        draft.routing[purpose] = event.target.value;
+      }),
+    ])),
+    el('b', { class: 'mas-subhead', text: '🤖 ' + channelLabel('bot') }),
+    el('details', { class: 'mas-help' }, [
+      el('summary', { text: '📖 ' + t('tgHelpBotTitle') }),
+      el('p', { text: t('tgHelpBot') }),
+    ]),
+    agentField(t('agentTgBotToken'), el('input', {
+      class: 'mas-input', type: 'password',
+      placeholder: status.botTokenSet ? t('tgStored') : '',
+      onInput: (event) => { draft.botToken = event.target.value; },
+    })),
+    el('b', { class: 'mas-subhead', text: '👤 ' + channelLabel('account') }),
+    wantsAccount ? el('div', { class: 'mas-wrap' }, [
+      el('details', { class: 'mas-help' }, [
+        el('summary', { text: '📖 ' + t('tgHelpAccountTitle') }),
+        el('p', { text: t('tgHelpAccount') }),
       ]),
-      status.error ? el('p', { class: 'mas-warn', text: status.error }) : null,
-    ]),
-
-    el('div', { class: 'mas-box' }, [
-      el('b', { text: '2. ' + t('tgRouting') }),
-      el('p', { class: 'mas-hint', text: t('tgRoutingHint') }),
-      purposes.map((purpose) => el('div', { class: 'mas-row mas-wrap mas-tg-route' }, [
-        el('span', {
-          class: 'mas-tg-purpose',
-          text: t('tgPurpose' + purpose.charAt(0).toUpperCase() + purpose.slice(1)),
-        }),
-        agentSelect(routeOptions, draft.routing[purpose] || '', (event) => {
-          draft.routing[purpose] = event.target.value;
-        }),
-      ])),
-      button('💾 ' + t('agentSave'), () => saveSettings(),
-        { class: 'mas-btn mas-primary' }),
-    ]),
-
-    el('div', { class: 'mas-box' }, [
-      el('b', { text: '3. ' + channelLabel('bot') }),
-      agentField(t('agentTgBotToken'), el('input', {
-        class: 'mas-input', type: 'password',
-        placeholder: status.botTokenSet ? '\u2022\u2022\u2022\u2022\u2022\u2022 (stored)' : '',
-        onInput: (event) => { draft.botToken = event.target.value; },
-      })),
-      el('p', { class: 'mas-hint', text: t('tgBotHint') }),
-      button('💾 ' + t('agentSave'), () => saveSettings(
-        draft.botToken ? { 'telegram.botToken': draft.botToken } : {}),
-      { class: 'mas-btn mas-primary' }),
-    ]),
-
-    wantsAccount ? el('div', { class: 'mas-box' }, [
-      el('b', { text: '4. ' + channelLabel('account') }),
       el('p', { class: 'mas-warn', text: t('agentTgAccountWarn') }),
       el('div', { class: 'mas-row mas-wrap' }, [
         agentField('api_id', el('input', {
           class: 'mas-input',
-          placeholder: status.apiCredentialsSet ? '\u2022\u2022\u2022\u2022\u2022\u2022 (stored)' : '',
+          placeholder: status.apiCredentialsSet ? t('tgStored') : '',
           onInput: (event) => { draft.apiId = event.target.value; },
         })),
         agentField('api_hash', el('input', {
           class: 'mas-input', type: 'password',
-          placeholder: status.apiCredentialsSet ? '\u2022\u2022\u2022\u2022\u2022\u2022 (stored)' : '',
+          placeholder: status.apiCredentialsSet ? t('tgStored') : '',
           onInput: (event) => { draft.apiHash = event.target.value; },
         })),
-      ]),
-      el('div', { class: 'mas-row mas-wrap' }, [
         agentField(t('agentTgPhone'), el('input', {
           class: 'mas-input', value: status.phone || '', placeholder: '+98...',
           onInput: (event) => { draft.phone = event.target.value; },
@@ -2334,10 +2351,6 @@ async function renderAgentTelegram(host) {
         })),
       ]),
       el('div', { class: 'mas-row mas-wrap' }, [
-        button('💾 ' + t('agentSave'), () => saveSettings(Object.assign({},
-          draft.apiId ? { 'telegram.apiId': draft.apiId } : {},
-          draft.apiHash ? { 'telegram.apiHash': draft.apiHash } : {})),
-        { class: 'mas-btn mas-primary' }),
         button(t('agentTgLogin'), async () => {
           try {
             await api('/agent/telegram/login', { method: 'POST', body: { phone: draft.phone } });
@@ -2347,20 +2360,19 @@ async function renderAgentTelegram(host) {
         button(t('agentTgLoginFinish'), async () => {
           try {
             await api('/agent/telegram/login-finish', { method: 'POST', body: { code: draft.code } });
-            toast('ok', 'ok');
+            toast(t('agentSaved'), 'ok');
             renderAgentSub('telegram');
           } catch (error) { toast(error.message, 'error'); }
         }, { class: 'mas-btn mas-primary' }),
       ]),
-      el('p', { class: 'mas-hint', text: t('tgAccountHint') }),
-    ]) : el('div', { class: 'mas-box' }, [
-      el('b', { text: '4. ' + channelLabel('account') }),
-      el('p', { class: 'mas-hint', text: t('tgAccountOff') }),
+    ]) : el('p', { class: 'mas-hint', text: t('tgAccountOff') }),
+    el('b', { class: 'mas-subhead', text: `🎯 ${t('agentTgTargets')} (${targets.length})` }),
+    el('details', { class: 'mas-help' }, [
+      el('summary', { text: '📖 ' + t('tgHelpTargetsTitle') }),
+      el('p', { text: t('tgHelpTargets') }),
     ]),
-
-    el('div', { class: 'mas-box' }, [
-      el('b', { text: `5. ${t('agentTgTargets')} (${targets.length})` }),
-      targets.length ? agentTable(['id', 'title', 'type', ''], targets.map((target, index) => [
+    targets.length ? agentTable([t('tgColId'), t('tgColTitle'), t('tgColType'), ''],
+      targets.map((target, index) => [
         String(target.id), target.title || '', target.type || '',
         button('🗑', async () => {
           const next = targets.filter((_, position) => position !== index);
@@ -2370,32 +2382,49 @@ async function renderAgentTelegram(host) {
           } catch (error) { toast(error.message, 'error'); }
         }),
       ])) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
-      el('div', { class: 'mas-row mas-wrap' }, [
-        button('🔎 ' + t('agentTgDiscover'), async () => {
-          try {
-            state.agentTgFound = (await api('/agent/telegram/targets')).targets || [];
-            renderAgentSub('telegram');
-          } catch (error) { toast(error.message, 'error'); }
-        }),
-      ]),
-      found.length ? agentTable(['id', 'title', 'type', t('agentAdd')], foundRows) : null,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('🔎 ' + t('agentTgDiscover'), async () => {
+        try {
+          state.agentTgFound = (await api('/agent/telegram/targets')).targets || [];
+          renderAgentSub('telegram');
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+      button('💾 ' + t('agentSave'), () => saveSettings(Object.assign({},
+        draft.botToken ? { 'telegram.botToken': draft.botToken } : {},
+        draft.apiId ? { 'telegram.apiId': draft.apiId } : {},
+        draft.apiHash ? { 'telegram.apiHash': draft.apiHash } : {})),
+      { class: 'mas-btn mas-primary' }),
     ]),
+    found.length ? agentTable([t('tgColId'), t('tgColTitle'), t('tgColType'), t('agentAdd')], foundRows) : null,
+  ]);
 
-    el('div', { class: 'mas-box' }, [
-      el('b', { text: '6. ' + t('tgTest') }),
-      el('p', { class: 'mas-hint', text: t('tgTestHint') }),
-      el('div', { class: 'mas-row mas-wrap' }, [
-        agentField(t('tgTestTarget'), targetSelect),
-        agentField(t('tgTestChannel'), agentSelect([
-          { value: '', label: t('tgChannelAuto') },
-          { value: 'bot', label: channelLabel('bot') },
-          { value: 'account', label: channelLabel('account') },
-        ], '', (event) => { test.channel = event.target.value; })),
-      ]),
-      agentField(t('tgTestText'), el('input', {
-        class: 'mas-input', value: '', placeholder: t('tgTestTextHint'),
-        onInput: (event) => { test.text = event.target.value; },
-      })),
+  /* -- the test the user asked for: one click, a real message ----------- */
+  const targetSelect = el('select', {
+    class: 'mas-input',
+    onChange: (event) => { test.target = event.target.value; },
+  }, targets.length
+    ? targets.map((target) => el('option',
+      { value: String(target.id) },
+      `${target.title || target.id} (${target.type || '?'})`))
+    : [el('option', { value: '' }, t('tgTestNoTargets'))]);
+  if (targets.length) test.target = String(targets[0].id);
+  const diagnoseHost = el('div', { id: 'mas-tg-diagnose', class: 'mas-diagnose' });
+  const testCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '🩺 ' + t('tgTest') })]),
+    el('p', { class: 'mas-hint', text: t('tgHelpTest') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('tgTestTarget'), targetSelect),
+      agentField(t('tgTestChannel'), agentSelect([
+        { value: '', label: t('tgChannelAuto') },
+        { value: 'bot', label: channelLabel('bot') },
+        { value: 'account', label: channelLabel('account') },
+      ], '', (event) => { test.channel = event.target.value; })),
+    ]),
+    agentField(t('tgTestText'), el('input', {
+      class: 'mas-input', value: '', placeholder: t('tgTestTextHint'),
+      onInput: (event) => { test.text = event.target.value; },
+    })),
+    el('div', { class: 'mas-row mas-wrap' }, [
       button('\u2709 ' + t('tgTestSend'), async () => {
         if (!test.target) { toast(t('tgTestNeedTarget'), 'warn'); return; }
         try {
@@ -2407,57 +2436,199 @@ async function renderAgentTelegram(host) {
               text: test.text || '',
             },
           });
-          const used = (result.channels || []).join(', ') || '-';
-          toast(`${t('tgTestSent')} \u00b7 ${used} \u00b7 sent ${result.sent || 0}`
-            + ` \u00b7 failed ${result.failed || 0}`, result.failed ? 'warn' : 'ok');
-          for (const item of (result.errors || []).slice(0, 2)) {
-            toast(String(item).slice(0, 180), 'error');
-          }
+          toast(`${t('tgTestSent')} \u00b7 ${t('tgCountSent')} ${result.sent || 0}`
+            + ` \u00b7 ${t('tgCountFailed')} ${result.failed || 0}`,
+          result.failed ? 'warn' : 'ok');
+          renderAgentSub('telegram');
         } catch (error) { toast(error.message, 'error'); }
       }, { class: 'mas-btn mas-primary' }),
-      el('p', { class: 'mas-hint', text: t('agentTgHint') }),
-    ]),
-
-    el('div', { class: 'mas-box' }, [
-      el('b', { text: '7. ' + t('tgSendTitle') }),
-      el('p', { class: 'mas-hint', text: t('tgSendHint') }),
-      agentField(t('tgTestText'), el('input', {
-        class: 'mas-input', value: '', placeholder: t('tgSendTextHint'),
-        onInput: (event) => { send.text = event.target.value; },
-      })),
-      el('div', { class: 'mas-row mas-wrap' }, [
-        agentField(t('tgSendTarget'), agentSelect([
-          { value: '', label: t('tgSendEveryone') },
-        ].concat(targets.map((target) => ({
-          value: String(target.id),
-          label: `${target.title || target.id} (${target.type || '?'})`,
-        }))), '', (event) => { send.target = event.target.value; })),
-        agentField(t('tgTestChannel'), agentSelect([
-          { value: '', label: t('tgChannelAuto') },
-          { value: 'bot', label: channelLabel('bot') },
-          { value: 'account', label: channelLabel('account') },
-        ], '', (event) => { send.channel = event.target.value; })),
-        agentField(t('tgSendPurpose'), agentSelect(purposes.map((purpose) => ({
-          value: purpose,
-          label: t('tgPurpose' + purpose.charAt(0).toUpperCase() + purpose.slice(1)),
-        })), 'manual', (event) => { send.purpose = event.target.value; })),
-      ]),
-      button('📤 ' + t('tgSendButton'), async () => {
-        if (!String(send.text || '').trim()) { toast(t('tgSendNeedText'), 'warn'); return; }
-        const body = { text: send.text, purpose: send.purpose || 'manual' };
-        if (send.target) body.target = Number(send.target) || send.target;
-        if (send.channel) body.channel = send.channel;
+      button('🩺 ' + t('tgDiagnoseBtn'), async () => {
+        replace(diagnoseHost, el('p', { class: 'mas-hint', text: t('tgDiagnoseRun') }));
         try {
-          const result = await api('/agent/telegram/send', { method: 'POST', body });
-          const used = (result.channels || []).join(', ') || '-';
-          toast(`${t('tgTestSent')} \u00b7 ${used} \u00b7 sent ${result.sent || 0}`
-            + ` \u00b7 failed ${result.failed || 0}`, result.failed ? 'warn' : 'ok');
-          for (const item of (result.errors || []).slice(0, 2)) {
-            toast(String(item).slice(0, 180), 'error');
-          }
+          const report = await api('/agent/telegram/diagnose', {
+            method: 'POST',
+            body: { target: test.target ? (Number(test.target) || test.target) : '', channel: test.channel || '' },
+          });
+          replace(diagnoseHost,
+            el('b', { text: report.ok ? '✅ ' + t('tgDiagnoseOk') : '⚠️ ' + t('tgDiagnoseBad') }),
+            el('ul', { class: 'mas-diagnose-list' }, (report.steps || []).map((step) => el('li', {
+              class: 'mas-diagnose-step' + (step.ok ? ' is-ok' : ' is-bad'),
+            }, [
+              el('span', { class: 'mas-diagnose-mark', text: step.ok ? '✅' : (step.skipped ? '⏭' : '❌') }),
+              el('b', { text: step.fa || step.step }),
+              el('span', { class: 'mas-hint', text: step.detail || '' }),
+            ]))));
+        } catch (error) {
+          replace(diagnoseHost, el('p', { class: 'mas-warn', text: error.message }));
+        }
+      }),
+    ]),
+    diagnoseHost,
+  ]);
+
+  /* -- the mailbox: every attempt, Tehran time, like the sample --------- */
+  const messages = mailbox.messages || [];
+  const mailCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '📋 ' + t('tgListTitle') }),
+      button('🔄', async () => { renderAgentSub('telegram'); }, { class: 'mas-btn' }),
+    ]),
+    el('p', { class: 'mas-hint', text: t('tgTehranHint') }),
+    messages.length ? agentTable(
+      [t('tgColStatus'), t('tgColWhen'), t('tgColTarget'), t('tgColText'), t('tgColSource')],
+      messages.map((row) => [
+        tgStatusText(row.status),
+        tehranWhen(row.created_at),
+        String(row.target || ''),
+        String(row.body || '').slice(0, 80),
+        `${tgPurposeText(row.purpose)}${row.channel ? ' \u00b7 ' + channelLabel(row.channel) : ''}`,
+      ])) : el('p', { class: 'mas-hint', text: t('tgListEmpty') }),
+  ]);
+
+  /* -- programs: scheduled messages ------------------------------------- */
+  let programs = [];
+  try {
+    programs = ((await api('/agent/jobs')).jobs || [])
+      .filter((job) => (job.payload || {}).action === 'telegram');
+  } catch (_) { programs = []; }
+  const program = { title: '', text: '', repeat: 'daily', time: '09:00', until: '', max: '' };
+  const programSummary = el('span', { class: 'mas-hint', text: t('tgProgHint') });
+  const refreshSummary = () => {
+    if (!String(program.text || '').trim()) {
+      replace(programSummary, el('span', { class: 'mas-hint', text: t('tgProgHint') }));
+      return;
+    }
+    replace(programSummary, el('span', {
+      class: 'mas-hint',
+      text: `${t('tgProgRepeat')}: ${t('tgProg' + program.repeat.charAt(0).toUpperCase() + program.repeat.slice(1))} \u00b7 ${program.time}`
+        + (program.until ? ` \u00b7 ${t('tgProgUntil')}: ${program.until}` : '')
+        + (program.max ? ` \u00b7 ${t('tgProgMax')}: ${program.max}` : ''),
+    }));
+  };
+  const programCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '🔁 ' + t('tgProgramsTitle') }),
+      el('span', { class: 'mas-chip', text: `${programs.length} ${t('tgProgramsCount')} \u00b7 ${programs.filter((job) => job.enabled).length} ${t('tgProgActive')}` }),
+    ]),
+    programs.length ? el('ul', { class: 'mas-prog-list' }, programs.map((job) => el('li', { class: 'mas-row mas-wrap' }, [
+      el('b', { text: job.name || job.id }),
+      el('span', { class: 'mas-hint', text: String((job.payload || {}).text || '').slice(0, 60) }),
+      el('span', { class: 'mas-chip', text: job.enabled ? '🟢 ' + t('tgProgActive') : '⚪ ' + t('tgProgPaused') }),
+      button('▶', async () => {
+        try {
+          await api('/agent/job-run', { method: 'POST', body: { id: job.id } });
+          toast(t('agentSaved'), 'ok');
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+      button(job.enabled ? '⏸' : '▶️', async () => {
+        try {
+          await api(`/agent/jobs/${job.id}`, { method: 'PUT', body: { enabled: !job.enabled } });
+          renderAgentSub('telegram');
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+      button('🗑', async () => {
+        try {
+          await api(`/agent/jobs/${job.id}`, { method: 'DELETE' });
+          renderAgentSub('telegram');
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+    ]))) : el('p', { class: 'mas-hint', text: t('tgProgEmpty') }),
+    agentField('🏷 ' + t('tgProgTitle'), el('input', {
+      class: 'mas-input', placeholder: t('tgProgTitleHint'),
+      onInput: (event) => { program.title = event.target.value; },
+    })),
+    agentField('✍️ ' + t('tgTestText'), el('textarea', {
+      class: 'mas-input mas-textarea', rows: 3, placeholder: t('tgProgTextHint'),
+      onInput: (event) => { program.text = event.target.value; refreshSummary(); },
+    })),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField('🔁 ' + t('tgProgRepeat'), agentSelect([
+        { value: 'daily', label: t('tgProgDaily') },
+        { value: 'hourly', label: t('tgProgHourly') },
+        { value: 'weekly', label: t('tgProgWeekly') },
+      ], program.repeat, (event) => { program.repeat = event.target.value; refreshSummary(); })),
+      agentField('🕒 ' + t('tgProgTime'), el('input', {
+        class: 'mas-input', type: 'time', value: program.time,
+        onInput: (event) => { program.time = event.target.value; refreshSummary(); },
+      })),
+      agentField('⏹ ' + t('tgProgUntil'), el('input', {
+        class: 'mas-input', type: 'date', value: program.until,
+        onInput: (event) => { program.until = event.target.value; refreshSummary(); },
+      })),
+      agentField('🔢 ' + t('tgProgMax'), el('input', {
+        class: 'mas-input', type: 'number', min: '0', placeholder: t('tgProgMaxHint'),
+        onInput: (event) => { program.max = event.target.value; refreshSummary(); },
+      })),
+    ]),
+    programSummary,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('🔁 ' + t('tgProgMake'), async () => {
+        if (!String(program.text || '').trim()) { toast(t('tgSendNeedText'), 'warn'); return; }
+        const [hour, minute] = String(program.time || '09:00').split(':');
+        const cron = {
+          daily: `${Number(minute) || 0} ${Number(hour) || 0} * * *`,
+          hourly: `${Number(minute) || 0} * * * *`,
+          weekly: `${Number(minute) || 0} ${Number(hour) || 0} * * 6`,
+        }[program.repeat] || '0 9 * * *';
+        const payload = { action: 'telegram', text: program.text };
+        if (program.until) payload.until = Math.floor(new Date(program.until + 'T23:59:59').getTime() / 1000);
+        if (program.max) payload.maxRuns = Number(program.max) || 0;
+        try {
+          await api('/agent/jobs', {
+            method: 'POST',
+            body: {
+              name: program.title || t('tgProgDefaultName'),
+              kind: 'cron', schedule: cron, payload,
+            },
+          });
+          toast(t('agentSaved'), 'ok');
+          renderAgentSub('telegram');
         } catch (error) { toast(error.message, 'error'); }
       }, { class: 'mas-btn mas-primary' }),
-    ]));
+    ]),
+  ]);
+
+  /* -- the free-form send box stays last (tests read it as the last box) - */
+  const sendCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '📤 ' + t('tgSendTitle') })]),
+    el('p', { class: 'mas-hint', text: t('tgSendHint') }),
+    agentField(t('tgTestText'), el('input', {
+      class: 'mas-input', value: '', placeholder: t('tgSendTextHint'),
+      onInput: (event) => { send.text = event.target.value; },
+    })),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('tgSendTarget'), agentSelect([
+        { value: '', label: t('tgSendEveryone') },
+      ].concat(targets.map((target) => ({
+        value: String(target.id),
+        label: `${target.title || target.id} (${target.type || '?'})`,
+      }))), '', (event) => { send.target = event.target.value; })),
+      agentField(t('tgTestChannel'), agentSelect([
+        { value: '', label: t('tgChannelAuto') },
+        { value: 'bot', label: channelLabel('bot') },
+        { value: 'account', label: channelLabel('account') },
+      ], '', (event) => { send.channel = event.target.value; })),
+      agentField(t('tgSendPurpose'), agentSelect(purposes.map((purpose) => ({
+        value: purpose,
+        label: t('tgPurpose' + purpose.charAt(0).toUpperCase() + purpose.slice(1)),
+      })), 'manual', (event) => { send.purpose = event.target.value; })),
+    ]),
+    button('📤 ' + t('tgSendButton'), async () => {
+      if (!String(send.text || '').trim()) { toast(t('tgSendNeedText'), 'warn'); return; }
+      const body = { text: send.text, purpose: send.purpose || 'manual' };
+      if (send.target) body.target = Number(send.target) || send.target;
+      if (send.channel) body.channel = send.channel;
+      try {
+        const result = await api('/agent/telegram/send', { method: 'POST', body });
+        toast(`${t('tgTestSent')} \u00b7 ${t('tgCountSent')} ${result.sent || 0}`
+          + ` \u00b7 ${t('tgCountFailed')} ${result.failed || 0}`,
+        result.failed ? 'warn' : 'ok');
+        renderAgentSub('telegram');
+      } catch (error) { toast(error.message, 'error'); }
+    }, { class: 'mas-btn mas-primary' }),
+  ]);
+
+  replace(host, statusCard, settingsCard, testCard, mailCard, programCard, sendCard);
 }
 
 /* -- data ------------------------------------------------------------ */
@@ -3312,4 +3483,329 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', boot);
 } else {
   boot();
+}
+
+/* ------------------------------------------------------------------ *
+ * Database tab: continuous backups
+ * ------------------------------------------------------------------ */
+
+async function renderDatabase() {
+  const pane = document.getElementById('mas-tab-db');
+  if (!pane) return;
+  replace(pane, el('p', { class: 'mas-empty', text: '…' }));
+  let data;
+  try {
+    data = await api('/agent/backups');
+  } catch (error) {
+    replace(pane, el('p', { class: 'mas-warn', text: error.message || String(error) }));
+    return;
+  }
+  const stats = data.stats || {};
+  const config = stats.config || {};
+  const backups = data.backups || [];
+  const draft = {
+    enabled: !!config.enabled, kind: config.scheduleKind || 'cron',
+    schedule: config.schedule || '', keep: config.keep || 7,
+    target: config.telegramTarget || '', channel: config.telegramChannel || '',
+    secrets: !!config.includeSecrets, notify: !!config.notifyAfterBackup,
+  };
+  const sendDraft = { name: '', target: draft.target, channel: draft.channel };
+
+  const tables = stats.tables || {};
+  const statsCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '🗄 ' + t('dbStatsTitle') }),
+      el('span', { class: 'mas-chip', text: stats.dbSizeText || '-' }),
+      el('span', { class: 'mas-chip', text: `${stats.flows || 0} ${t('dbFlows')}` }),
+      el('span', { class: 'mas-chip', text: `${stats.backups || 0} ${t('dbBackupCount')} · ${stats.backupSizeText || '-'}` }),
+    ]),
+    el('p', { class: 'mas-hint', text: t('dbHint') }),
+    el('div', { class: 'mas-row mas-wrap mas-chips' }, Object.keys(tables).map((name) => el('span', {
+      class: 'mas-chip', text: `${name}: ${tables[name]}`,
+    }))),
+    el('p', { class: 'mas-hint', text: stats.lastBackup
+      ? `${t('dbLastBackup')}: ${stats.lastBackup.name} · ${tehranWhen(stats.lastBackup.createdAt)}`
+      : t('dbNone') }),
+  ]);
+
+  const downloadBackup = async (name) => {
+    try {
+      const url = await imageBlobUrl(`/agent/backup-download?name=${encodeURIComponent(name)}`);
+      if (!url) { toast(t('dbMissing'), 'error'); return; }
+      const link = document.createElement('a');
+      link.href = url; link.download = name;
+      document.body.appendChild(link); link.click(); link.remove();
+      toast(t('dbDownloadOk'), 'ok');
+    } catch (error) { toast(error.message, 'error'); }
+  };
+
+  const listCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '📦 ' + t('dbListTitle') }),
+      button('🔄', () => renderDatabase(), { class: 'mas-btn' }),
+    ]),
+    backups.length ? agentTable(
+      [t('dbColName'), t('dbColSize'), t('dbColWhen'), t('dbColActions')],
+      backups.map((row) => [
+        row.name, row.sizeText, tehranWhen(row.created_at || row.createdAt),
+        el('span', { class: 'mas-row' }, [
+          button('📥 ' + t('dbDownload'), () => downloadBackup(row.name)),
+          button('📤 ' + t('dbSendTg'), async () => {
+            sendDraft.name = row.name;
+            try {
+              const result = await api('/agent/backup-send', {
+                method: 'POST',
+                body: { name: row.name, target: sendDraft.target, channel: sendDraft.channel },
+              });
+              toast(`${t('tgTestSent')} · ${t('tgCountSent')} ${result.sent || 0}`,
+                result.sent ? 'ok' : 'error');
+            } catch (error) { toast(error.message, 'error'); }
+          }),
+          button('🗑 ' + t('dbDelete'), async () => {
+            if (!window.confirm(t('dbDeleteConfirm'))) return;
+            try {
+              await api('/agent/backup-delete', { method: 'POST', body: { name: row.name } });
+              renderDatabase();
+            } catch (error) { toast(error.message, 'error'); }
+          }, { class: 'mas-btn mas-danger' }),
+        ]),
+      ])) : el('p', { class: 'mas-hint', text: t('dbListEmpty') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('📦 ' + t('dbTake'), async () => {
+        try {
+          const info = await api('/agent/backups', { method: 'POST', body: {} });
+          toast(`${t('dbTakenOk')} · ${info.name} · ${info.sizeText}`, 'ok');
+          renderDatabase();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      button('📦 ' + t('dbTakeSecrets'), async () => {
+        if (!window.confirm(t('dbSecretsWarn'))) return;
+        try {
+          const info = await api('/agent/backups', {
+            method: 'POST', body: { includeSecrets: true },
+          });
+          toast(`${t('dbTakenOk')} · ${info.name}`, 'ok');
+          renderDatabase();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-danger' }),
+    ]),
+  ]);
+
+  const autoCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '⏰ ' + t('dbAutoTitle') })]),
+    el('p', { class: 'mas-hint', text: t('dbAutoHint') }),
+    el('label', { class: 'mas-check' }, [
+      el('input', {
+        type: 'checkbox', checked: draft.enabled,
+        onChange: (event) => { draft.enabled = event.target.checked; },
+      }),
+      el('span', { text: t('dbJobOn') }),
+    ]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('dbScheduleKind'), agentSelect([
+        { value: 'cron', label: t('dbKindCron') },
+        { value: 'every', label: t('dbKindEvery') },
+        { value: 'at', label: t('dbKindAt') },
+      ], draft.kind, (event) => { draft.kind = event.target.value; })),
+      agentField(t('dbSchedule'), el('input', {
+        class: 'mas-input', value: draft.schedule, placeholder: '0 3 * * *',
+        onInput: (event) => { draft.schedule = event.target.value; },
+      })),
+      agentField(t('dbKeep'), el('input', {
+        class: 'mas-input', type: 'number', min: '1', max: '200', value: String(draft.keep),
+        onInput: (event) => { draft.keep = Number(event.target.value) || 7; },
+      })),
+    ]),
+    el('p', { class: 'mas-hint', text: draft.kind === 'cron' ? t('dbCronHint')
+      : (draft.kind === 'every' ? t('dbEveryHint') : t('dbAtHint')) }),
+    agentField('🎯 ' + t('dbTarget'), el('input', {
+      class: 'mas-input', value: draft.target, placeholder: '@mychannel یا -100…',
+      onInput: (event) => { draft.target = event.target.value; },
+    })),
+    el('p', { class: 'mas-hint', text: t('dbTargetHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('tgTestChannel'), agentSelect([
+        { value: '', label: t('tgChannelAuto') },
+        { value: 'bot', label: t('tgChannelBot') },
+        { value: 'account', label: t('tgChannelAccount') },
+      ], draft.channel, (event) => { draft.channel = event.target.value; })),
+      el('label', { class: 'mas-check' }, [
+        el('input', {
+          type: 'checkbox', checked: draft.notify,
+          onChange: (event) => { draft.notify = event.target.checked; },
+        }),
+        el('span', { text: t('dbNotify') }),
+      ]),
+    ]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('💾 ' + t('dbSave'), async () => {
+        try {
+          await api('/agent/backup-config', {
+            method: 'POST',
+            body: {
+              enabled: draft.enabled, scheduleKind: draft.kind, schedule: draft.schedule,
+              keep: draft.keep, telegramTarget: draft.target,
+              telegramChannel: draft.channel, notify: draft.notify,
+            },
+          });
+          toast(t('agentSaved'), 'ok');
+          renderDatabase();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+    ]),
+    config.lastJobStatus ? el('p', {
+      class: config.lastJobStatus === 'done' ? 'mas-hint' : 'mas-warn',
+      text: `${t('dbLastJob')}: ${config.lastJobStatus}${config.lastJobError ? ' · ' + config.lastJobError : ''}`,
+    }) : null,
+  ]);
+
+  const sendCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '📤 ' + t('dbSendTitle') })]),
+    el('p', { class: 'mas-hint', text: t('dbSendHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('dbColName'), agentSelect([
+        { value: '', label: t('dbNewest') },
+      ].concat(backups.map((row) => ({ value: row.name, label: row.name }))),
+      '', (event) => { sendDraft.name = event.target.value; })),
+      agentField('🎯 ' + t('dbTarget'), el('input', {
+        class: 'mas-input', value: sendDraft.target,
+        onInput: (event) => { sendDraft.target = event.target.value; },
+      })),
+    ]),
+    button('📤 ' + t('dbSendNow'), async () => {
+      try {
+        const result = await api('/agent/backup-send', {
+          method: 'POST',
+          body: { name: sendDraft.name, target: sendDraft.target, channel: sendDraft.channel },
+        });
+        toast(`${t('tgTestSent')} · ${t('tgCountSent')} ${result.sent || 0}`,
+          result.sent ? 'ok' : 'error');
+      } catch (error) { toast(error.message, 'error'); }
+    }, { class: 'mas-btn mas-primary' }),
+  ]);
+
+  replace(pane, statsCard, listCard, autoCard, sendCard);
+}
+
+/* ------------------------------------------------------------------ *
+ * Agent sub-pane: everything Chrome
+ * ------------------------------------------------------------------ */
+
+async function renderAgentBrowser(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let data;
+  try {
+    data = await api('/agent/browser');
+  } catch (error) { return agentError(host, error); }
+  const tabs = (data.tabs && data.tabs.tabs) || [];
+  const version = data.version || {};
+  const history = data.history || {};
+  const visits = history.visits || [];
+  const closed = data.closedTabs || [];
+  const filter = { q: '', days: 0 };
+
+  const headCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '🌐 ' + t('brTitle') }),
+      el('span', { class: 'mas-chip', text: version.ok
+        ? String(version.Browser || version['Browser'] || '') : t('brOffline') }),
+      el('span', { class: 'mas-chip', text: `${tabs.length} ${t('brTabsOpen')}` }),
+      button('🔄', () => renderAgentBrowser(host), { class: 'mas-btn' }),
+    ]),
+    el('p', { class: 'mas-hint', text: t('brHint') }),
+    el('p', { class: 'mas-hint', text: `${t('brProfile')}: ${(data.profile || {}).fa || ''} · ${(data.profile || {}).dir || ''}` }),
+  ]);
+
+  const actOnTab = async (action, id, url) => {
+    try {
+      await api('/agent/browser/tab', { method: 'POST', body: { action, id, url } });
+      renderAgentBrowser(host);
+    } catch (error) { toast(error.message, 'error'); }
+  };
+  const newUrl = { value: 'https://chat.deepseek.com/' };
+  const tabsCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '🗂 ' + t('brTabsTitle') })]),
+    tabs.length ? agentTable([t('brColTab'), t('brColUrl'), t('dbColActions')],
+      tabs.map((row) => [
+        row.title || row.id, row.url,
+        el('span', { class: 'mas-row' }, [
+          button('👁 ' + t('brActivate'), () => actOnTab('activate', row.id, '')),
+          button('✖ ' + t('brClose'), () => actOnTab('close', row.id, ''),
+            { class: 'mas-btn mas-danger' }),
+        ]),
+      ])) : el('p', { class: 'mas-hint', text: t('brTabsNone') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('brNewUrl'), el('input', {
+        class: 'mas-input', value: newUrl.value,
+        onInput: (event) => { newUrl.value = event.target.value; },
+      })),
+      button('🌐 ' + t('brOpen'), () => actOnTab('new', '', newUrl.value),
+        { class: 'mas-btn mas-primary' }),
+    ]),
+  ]);
+
+  const reloadHistory = async () => {
+    let fresh = history;
+    try {
+      fresh = await api(`/agent/browser/history?q=${encodeURIComponent(filter.q)}&days=${filter.days}`);
+    } catch (error) { toast(error.message, 'error'); return; }
+    const rows = (fresh.visits || []).map((row) => [
+      row.timeText || tehranWhen(row.at), row.title || row.url,
+      String(row.visitCount || 0), row.transition || '',
+    ]);
+    replace(histBody, rows.length
+      ? agentTable([t('brColWhen'), t('brColPage'), t('brColVisits'), t('brColHow')], rows)
+      : el('p', { class: 'mas-hint', text: t('brHistNone') }));
+  };
+  const histBody = el('div', { class: 'mas-history-body' });
+  const histCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '🕘 ' + t('brHistory') }),
+      el('span', { class: 'mas-chip', text: `${(history.totals || {}).visits || 0} ${t('brVisitsCount')}` }),
+    ]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('brFilter'), el('input', {
+        class: 'mas-input', value: '', placeholder: t('brFilterHint'),
+        onInput: (event) => { filter.q = event.target.value; },
+        onChange: () => reloadHistory(),
+      })),
+      agentField(t('brDays'), agentSelect([
+        { value: '0', label: t('brDaysAll') },
+        { value: '1', label: t('brDays1') },
+        { value: '7', label: t('brDays7') },
+        { value: '30', label: t('brDays30') },
+      ], '0', (event) => { filter.days = Number(event.target.value) || 0; reloadHistory(); })),
+      button('🔄 ' + t('brRefreshTabs'), async () => {
+        try {
+          await api('/agent/browser/tabs');
+          renderAgentBrowser(host);
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+    ]),
+    histBody,
+    (history.searches || []).length ? el('div', { class: 'mas-row mas-wrap mas-chips' },
+      (history.searches || []).slice(0, 12).map((row) => el('span', {
+        class: 'mas-chip', text: `🔎 ${row.term}`,
+      }))) : null,
+    (history.downloads || []).length ? el('div', {}, [
+      el('b', { class: 'mas-subhead', text: '📥 ' + t('brDownloads') }),
+      agentTable([t('brColWhen'), t('brColFile'), t('dbColSize'), t('tgColStatus')],
+        (history.downloads || []).slice(0, 20).map((row) => [
+          row.timeText || tehranWhen(row.at), row.path || row.url,
+          String(row.bytes || 0), row.state || '',
+        ])),
+    ]) : null,
+  ]);
+  reloadHistory();
+
+  const closedCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: ' ' + t('brClosed') })]),
+    el('p', { class: 'mas-hint', text: t('brClosedHint') }),
+    closed.length ? agentTable([t('brColWhen'), t('brColPage')],
+      closed.slice(0, 30).map((row) => [row.timeText || tehranWhen(row.at),
+        row.title || row.url]))
+      : el('p', { class: 'mas-hint', text: t('brClosedNone') }),
+  ]);
+
+  replace(host, headCard, tabsCard, histCard, closedCard);
 }

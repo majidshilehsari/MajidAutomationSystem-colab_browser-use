@@ -44,7 +44,7 @@ MODES = (MODE_OFF, MODE_BOT, MODE_ACCOUNT, MODE_BOTH)
 #: The two transports a message can travel on.
 CHANNELS = (MODE_BOT, MODE_ACCOUNT)
 #: Notification kinds an operator can route to a different transport.
-PURPOSES = ("handoff", "captcha", "jobs", "manual")
+PURPOSES = ("handoff", "captcha", "jobs", "manual", "backup")
 
 DEFAULT_HANDOFF_TEMPLATE = (
     "🛑 نیاز به تأیید انسانی\n"
@@ -195,6 +195,15 @@ class TelegramBot:
                           {"chat_id": chat_id, "caption": caption[:1024]},
                           files={"photo": path})
 
+    def send_document(self, chat_id: Any, path: str,
+                      caption: str = "") -> Dict[str, Any]:
+        """Upload a file as a document (used for database backups)."""
+        if not os.path.exists(path):
+            raise TelegramError("the file is gone: %s" % path)
+        return self._call("sendDocument",
+                          {"chat_id": chat_id, "caption": caption[:1024]},
+                          files={"document": path})
+
 
 class TelegramAccount:
     """The operator's own account through Telethon, imported lazily.
@@ -307,6 +316,11 @@ class TelegramAccount:
                 return {"messageId": getattr(message, "id", None)}
             finally:
                 client.disconnect()
+
+    def send_document(self, chat_id: Any, path: str,
+                      caption: str = "") -> Dict[str, Any]:
+        """Telethon picks the right media type from the file itself."""
+        return self.send_photo(chat_id, path, caption)
 
 
 class Notifier:
@@ -452,7 +466,8 @@ class Notifier:
     def _deliver(self, text: str, photo_path: str = "",
                  targets: Optional[List[Dict[str, Any]]] = None,
                  purpose: Optional[str] = None,
-                 channel: Optional[str] = None) -> Dict[str, Any]:
+                 channel: Optional[str] = None,
+                 document_path: str = "") -> Dict[str, Any]:
         chosen = targets if targets is not None else self.targets()
         if not chosen:
             return {"sent": 0, "failed": 0, "reason": "no telegram targets configured"}
@@ -462,26 +477,66 @@ class Notifier:
         sent = 0
         errors: List[str] = []
         used: List[str] = []
+        # One log row per destination, so «لیست پیام‌ها» reads like a mailbox:
+        # a row appears as "queued" the moment delivery starts and ends up
+        # sent / partial / failed with the reason attached.
+        per_target: Dict[Any, Dict[str, Any]] = {}
+        for target in chosen:
+            chat_id = target.get("id")
+            if chat_id is None:
+                continue
+            log_id = 0
+            try:
+                log_id = self.store.log_telegram(
+                    "queued", "", str(purpose or "manual"),
+                    target.get("title") or chat_id, text)
+            except Exception:  # a logging problem must never block delivery
+                log_id = 0
+            per_target[chat_id] = {"log": log_id, "ok": False, "errors": [],
+                                   "channel": ""}
         for name in channels:
             try:
                 client = self.transport(name)
             except TelegramError as exc:
                 errors.append("%s: %s" % (name, exc))
+                for state in per_target.values():
+                    state["errors"].append(str(exc))
                 continue
             used.append(name)
             for target in chosen:
                 chat_id = target.get("id")
-                if chat_id is None:
+                if chat_id is None or chat_id not in per_target:
                     continue
+                state = per_target[chat_id]
                 try:
-                    if photo_path:
+                    if document_path:
+                        client.send_document(chat_id, document_path, text)
+                    elif photo_path:
                         client.send_photo(chat_id, photo_path, text)
                     else:
                         client.send_text(chat_id, text)
                     sent += 1
+                    state["ok"] = True
+                    state["channel"] = name
                 except TelegramError as exc:
                     errors.append("%s/%s: %s"
                                 % (name, target.get("title") or chat_id, exc))
+                    state["errors"].append(str(exc))
+        for chat_id, state in per_target.items():
+            if state["ok"] and not state["errors"]:
+                status = "sent"
+            elif state["ok"]:
+                status = "partial"
+            else:
+                status = "failed"
+            if state["log"]:
+                try:
+                    self.store.update_telegram_log(
+                        state["log"], status,
+                        error="; ".join(state["errors"])[:500],
+                        channel=state["channel"])
+                except Exception:  # keep delivery independent of logging
+                    pass
         result = {"sent": sent, "failed": len(errors),
                   "channels": used, "reason": "; ".join(errors)}
         self.store.audit("telegram", "notify.sent" if sent else "notify.failed",
@@ -493,13 +548,24 @@ class Notifier:
     def send(self, text: str, photo_path: str = "",
              targets: Optional[List[Dict[str, Any]]] = None,
              purpose: Optional[str] = None,
-             channel: Optional[str] = None) -> Dict[str, Any]:
+             channel: Optional[str] = None,
+             document_path: str = "") -> Dict[str, Any]:
         """Deliver now, in the calling thread. Used by the test endpoint and
         by the agent, which may pick the channel itself."""
         if self.mode() == MODE_OFF:
             return {"sent": 0, "failed": 0, "reason": "notifications are off"}
         return self._deliver(text, photo_path, targets, purpose=purpose,
-                             channel=channel)
+                             channel=channel, document_path=document_path)
+
+    def send_document(self, path: str, caption: str = "",
+                      targets: Optional[List[Dict[str, Any]]] = None,
+                      purpose: Optional[str] = None,
+                      channel: Optional[str] = None) -> Dict[str, Any]:
+        """Upload a file (a backup archive) to Telegram right now."""
+        if not os.path.exists(path):
+            raise TelegramError("the file is gone: %s" % path)
+        return self.send(caption or "📦 فایل پشتیبان", targets=targets,
+                         purpose=purpose, channel=channel, document_path=path)
 
     def notify_handoff(self, payload: Dict[str, Any]) -> None:
         """Called by the engine when a run stops for a human.

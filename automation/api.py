@@ -240,6 +240,21 @@ class AutomationApi:
             ("POST", "/agent/cursor", self.route_agent_cursor_set),
             # the copy-paste route list
             ("GET", "/agent/api-index", self.route_agent_api_index),
+            # the coworker agent's eyes on Chrome
+            ("GET", "/agent/browser", self.route_agent_browser),
+            ("GET", "/agent/browser/tabs", self.route_agent_browser_tabs),
+            ("GET", "/agent/browser/history", self.route_agent_browser_history),
+            ("POST", "/agent/browser/tab", self.route_agent_browser_tab),
+            # continuous database backups
+            ("GET", "/agent/backups", self.route_agent_backups_list),
+            ("POST", "/agent/backups", self.route_agent_backups_create),
+            ("GET", "/agent/backup-download", self.route_agent_backup_download),
+            ("POST", "/agent/backup-delete", self.route_agent_backup_delete),
+            ("POST", "/agent/backup-send", self.route_agent_backup_send),
+            ("POST", "/agent/backup-config", self.route_agent_backup_config),
+            # the trustworthy telegram test
+            ("GET", "/agent/telegram/log", self.route_agent_telegram_log),
+            ("POST", "/agent/telegram/diagnose", self.route_agent_telegram_diagnose),
         ]
 
     # -- helpers --------------------------------------------------------
@@ -938,6 +953,88 @@ class AutomationApi:
     def route_agent_cursor_set(self, *, body: bytes = b"", **_: Any) -> Response:
         return json_response(200, {"cursor":
                                    self.agent.cursor_set(self.read_json(body))})
+
+    # -- Chrome knowledge -------------------------------------------------
+    def route_agent_browser(self, *, query: Optional[Dict[str, List[str]]] = None,
+                            **_: Any) -> Response:
+        query = query or {}
+        return json_response(200, self.agent.browser_overview(
+            profile=(query.get("profile") or [""])[0],
+            limit=int((query.get("limit") or ["200"])[0] or 200),
+            query=(query.get("q") or [""])[0],
+            days=float((query.get("days") or ["0"])[0] or 0)))
+
+    def route_agent_browser_tabs(self, **_: Any) -> Response:
+        return json_response(200, self.agent.browser_tabs())
+
+    def route_agent_browser_history(self, *,
+                                    query: Optional[Dict[str, List[str]]] = None,
+                                    **_: Any) -> Response:
+        query = query or {}
+        return json_response(200, self.agent.browser_history(
+            profile=(query.get("profile") or [""])[0],
+            limit=int((query.get("limit") or ["200"])[0] or 200),
+            query=(query.get("q") or [""])[0],
+            days=float((query.get("days") or ["0"])[0] or 0)))
+
+    def route_agent_browser_tab(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.browser_tab(
+            str(payload.get("action") or ""),
+            target_id=str(payload.get("id") or ""),
+            url=str(payload.get("url") or ""),
+            port=payload.get("port") or None))
+
+    # -- backups ----------------------------------------------------------
+    def route_agent_backups_list(self, **_: Any) -> Response:
+        return json_response(200, self.agent.backup_list())
+
+    def route_agent_backups_create(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        secrets = payload.get("includeSecrets")
+        return json_response(201, self.agent.backup_create(
+            include_secrets=None if secrets is None else bool(secrets),
+            label=str(payload.get("label") or "")))
+
+    def route_agent_backup_download(self, *,
+                                    query: Optional[Dict[str, List[str]]] = None,
+                                    **_: Any) -> Response:
+        name = ((query or {}).get("name") or [""])[0]
+        data = self.agent.backup_read(name)
+        return 200, {"Content-Type": "application/gzip",
+                     "Content-Disposition": 'attachment; filename="%s"' % name,
+                     "Cache-Control": "no-store"}, data
+
+    def route_agent_backup_delete(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.backup_delete(
+            str(payload.get("name") or "")))
+
+    def route_agent_backup_send(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.backup_send(
+            name=str(payload.get("name") or ""),
+            target=str(payload.get("target") or ""),
+            channel=str(payload.get("channel") or "")))
+
+    def route_agent_backup_config(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(200, self.agent.backup_configure(
+            self.read_json(body)))
+
+    # -- the step-by-step telegram test ------------------------------------
+    def route_agent_telegram_log(self, *,
+                                 query: Optional[Dict[str, List[str]]] = None,
+                                 **_: Any) -> Response:
+        limit = int(((query or {}).get("limit") or ["100"])[0] or 100)
+        return json_response(200, self.agent.telegram_log(limit=limit))
+
+    def route_agent_telegram_diagnose(self, *, body: bytes = b"",
+                                      **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.telegram_diagnose(
+            target=payload.get("target") or "",
+            channel=str(payload.get("channel") or ""),
+            text=str(payload.get("text") or "")))
 
     def route_agent_api_index(self, **_: Any) -> Response:
         return json_response(200, {"endpoints": self.agent.api_index(),

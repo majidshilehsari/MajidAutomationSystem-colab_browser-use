@@ -1,0 +1,120 @@
+! خلاصهٔ فارسی: استایل fluxbox برای دیپلوی Hostim — نوار پایین شبیه تسک‌بار
+! ویندوز ۱۰ (تیره، لبه‌های نرم، ساعت و نام فضای کاری وسط)، منوی راست‌کلیک
+! روشن، پنجره‌ها با نوار عنوان باریک و رنگ تأکید فیروزه‌ای، و پس‌زمینهٔ
+! گرادیان بدون نیاز به هیچ فایل تصویر یا برنامهٔ اضافه (feh/ImageMagick در
+! ایمیج نیستند). اگر متغیر DESKTOP_BACKGROUND به یک فایل تصویر اشاره کند،
+! entrypoint همین استایل را با background.pixmap بازنویسی می‌کند.
+! نکته: این فایل فقط در مسیر Hostim استفاده می‌شود؛ مسیر Colab دست‌نخورده است.
+
+! -- toolbar (taskbar) -----------------------------------------------------
+toolbar.height: 34
+toolbar.bevelWidth: 4
+toolbar: gradient vertical
+toolbar.color: #10141a
+toolbar.colorTo: #1d2733
+toolbar.borderWidth: 1
+toolbar.borderColor: #2c3a4a
+toolbar.font: Noto Sans-11:bold
+toolbar.justify: center
+toolbar.clock: parentrelative
+toolbar.clock.color: #dfe7f0
+toolbar.clock.font: Noto Sans-11:bold
+toolbar.label: parentrelative
+toolbar.label.color: #9fd0ff
+toolbar.label.font: Noto Sans-11:bold
+toolbar.workspaceLabel: parentrelative
+toolbar.workspaceLabel.color: #7ee6d2
+toolbar.button: parentrelative
+toolbar.button.color: #9aa7b5
+toolbar.button.picColor: #9aa7b5
+toolbar.pressed: flat solid
+toolbar.pressed.color: #22303e
+toolbar.iconbar: parentrelative
+toolbar.iconbar.color: #16202b
+toolbar.iconbar.empty: parentrelative
+toolbar.iconbar.focused: gradient vertical
+toolbar.iconbar.focused.color: #1f6feb
+toolbar.iconbar.focused.colorTo: #22c1a8
+toolbar.iconbar.focused.font: Noto Sans-11:bold
+toolbar.iconbar.focused.textColor: #06111c
+toolbar.iconbar.unfocused: parentrelative
+toolbar.iconbar.unfocused.font: Noto Sans-11
+toolbar.iconbar.unfocused.textColor: #8d99a7
+toolbar.systray: parentrelative
+
+! -- windows ----------------------------------------------------------------
+window.title.height: 26
+window.bevelWidth: 4
+window.borderWidth: 1
+window.borderColor: #2c3a4a
+window.font: Noto Sans-11
+window.justify: left
+window.label.height: 26
+window.roundCorners: 6px
+window.focus: gradient vertical
+window.focus.color: #1f6feb
+window.focus.colorTo: #16324a
+window.focus.label: parentrelative
+window.focus.label.color: #eaf2fb
+window.focus.textColor: #eaf2fb
+window.unfocus: gradient vertical
+window.unfocus.color: #1a2129
+window.unfocus.colorTo: #141a21
+window.unfocus.label: parentrelative
+window.unfocus.label.color: #7c8896
+window.unfocus.textColor: #7c8896
+window.button.focus: parentrelative
+window.button.focus.picColor: #cfe3ff
+window.button.unfocus: parentrelative
+window.button.unfocus.picColor: #6d7885
+window.button.pressed: flat solid
+window.button.pressed.color: #22303e
+window.grip.focus: parentrelative
+window.grip.unfocus: parentrelative
+
+! -- menus (right click) ------------------------------------------------------
+menu.bevelWidth: 6
+menu.borderWidth: 1
+menu.borderColor: #2c3a4a
+menu.borderWidth: 1
+menu.font: Noto Sans-12
+menu.title: gradient vertical
+menu.title.color: #1f6feb
+menu.title.colorTo: #22c1a8
+menu.title.font: Noto Sans-12:bold
+menu.title.textColor: #06111c
+menu.title.justify: center
+menu.frame: flat solid
+menu.frame.color: #161d25
+menu.frame.colorTo: #161d25
+menu.frame.textColor: #dfe7f0
+menu.frame.disableColor: #6d7885
+menu.hilite: flat solid
+menu.hilite.color: #22303e
+menu.hilite.textColor: #7ee6d2
+menu.bullet: triangle
+menu.bullet.position: right
+menu.selected: solid
+menu.selected.color: #22c1a8
+menu.unselected: solid
+menu.unselected.color: #161d25
+menu.submenu.pixmap: bullet
+menu.hilite.submenu.pixmap: bullet
+
+! -- background: a calm gradient, no image file needed ------------------------
+background: pyramid
+background.color: #0d1420
+background.colorTo: #123c3a
+
+! -- slits and tabs -----------------------------------------------------------
+tab.bevelWidth: 3
+tab.borderWidth: 1
+tab.borderColor: #2c3a4a
+tab.font: Noto Sans-11
+tab.focus: gradient vertical
+tab.focus.color: #1f6feb
+tab.focus.colorTo: #16324a
+tab.focus.textColor: #eaf2fb
+tab.unfocus: flat solid
+tab.unfocus.color: #1a2129
+tab.unfocus.textColor: #7c8896
