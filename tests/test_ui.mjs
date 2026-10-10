@@ -23,7 +23,8 @@ const NOVNC_HTML = `<!doctype html><html><head><style>${CSS}</style></head><body
 const VALID_TOKEN = 'tok123';
 
 /** Stands in for the server: /info is open, everything else needs the token. */
-function fakeApi(requests, posts = [], statusPayload = null, noAgent = false) {
+function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
+                 clipText = null) {
   return async (url, options = {}) => {
     const path = String(url);
     const clean = path.split('?')[0];
@@ -112,7 +113,8 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false) {
         ] });
     }
     if (clean.endsWith('/clipboard')) {
-      return json({ ok: true, text: '\u0633\u0644\u0627\u0645 \u06a9\u0644\u06cc\u067e', length: 10 });
+      const text = clipText === null ? '\u0633\u0644\u0627\u0645 \u06a9\u0644\u06cc\u067e' : clipText;
+      return json({ ok: true, text, length: text.length });
     }
     if (clean.endsWith('/agent/devlog')) {
       return json({ entries: [{ id: 1, at: 1760000000, actor: 'system',
@@ -306,7 +308,8 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false) {
 
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
 async function mount({ readyStateComplete = true, standalone = false, flow = null,
-                      status: statusPayload = null, noAgent = false } = {}) {
+                      status: statusPayload = null, noAgent = false,
+                      clipText = null } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -345,7 +348,7 @@ async function mount({ readyStateComplete = true, standalone = false, flow = nul
     }),
     requestAnimationFrame: window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window) : (fn) => setTimeout(fn, 0),
-    fetch: fakeApi(requests, posts, statusPayload, noAgent),
+    fetch: fakeApi(requests, posts, statusPayload, noAgent, clipText),
     // Tracked so cleanup() can stop the sidebar's poll loops, otherwise the
     // test process never exits. Bound to the originals: referencing the global
     // here would recurse into this very wrapper.
@@ -2003,6 +2006,25 @@ test('the standalone header is one line: tabs, dot and desktop button', async ()
     assert.ok(!head.querySelector('.mas-theme-btn') &&
       !page.doc.getElementById('mas-theme-toggle'),
       'theme lives in the settings tab, not the header');
+    // order: logo, the word, the tabs, ... and the desktop button at the far
+    // left (last child in RTL); the tabs must wear the sub-tab graphic.
+    const kids = Array.from(head.children);
+    assert.ok(kids[0].classList.contains('mas-brand-logo'), 'the logo must come first');
+    assert.ok(kids[0].querySelector('svg'), 'the logo needs its mark');
+    assert.equal(kids[1].textContent.trim(), '\u0627\u062a\u0648\u0645\u0627\u0633\u06cc\u0648\u0646',
+      'the word \u0627\u062a\u0648\u0645\u0627\u0633\u06cc\u0648\u0646 belongs right after the logo');
+    assert.ok(kids[kids.length - 1].classList.contains('mas-desktop-link'),
+      'the desktop button closes the line at the left');
+    const tabsBox = page.window.getComputedStyle(head.querySelector('.mas-tabs'));
+    assert.equal(tabsBox.borderRadius, '12px',
+      'the header tab bar must be the framed segment, not a broken capsule');
+    const tabStyle = page.window.getComputedStyle(head.querySelector('.mas-tab'));
+    assert.equal(tabStyle.fontSize, '12.5px');
+    assert.equal(tabStyle.borderRadius, '999px');
+    // jsdom does not resolve var(), so the active chip's solid background is
+    // asserted from the stylesheet text instead of a computed color.
+    assert.ok(/\.mas-page-head \.mas-tab\.is-active\s*\{[^}]*background:\s*var\(--bg-solid\)/s.test(CSS),
+      'the active header tab needs the solid chip of the sub-tabs');
     assert.ok(!page.doc.querySelector('.mas-page-head .mas-sub'),
       'the extra subtitle line must be gone');
   } finally {
@@ -2043,6 +2065,58 @@ test('language and theme both live in the settings tab', async () => {
       .find((node) => node.dataset.tab === 'settings');
     assert.equal(settingsTab.textContent.trim(), 'Settings',
       'switching the language must re-render every label');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the flow tab has one floating action line above the footer', async () => {
+  const page = await mount({
+    standalone: true,
+    clipText: JSON.stringify({ name: '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
+      steps: [{ type: 'move', x: 5, y: 5 }] }),
+  });
+  try {
+    await authenticate(page);
+    clickTab(page, 'flow');
+    const bar = page.doc.querySelector('#mas-tab-flow .mas-flowbar');
+    assert.ok(bar, 'the action line is missing from the flow tab');
+    const style = page.window.getComputedStyle(bar);
+    assert.equal(style.position, 'fixed', 'the line must float above the footer');
+    assert.equal(style.bottom, '46px', 'it sits exactly on top of the footer');
+    assert.equal(style.flexWrap, 'nowrap', 'one line only');
+    const labels = Array.from(bar.querySelectorAll('button')).map((b) => b.textContent.trim());
+    for (const want of ['\u0630\u062e\u06cc\u0631\u0647', '\u0630\u062e\u06cc\u0631\u0647 \u0628\u0627 \u0646\u0627\u0645',
+      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc', '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u0628\u0648\u0631\u062f',
+      '\u067e\u0631\u0627\u0645\u067e\u062a']) {
+      assert.ok(labels.some((label) => label.includes(want)),
+        `the line lost its "${want}" button: ` + labels.join(' | '));
+    }
+
+    // leaving the tab takes the floating line with it
+    clickTab(page, 'db');
+    assert.equal(page.display('#mas-tab-flow'), 'none');
+
+    // the clipboard button really loads the flow JSON
+    clickTab(page, 'flow');
+    const clipBtn = Array.from(bar.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u0628\u0648\u0631\u062f'));
+    clipBtn.dispatchEvent(new page.window.Event('click'));
+    const flowPane = page.doc.getElementById('mas-tab-flow');
+    // the imported step shows up in the list and the name lands in the input
+    assert.ok(await page.until(() => flowPane.textContent.includes('move 5,5')),
+      'the clipboard flow never arrived: ' + flowPane.textContent.slice(0, 200));
+    assert.equal(flowPane.querySelector('input.mas-input').value,
+      '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
+      'the imported flow kept the wrong name');
+
+    // the prompt button jumps into the agent's prompt sub-tab
+    const promptBtn = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-flowbar button'))
+      .find((b) => b.textContent.includes('\u067e\u0631\u0627\u0645\u067e\u062a'));
+    promptBtn.dispatchEvent(new page.window.Event('click'));
+    assert.equal(page.display('#mas-tab-agent'), 'block', 'the agent tab should open');
+    const activeSub = page.doc.querySelector('#mas-tab-agent [data-sub].is-active');
+    assert.equal(activeSub.textContent.trim(), '\u067e\u0631\u0627\u0645\u067e\u062a');
   } finally {
     await page.cleanup();
   }

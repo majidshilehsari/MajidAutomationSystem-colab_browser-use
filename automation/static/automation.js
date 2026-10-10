@@ -127,6 +127,32 @@ async function imageBlobUrl(path) {
   return URL.createObjectURL(await response.blob());
 }
 
+async function loadFlowFromClipboard() {
+  // Browser clipboard first (the panel is served over HTTPS), then the
+  // server-side xclip bridge as a fallback - same order the settings tab uses.
+  try {
+    let text = '';
+    if (navigator.clipboard && navigator.clipboard.readText) {
+      try { text = await navigator.clipboard.readText(); } catch (err) { text = ''; }
+    }
+    if (!text) text = ((await api('/clipboard')).text) || '';
+    let parsed;
+    try { parsed = JSON.parse(text); } catch (err) { throw new Error(t('flowClipBad')); }
+    const data = parsed && parsed.flow ? parsed.flow : parsed;
+    // the shared importer fills in defaults, keeps only known step types and
+    // validates - the same path the old JSON import used
+    const result = normaliseImportedFlow(data);
+    if (!result || !result.flow) throw new Error(t('flowClipBad'));
+    state.flow = result.flow;
+    persistFlow();
+    renderFlow();
+    toast(`${t('load')}: ${state.flow.name || t('flowClipLoaded')}`, 'ok');
+    if (result.errors && result.errors.length) toast(result.errors.join(' | '), 'info');
+  } catch (error) {
+    toast(error.message || t('flowClipBad'), 'error');
+  }
+}
+
 /* ------------------------------------------------------------------ *
  * DOM helpers
  * ------------------------------------------------------------------ */
@@ -525,14 +551,23 @@ function renderFlow() {
     ]),
   ]);
 
-  const ioRow = el('div', { class: 'mas-row mas-wrap' }, [
+  // One line of actions that floats right above the footer while - and only
+  // while - the flow tab is the open one (it lives inside the pane, so hiding
+  // the section hides the bar with it; nothing to unmount on tab changes).
+  const ioRow = el('div', { class: 'mas-flowbar' }, [
     button(t('save'), () => saveFlow(), { class: 'mas-btn mas-primary' }),
     button(t('saveAs'), () => {
       const name = window.prompt(t('saveAs'), state.flow.name);
       if (name) saveFlow(name);
     }),
     button(t('load'), loadFlowDialog),
+    button('📥 ' + t('flowLoadClipboard'), loadFlowFromClipboard),
     button('JSON ⇩', exportJson),
+    button('🧩 ' + t('flowGotoPrompt'), () => {
+      selectTab('agent');
+      selectAgentSub('prompt');
+      setPanelOpen(true);
+    }),
     button('📋 ' + t('copyReport'), copyReport, { class: 'mas-btn' }),
     button('🗑 ' + t('clearAll'), clearAllSteps, { class: 'mas-btn mas-danger' }),
   ]);
@@ -3572,6 +3607,15 @@ function start() {
     if (pageHead) {
       const tabsNode = document.querySelector('#mas-root .mas-tabs');
       const conn = document.getElementById('mas-conn');
+      pageHead.appendChild(el('span', {
+        class: 'mas-brand-logo', title: t('title'),
+        html: '<svg viewBox="0 0 28 28" width="26" height="26" aria-hidden="true">'
+          + '<defs><linearGradient id="maslogo" x1="0" y1="0" x2="1" y2="1">'
+          + '<stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#0f766e"/>'
+          + '</linearGradient></defs>'
+          + '<rect x="1.5" y="1.5" width="25" height="25" rx="8" fill="url(#maslogo)"/>'
+          + '<path d="M15.6 5.2 8.8 15.4h4.3l-1.1 7.4 7.2-10.6h-4.5z" fill="#fff"/></svg>',
+      }));
       pageHead.appendChild(el('h1', { class: 'mas-page-title', text: t('title') }));
       if (tabsNode) pageHead.appendChild(tabsNode);
       if (conn) pageHead.appendChild(conn);

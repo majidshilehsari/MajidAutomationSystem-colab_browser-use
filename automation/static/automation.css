@@ -1954,7 +1954,7 @@ body.mas-standalone #mas-root .mas-runpanel {
   position: fixed;
   left: 0;
   right: 0;
-  bottom: 46px;
+  bottom: 94px;
   z-index: 44;
   max-height: 38vh;
   overflow: auto;
@@ -1963,3 +1963,76 @@ body.mas-standalone #mas-root .mas-runpanel {
   padding: 8px 12px;
 }
 body.mas-standalone #mas-root .mas-body { padding-bottom: 60px; }
+
+
+/* ================================================================== *
+ * Phase 11 — header tabs wear exactly the sub-tab graphic (framed
+ * segment, capsule buttons, soft active), and the flow tab gets one
+ * floating action line pinned right above the footer.
+ * ================================================================== */
+
+.mas-page-head .mas-brand-logo {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+body.mas-standalone .mas-page-head .mas-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  padding: 4px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.mas-page-head .mas-tab {
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--dim);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.mas-page-head .mas-tab:hover { background: var(--surface-2); color: var(--text); }
+.mas-page-head .mas-tab.is-active {
+  background: var(--bg-solid);
+  color: var(--accent);
+  font-weight: 700;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.10);
+}
+html[data-theme='dark'] .mas-page-head .mas-tab.is-active { color: var(--accent-strong); }
+
+/* -- flow action line: floating, single row, above the footer --------- */
+.mas-flowbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+body.mas-standalone .mas-flowbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 46px;
+  z-index: 44;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  margin: 0;
+  padding: 8px 12px;
+  background: var(--bg-solid-97);
+  border-top: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+}
+body.mas-standalone .mas-flowbar .mas-btn { flex: 0 0 auto; white-space: nowrap; }
+/* keep the pane's last card clear of the floating line */
+body.mas-standalone #mas-tab-flow { padding-bottom: 58px; }
