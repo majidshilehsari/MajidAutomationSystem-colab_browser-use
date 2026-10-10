@@ -51,6 +51,10 @@ components:
     - name: browser
       # 2 vCPU / 2 GB. Chrome + Xvfb + x11vnc + the Python server is very
       # tight on the 1 GB sa-1-1 plan; sa-3-4 or da-1-4 is more comfortable.
+      # With the coworker agent's own browser enabled there is a SECOND Xvfb
+      # and a SECOND Chrome, so budget for that: the deployment this was
+      # verified on used sa-4-8. To try a smaller plan, set AI_BROWSER=0 first
+      # and watch the memory graph before trusting it.
       plan: sa-2-2
 
       # MUST stay 1. A graphical desktop is stateful: two replicas would mean
@@ -99,6 +103,26 @@ components:
         # A template may also use Hostim's own generator: GENERATE_ME_32
         # - name: AUTOMATION_TOKEN
         #   value: GENERATE_ME_32
+
+        # --- the coworker agent (guide, section 15) ---------------------
+        # A second Xvfb on :2 and a second Chrome with its DevTools port on
+        # 9223, so the agent can drive a web chat with NO API key. It is
+        # supervised as a non-core service: if it dies it is relaunched, and if
+        # it never starts the automation itself keeps running with a WARN.
+        # Set this to 0 to skip it entirely and save the memory.
+        - name: AI_BROWSER
+          value: "1"
+        # The chat the agent opens. Log in there ONCE by hand (sidebar -> keys
+        # -> "open the chat site" / "agent display shot"); the session then
+        # persists in /data/ai-profile.
+        - name: AI_START_URL
+          value: "https://chat.deepseek.com/"
+        # Absolute origin used in the links the agent sends out (the noVNC
+        # desktop link and a captcha screenshot in a Telegram message). Left
+        # empty it is derived from Hostim's own BUILTIN_DOMAIN, which is the
+        # right answer for the built-in domain; set it only for a custom one.
+        # - name: PUBLIC_BASE
+        #   value: "https://automation.example.com"
 
       volumeMounts:
         # Never mount over /app or over a binary path: Hostim documents that a
