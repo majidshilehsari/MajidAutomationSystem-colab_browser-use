@@ -1644,7 +1644,8 @@ async function renderTexts() {
 function renderAgentAssistant(host) {
   // Its home is the chat tab's toolbox now; the old agent sub-pane id stays as
   // a fallback so an older panel.html keeps working.
-  const pane = host || document.getElementById('mas-chat-assistant')
+  const pane = host || document.getElementById('mas-prompt-host')
+    || document.getElementById('mas-chat-assistant')
     || document.getElementById('mas-agent-sub');
   if (!pane) return;
   // The model's whole answer. Kept so the next prompt can hand it back, which
@@ -1784,10 +1785,13 @@ async function buildPrompt() {
  * so a failure in one cannot blank the others.
  * ------------------------------------------------------------------ */
 
-const AGENT_SUBS = ['agentkey', 'telegram', 'browser', 'cursor', 'jobs',
-  'captcha', 'scripts', 'data', 'keys'];
+// «پرامپت» comes first on purpose: building a prompt for a model is its own
+// workspace, separate from the ordinary chat, and it is where the panel opens.
+const AGENT_SUBS = ['prompt', 'agentkey', 'telegram', 'browser', 'cursor',
+  'jobs', 'captcha', 'scripts', 'data', 'keys'];
 
 const AGENT_RENDERERS = {
+  prompt: renderAgentPrompt,
   agentkey: renderAgentKey,
   cursor: renderAgentCursor,
   jobs: renderAgentJobs,
@@ -1897,6 +1901,15 @@ async function refreshAgentBar() {
 function selectAgentSub(name) {
   state.agentSub = name;
   renderAgent();
+}
+
+/* The prompt workspace: copy-prompt / import-JSON, as its own sub-tab. */
+function renderAgentPrompt(host) {
+  // One card wrapper keeps the sub-pane contract (a .mas-box inside
+  // #mas-agent-sub) and gives re-renders a stable home id.
+  const wrap = el('div', { id: 'mas-prompt-host', class: 'mas-box mas-card' });
+  replace(host, wrap);
+  renderAgentAssistant(wrap);
 }
 
 function renderAgentSub(name) {
@@ -2263,7 +2276,7 @@ async function renderAgentTelegram(host) {
     status.error ? el('p', { class: 'mas-warn', text: status.error }) : null,
   ]);
 
-  /* -- settings: channels, routing, credentials, targets ---------------- */
+  /* -- settings: channels, routing, credentials ---------------------- */
   const channelRows = ['bot', 'account'].map((name) => {
     const info = channels[name] || {};
     const ready = name === 'bot' ? info.configured : info.sessionExists;
@@ -2274,19 +2287,6 @@ async function renderAgentTelegram(host) {
       info.sessionPath ? String(info.sessionPath) : '',
     ];
   });
-  const found = state.agentTgFound || [];
-  const foundRows = found.map((target) => [
-    String(target.id), target.title || '', target.type || '',
-    button('\uff0b', async () => {
-      const next = targets.slice();
-      next.push(target);
-      try {
-        await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': next } });
-        toast(t('agentSaved'), 'ok');
-        renderAgentSub('telegram');
-      } catch (error) { toast(error.message, 'error'); }
-    }, { class: 'mas-btn mas-primary' }),
-  ]);
   const saveSettings = async (extra) => {
     const body = Object.assign({ 'telegram.mode': draft.mode }, extra || {});
     for (const purpose of purposes) {
@@ -2366,22 +2366,80 @@ async function renderAgentTelegram(host) {
         }, { class: 'mas-btn mas-primary' }),
       ]),
     ]) : el('p', { class: 'mas-hint', text: t('tgAccountOff') }),
-    el('b', { class: 'mas-subhead', text: `🎯 ${t('agentTgTargets')} (${targets.length})` }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('💾 ' + t('agentSave'), () => saveSettings(Object.assign({},
+        draft.botToken ? { 'telegram.botToken': draft.botToken } : {},
+        draft.apiId ? { 'telegram.apiId': draft.apiId } : {},
+        draft.apiHash ? { 'telegram.apiHash': draft.apiHash } : {})),
+      { class: 'mas-btn mas-primary' }),
+    ]),
+  ]);
+
+  /* -- targets: fully editable, exactly as the operator asked ----------- */
+  const draftTargets = targets.map((target) => Object.assign({}, target));
+  const add = { id: '', title: '', type: 'private' };
+  const found = state.agentTgFound || [];
+  const saveTargets = async () => {
+    const clean = draftTargets
+      .filter((target) => String(target.id || '').trim() !== '')
+      .map((target) => ({
+        id: Number(target.id) || String(target.id).trim(),
+        title: String(target.title || ''),
+        type: String(target.type || 'private'),
+      }));
+    try {
+      await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': clean } });
+      toast(t('agentSaved'), 'ok');
+      renderAgentSub('telegram');
+    } catch (error) { toast(error.message, 'error'); }
+  };
+  const targetsCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: `🎯 ${t('agentTgTargets')} (${draftTargets.length})` }),
+    ]),
     el('details', { class: 'mas-help' }, [
       el('summary', { text: '📖 ' + t('tgHelpTargetsTitle') }),
       el('p', { text: t('tgHelpTargets') }),
     ]),
-    targets.length ? agentTable([t('tgColId'), t('tgColTitle'), t('tgColType'), ''],
-      targets.map((target, index) => [
-        String(target.id), target.title || '', target.type || '',
-        button('🗑', async () => {
-          const next = targets.filter((_, position) => position !== index);
-          try {
-            await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': next } });
-            renderAgentSub('telegram');
-          } catch (error) { toast(error.message, 'error'); }
-        }),
-      ])) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
+    el('p', { class: 'mas-hint', text: t('tgTargetsHint') }),
+    draftTargets.length ? el('div', { class: 'mas-target-rows' },
+      draftTargets.map((target, index) => el('div', { class: 'mas-row mas-wrap mas-target-row' }, [
+        agentField(t('tgColId'), el('input', {
+          class: 'mas-input', value: String(target.id || ''),
+          onInput: (event) => { draftTargets[index].id = event.target.value; },
+        })),
+        agentField(t('tgColTitle'), el('input', {
+          class: 'mas-input', value: String(target.title || ''),
+          onInput: (event) => { draftTargets[index].title = event.target.value; },
+        })),
+        agentField(t('tgColType'), agentSelect(
+          ['private', 'group', 'supergroup', 'channel'],
+          String(target.type || 'private'),
+          (event) => { draftTargets[index].type = event.target.value; })),
+        button('🗑', () => {
+          draftTargets.splice(index, 1);
+          renderAgentSub('telegram');
+        }, { class: 'mas-btn mas-danger' }),
+      ]))) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
+    el('b', { class: 'mas-subhead', text: '➕ ' + t('tgTargetAdd') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('tgColId'), el('input', {
+        class: 'mas-input', placeholder: '-100… یا @name',
+        onInput: (event) => { add.id = event.target.value; },
+      })),
+      agentField(t('tgColTitle'), el('input', {
+        class: 'mas-input', placeholder: t('tgColTitle'),
+        onInput: (event) => { add.title = event.target.value; },
+      })),
+      agentField(t('tgColType'), agentSelect(
+        ['private', 'group', 'supergroup', 'channel'], add.type,
+        (event) => { add.type = event.target.value; })),
+      button('➕', () => {
+        if (!String(add.id || '').trim()) { toast(t('tgTestNeedTarget'), 'warn'); return; }
+        draftTargets.push({ id: add.id, title: add.title, type: add.type });
+        renderAgentSub('telegram');
+      }, { class: 'mas-btn mas-primary' }),
+    ]),
     el('div', { class: 'mas-row mas-wrap' }, [
       button('🔎 ' + t('agentTgDiscover'), async () => {
         try {
@@ -2389,13 +2447,18 @@ async function renderAgentTelegram(host) {
           renderAgentSub('telegram');
         } catch (error) { toast(error.message, 'error'); }
       }),
-      button('💾 ' + t('agentSave'), () => saveSettings(Object.assign({},
-        draft.botToken ? { 'telegram.botToken': draft.botToken } : {},
-        draft.apiId ? { 'telegram.apiId': draft.apiId } : {},
-        draft.apiHash ? { 'telegram.apiHash': draft.apiHash } : {})),
-      { class: 'mas-btn mas-primary' }),
+      button('💾 ' + t('tgSaveTargets'), saveTargets, { class: 'mas-btn mas-primary' }),
     ]),
-    found.length ? agentTable([t('tgColId'), t('tgColTitle'), t('tgColType'), t('agentAdd')], foundRows) : null,
+    found.length ? el('div', { class: 'mas-target-rows' },
+      found.map((target) => el('div', { class: 'mas-row mas-wrap mas-target-row' }, [
+        el('span', { class: 'mas-chip', text: String(target.id) }),
+        el('span', { text: target.title || '' }),
+        el('span', { class: 'mas-hint', text: target.type || '' }),
+        button('\uff0b', () => {
+          draftTargets.push(Object.assign({}, target));
+          renderAgentSub('telegram');
+        }, { class: 'mas-btn mas-primary' }),
+      ]))) : null,
   ]);
 
   /* -- the test the user asked for: one click, a real message ----------- */
@@ -2588,7 +2651,7 @@ async function renderAgentTelegram(host) {
     ]),
   ]);
 
-  /* -- the free-form send box stays last (tests read it as the last box) - */
+  /* -- free-form send ---------------------------------------------------- */
   const sendCard = el('div', { class: 'mas-box mas-card' }, [
     el('div', { class: 'mas-card-head' }, [el('b', { text: '📤 ' + t('tgSendTitle') })]),
     el('p', { class: 'mas-hint', text: t('tgSendHint') }),
@@ -2628,7 +2691,22 @@ async function renderAgentTelegram(host) {
     }, { class: 'mas-btn mas-primary' }),
   ]);
 
-  replace(host, statusCard, settingsCard, testCard, mailCard, programCard, sendCard);
+  /* -- nested sub-tabs, styled exactly like the top tab bar ------------- */
+  const TG_SUBS = ['status', 'settings', 'targets', 'mailbox', 'programs', 'write'];
+  const activeSub = TG_SUBS.includes(state.tgSub) ? state.tgSub : 'status';
+  const subBar = el('div', { class: 'mas-tabs mas-subtabs' }, TG_SUBS.map((name) => el('button', {
+    class: 'mas-tab' + (name === activeSub ? ' is-active' : ''),
+    dataset: { tgsub: name }, type: 'button',
+    text: t('tgSub' + name.charAt(0).toUpperCase() + name.slice(1)),
+    onClick: () => { state.tgSub = name; renderAgentSub('telegram'); },
+  })));
+  const cards = {
+    status: testCard, settings: settingsCard, targets: targetsCard,
+    mailbox: mailCard, programs: programCard, write: sendCard,
+  };
+  const subHost = el('div', { class: 'mas-subhost' }, cards[activeSub] || testCard);
+
+  replace(host, statusCard, subBar, subHost);
 }
 
 /* -- data ------------------------------------------------------------ */
@@ -2977,13 +3055,16 @@ function renderChat() {
     el('details', { class: 'mas-box mas-chat-tools' }, [
       el('summary', { text: '🧩 ' + t('chatTools') }),
       el('p', { class: 'mas-hint', text: t('chatToolsHint') }),
-      el('div', { id: 'mas-chat-assistant' }),
+      button('🧩 ' + t('chatToolsOpen'), () => {
+        selectTab('agent');
+        selectAgentSub('prompt');
+        setPanelOpen(true);
+      }, { class: 'mas-btn mas-primary' }),
     ]),
   );
-  // The old assistant pane moved in here instead of staying a second place to
-  // talk to a model: copy the prompt, or let the agent answer directly and
-  // import the JSON it proposes.
-  renderAgentAssistant(document.getElementById('mas-chat-assistant'));
+  // The prompt workspace itself lives in the agent's first sub-tab now; the
+  // chat tab only points at it, so there is exactly one place to build a
+  // prompt and one place to talk.
   refreshChatList();
   startChatPolling();
 }

@@ -2826,6 +2826,10 @@ class WebRootPhase7Test(TempDirCase):
         self.assertIn("noVNC_setting_resize", html)
         self.assertLess(html.index(srv.VIEW_MARKER), html.index("</head>"))
         self.assertIn("overflow: hidden", html)
+        # Phase 8: the viewer must also offer the Persian webfont, so the
+        # injected block carries a fonts.googleapis stylesheet link.
+        self.assertIn("fonts.googleapis.com", html)
+        self.assertIn("Vazirmatn", html)
         with open(os.path.join(web, "automation", "automation.js"),
                   encoding="utf-8") as fh:
             script = fh.read()
@@ -2835,6 +2839,7 @@ class WebRootPhase7Test(TempDirCase):
         with open(os.path.join(web, "vnc.html"), encoding="utf-8") as fh:
             html = fh.read()
         self.assertEqual(html.count(srv.VIEW_MARKER), 1)
+        self.assertEqual(html.count("fonts.googleapis.com"), 1)
 
 
 class LabelCoverageTest(unittest.TestCase):

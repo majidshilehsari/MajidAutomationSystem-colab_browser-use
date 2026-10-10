@@ -133,6 +133,11 @@ def inject_block(static_dir: str) -> str:
     query = cache_query(static_dir)
     return (
         MARKER + "\n"
+        # A Persian-first webfont; offline deployments simply fall back to the
+        # system stack, so this is decoration, never a dependency.
+        '<link rel="stylesheet" crossorigin="anonymous"'
+        ' href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700'
+        '&display=swap">\n'
         '<link rel="stylesheet" href="automation/automation.css%s">\n'
         '<script type="module" src="automation/automation.js%s"></script>\n'
         "%s\n" % (query, query, END_MARKER)
@@ -263,13 +268,35 @@ def make_handler_class(api: AutomationApi, base_handler: Type) -> Type:
                 self.wfile.write(payload)
             return True
 
+        def _root_redirect(self) -> bool:
+            """The platform's own domain must open the product, not a 404.
+
+            Hostim hands every app a bare domain and a health path; operators
+            type the domain and expect the desktop. `/` therefore bounces to
+            the noVNC viewer (which carries the sidebar), while `/info` and
+            the API keep working exactly as before.
+            """
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path not in ("", "/"):
+                return False
+            self.send_response(302)
+            self.send_header("Location", "/vnc.html")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return True
+
         def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler naming
             if self._api_request("GET"):
+                return
+            if self._root_redirect():
                 return
             super().do_GET()
 
         def do_HEAD(self):  # noqa: N802
             if self._api_request("HEAD"):
+                return
+            if self._root_redirect():
                 return
             super().do_HEAD()
 

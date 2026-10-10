@@ -6,28 +6,27 @@
  */
 
 #mas-root {
-  --mas-bg: rgba(24, 27, 32, 0.94);
-  --mas-bg-solid: #181b20;
-  --mas-line: #343a44;
-  --mas-text: #e6e8ec;
-  --mas-dim: #9aa3af;
-  --mas-accent: #3d8bfd;
-  --mas-ok: #39c07a;
-  --mas-warn: #e0a63c;
-  --mas-bad: #e5484d;
+  --mas-bg: rgba(255, 255, 255, 0.97);
+  --mas-bg-solid: #ffffff;
+  --mas-line: #d8e0e8;
+  --mas-text: #243244;
+  --mas-dim: #617083;
+  --mas-accent: #0f766e;
+  --mas-ok: #16a34a;
+  --mas-warn: #b45309;
+  --mas-bad: #dc2626;
   --mas-width: 344px;
   all: initial;
   position: static;
   /* `all: initial` above resets this to normal, so it has to be declared after
-   * it. Without it Chrome paints the opened <select> popup and the scrollbars
-   * with the light system theme, which is what made the dropdowns white while
-   * the closed control was dark. */
-  color-scheme: dark;
+   * it. With the light theme it keeps the opened <select> popup, the scrollbars
+   * and form widgets in the same light family as the closed control. */
+  color-scheme: light;
 }
 
 #mas-root, #mas-root * {
   box-sizing: border-box;
-  font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Vazirmatn",
+  font-family: "Vazirmatn", -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
     Tahoma, sans-serif;
   font-size: 13px;
   color: var(--mas-text);
@@ -58,7 +57,7 @@
   line-height: 1;
 }
 
-#mas-root .mas-toggle:hover { background: #22262d; }
+#mas-root .mas-toggle:hover { background: #e2e8f0; }
 
 /* ----------------------------------------------------------------- panel */
 
@@ -75,7 +74,7 @@
   background: var(--mas-bg);
   border-left: 1px solid var(--mas-line);
   backdrop-filter: blur(3px);
-  box-shadow: -6px 0 24px rgba(0, 0, 0, 0.35);
+  box-shadow: -6px 0 24px rgba(15, 23, 42, 0.18);
 }
 
 #mas-root .mas-head {
@@ -84,13 +83,13 @@
   gap: 8px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--mas-line);
-  background: #1d2128;
+  background: #f1f5f9;
 }
 
 #mas-root .mas-head b { flex: 1; font-size: 13px; letter-spacing: 0.2px; }
 
 #mas-root .mas-head select {
-  background: #22262d;
+  background: #e2e8f0;
   border: 1px solid var(--mas-line);
   border-radius: 4px;
   color: var(--mas-text);
@@ -125,7 +124,7 @@
 #mas-root .mas-tabs {
   display: flex;
   border-bottom: 1px solid var(--mas-line);
-  background: #1a1e24;
+  background: #f1f5f9;
 }
 
 #mas-root .mas-tab {
@@ -173,7 +172,7 @@
 
 #mas-root .mas-foot {
   border-top: 1px solid var(--mas-line);
-  background: #1d2128;
+  background: #f1f5f9;
   padding: 8px 10px;
 }
 
@@ -191,13 +190,13 @@
 
 #mas-root .mas-btn:hover:not(:disabled) { background: #2f3540; }
 #mas-root .mas-btn:disabled { opacity: 0.45; cursor: default; }
-#mas-root .mas-btn.mas-primary { background: #1f5fc4; border-color: #2b6fdd; }
-#mas-root .mas-btn.mas-primary:hover:not(:disabled) { background: #2b6fdd; }
-#mas-root .mas-btn.mas-danger { background: #a12b2f; border-color: #c33a3f; }
+#mas-root .mas-btn.mas-primary { background: #115e59; border-color: #0f766e; }
+#mas-root .mas-btn.mas-primary:hover:not(:disabled) { background: #0f766e; }
+#mas-root .mas-btn.mas-danger { background: #a12b2f; border-color: #b42323; }
 #mas-root .mas-btn.mas-mini { padding: 1px 6px; font-size: 11px; }
 
 #mas-root .mas-input {
-  background: #12151a;
+  background: #ffffff;
   border: 1px solid var(--mas-line);
   border-radius: 4px;
   color: var(--mas-text);
@@ -223,7 +222,7 @@
 }
 
 #mas-root select.mas-input option:checked {
-  background: #1f5fc4;
+  background: #115e59;
   color: #fff;
 }
 
@@ -281,7 +280,7 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  background: #1e222a;
+  background: #f1f5f9;
   border: 1px solid var(--mas-line);
   border-radius: 5px;
   padding: 3px 5px;
@@ -290,7 +289,7 @@
 
 #mas-root .mas-step.is-current { border-color: var(--mas-accent); box-shadow: 0 0 0 1px var(--mas-accent); }
 #mas-root .mas-step.is-over { border-color: var(--mas-ok); }
-#mas-root .mas-grip { color: #5b636f; cursor: grab; }
+#mas-root .mas-grip { color: #93a3b4; cursor: grab; }
 
 #mas-root .mas-step-label {
   background: transparent;
@@ -311,7 +310,7 @@
 #mas-root .mas-type {
   color: var(--mas-dim);
   font-size: 10.5px;
-  background: #12151a;
+  background: #ffffff;
   border-radius: 3px;
   padding: 1px 4px;
 }
@@ -355,7 +354,7 @@
   position: fixed;
   z-index: 99999;
   cursor: crosshair;
-  background: rgba(61, 139, 253, 0.06);
+  background: rgba(15, 118, 110, 0.05);
   outline: 2px dashed rgba(61, 139, 253, 0.75);
   outline-offset: -2px;
 }
@@ -371,7 +370,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(15, 23, 42, 0.35);
 }
 
 #mas-root .mas-confirm-box {
@@ -406,7 +405,7 @@
   max-height: 48vh;
   overflow: auto;
   pointer-events: auto;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.18);
 }
 body:not(.mas-standalone) #mas-root .mas-confirm.mas-confirm-handoff {
   right: calc(var(--mas-width) + 12px);
@@ -433,7 +432,7 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
 #mas-root .mas-page {
   display: flex;
   gap: 8px;
-  background: #1e222a;
+  background: #f1f5f9;
   border: 1px solid var(--mas-line);
   border-radius: 5px;
   padding: 5px;
@@ -445,7 +444,7 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
   width: 74px;
   height: 44px;
   flex: none;
-  background: #12151a;
+  background: #ffffff;
   border-radius: 3px;
   overflow: hidden;
 }
@@ -460,10 +459,10 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
   vertical-align: top;
 }
 #mas-root .mas-table th { color: var(--mas-dim); font-weight: 500; }
-#mas-root .mas-table code { font-size: 10.5px; color: #9fd0ff; word-break: break-all; }
+#mas-root .mas-table code { font-size: 10.5px; color: #0468a8; word-break: break-all; }
 
 #mas-root .mas-pre {
-  background: #12151a;
+  background: #ffffff;
   border: 1px solid var(--mas-line);
   border-radius: 4px;
   padding: 6px;
@@ -482,11 +481,11 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
   display: flex;
   gap: 6px;
   padding: 1px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.120);
   word-break: break-word;
 }
 
-#mas-root .mas-log-t { color: #5b636f; flex: none; }
+#mas-root .mas-log-t { color: #93a3b4; flex: none; }
 #mas-root .mas-log-ok { color: var(--mas-ok); }
 #mas-root .mas-log-step { color: var(--mas-accent); }
 #mas-root .mas-log-warn { color: var(--mas-warn); }
@@ -517,7 +516,7 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
   border-radius: 5px;
   padding: 6px 10px;
   max-width: 300px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.16);
 }
 
 #mas-root .mas-toast-ok { border-left-color: var(--mas-ok); }
@@ -538,19 +537,25 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
  * ------------------------------------------------------------------ */
 body.mas-standalone {
   margin: 0;
-  background: #0b0d11;
-  color: #e6e8ec;
-  color-scheme: dark;
-  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: #eef2f6;
+  color: #243244;
+  color-scheme: light;
+  font: 13px/1.6 "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
 }
 
 body.mas-standalone .mas-page-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: 10px;
   padding: 14px 20px;
-  border-bottom: 1px solid #343a44;
+  border-bottom: 1px solid #d8e0e8;
 }
 
 body.mas-standalone .mas-page-head h1 {
@@ -564,7 +569,15 @@ body.mas-standalone .mas-page-head .mas-sub {
   font-size: 12px;
 }
 
-/* Not an overlay any more: no fixed positioning, no right rail, full width. */
+/* Not an overlay any more: no fixed positioning, no right rail, full width.
+   The page is a flex column (head / scrolling body / footer), which is what
+   guarantees the footer never paints over the last row of content. */
+body.mas-standalone #mas-root {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 body.mas-standalone #mas-root .mas-panel {
   position: static;
   top: auto;
@@ -572,11 +585,27 @@ body.mas-standalone #mas-root .mas-panel {
   bottom: auto;
   width: auto;
   max-width: none;
-  min-height: calc(100vh - 57px);
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   border-left: 0;
   box-shadow: none;
   backdrop-filter: none;
-  background: #0b0d11;
+  background: #eef2f6;
+}
+body.mas-standalone #mas-root .mas-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+body.mas-standalone #mas-root .mas-foot {
+  position: sticky;
+  bottom: 0;
+  flex: 0 0 auto;
+  background: var(--mas-bg-solid);
+  border-top: 1px solid var(--mas-line);
+  box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.08);
 }
 
 body.mas-standalone #mas-root .mas-body,
@@ -604,18 +633,18 @@ body.mas-standalone .mas-vnclink { text-decoration: none; }
   font-variant-numeric: tabular-nums;
   text-align: center;
   white-space: nowrap;
-  color: #8b949e;
-  background: rgba(255, 255, 255, 0.04);
+  color: #617083;
+  background: rgba(15, 23, 42, 0.120);
 }
 
 #mas-root .mas-state.is-pending { color: #5c6670; }
-#mas-root .mas-state.is-ok { color: #4ade80; background: rgba(74, 222, 128, 0.12); }
-#mas-root .mas-state.is-error { color: #f87171; background: rgba(248, 113, 113, 0.14); }
+#mas-root .mas-state.is-ok { color: #16a34a; background: rgba(74, 222, 128, 0.12); }
+#mas-root .mas-state.is-error { color: #dc2626; background: rgba(248, 113, 113, 0.14); }
 #mas-root .mas-state.is-skipped { color: #94a3b8; }
-#mas-root .mas-state.is-ignored { color: #fbbf24; background: rgba(251, 191, 36, 0.12); }
+#mas-root .mas-state.is-ignored { color: #b45309; background: rgba(251, 191, 36, 0.12); }
 
 #mas-root .mas-state.is-running {
-  color: #7dd3fc;
+  color: #0284c7;
   background: rgba(125, 211, 252, 0.14);
   animation: mas-pulse 1.4s ease-in-out infinite;
 }
@@ -628,9 +657,9 @@ body.mas-standalone .mas-vnclink { text-decoration: none; }
 #mas-root .mas-runpanel {
   padding: 8px 10px;
   margin-bottom: 6px;
-  border: 1px solid #343a44;
+  border: 1px solid #d8e0e8;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.120);
 }
 
 #mas-root .mas-runpanel[hidden] { display: none !important; }
@@ -646,12 +675,12 @@ body.mas-standalone .mas-vnclink { text-decoration: none; }
   padding: 1px 8px;
   border-radius: 999px;
   font-size: 11px;
-  background: #343a44;
-  color: #e6e8ec;
+  background: #d8e0e8;
+  color: #243244;
 }
 
 #mas-root .mas-pill-running { background: #1d4ed8; color: #fff; }
-#mas-root .mas-pill-paused, #mas-root .mas-pill-waiting { background: #a16207; color: #fff; }
+#mas-root .mas-pill-paused, #mas-root .mas-pill-waiting { background: #92400e; color: #fff; }
 #mas-root .mas-pill-done { background: #15803d; color: #fff; }
 #mas-root .mas-pill-error { background: #b91c1c; color: #fff; }
 #mas-root .mas-pill-stopped { background: #4b5563; color: #fff; }
@@ -659,48 +688,48 @@ body.mas-standalone .mas-vnclink { text-decoration: none; }
 #mas-root .mas-clock {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  color: #7dd3fc;
+  color: #0284c7;
 }
 
-#mas-root .mas-count { font-variant-numeric: tabular-nums; color: #8b949e; font-size: 11px; }
+#mas-root .mas-count { font-variant-numeric: tabular-nums; color: #617083; font-size: 11px; }
 
 #mas-root .mas-bar {
   height: 5px;
   margin: 7px 0;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(15, 23, 42, 0.120);
   overflow: hidden;
 }
 
 #mas-root .mas-bar-fill {
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, #38bdf8, #4ade80);
+  background: linear-gradient(90deg, #0284c7, #16a34a);
   transition: width 0.35s ease;
 }
 
-#mas-root .mas-bar-fill.is-error { background: linear-gradient(90deg, #f87171, #ef4444); }
+#mas-root .mas-bar-fill.is-error { background: linear-gradient(90deg, #dc2626, #dc2626); }
 
 #mas-root .mas-runpanel-now {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: #cbd5e1;
+  color: #445468;
 }
 
 #mas-root .mas-now-timer {
   font-variant-numeric: tabular-nums;
-  color: #7dd3fc;
+  color: #0284c7;
 }
 
 #mas-root .mas-runpanel-error {
   margin-top: 6px;
   padding: 5px 7px;
-  border-left: 3px solid #f87171;
+  border-left: 3px solid #dc2626;
   border-radius: 3px;
   background: rgba(248, 113, 113, 0.1);
-  color: #fecaca;
+  color: #7f1d1d;
   font-size: 11.5px;
   word-break: break-word;
 }
@@ -721,8 +750,8 @@ body.mas-standalone #mas-root .mas-tabs {
   z-index: 30;
   gap: 6px;
   padding: 8px 0;
-  background: #0b0d11;
-  border-bottom: 1px solid #343a44;
+  background: #eef2f6;
+  border-bottom: 1px solid #d8e0e8;
 }
 
 body.mas-standalone #mas-root .mas-tab {
@@ -760,12 +789,12 @@ body.mas-standalone #mas-root .mas-step {
 }
 
 body.mas-standalone #mas-root .mas-step:hover {
-  border-color: #343a44;
-  background: rgba(255, 255, 255, 0.03);
+  border-color: #d8e0e8;
+  background: rgba(15, 23, 42, 0.120);
 }
 
 body.mas-standalone #mas-root .mas-step.is-current {
-  border-color: #38bdf8;
+  border-color: #0284c7;
   background: rgba(56, 189, 248, 0.09);
 }
 
@@ -784,7 +813,7 @@ body.mas-standalone #mas-root .mas-grid {
 body.mas-standalone #mas-root .mas-settings {
   margin-top: 16px;
   padding: 12px 14px;
-  border: 1px solid #343a44;
+  border: 1px solid #d8e0e8;
   border-radius: 9px;
 }
 
@@ -820,7 +849,7 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
 #mas-root .mas-ai-notes {
   margin: 10px 0;
   padding: 10px 12px;
-  border-left: 3px solid #38bdf8;
+  border-left: 3px solid #0284c7;
   border-radius: 6px;
   background: rgba(56, 189, 248, 0.08);
 }
@@ -832,7 +861,7 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
   font: inherit;
   font-size: 12px;
   line-height: 1.7;
-  color: #cbd5e1;
+  color: #445468;
 }
 
 /* Saved flows. */
@@ -845,9 +874,9 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  border: 1px solid #343a44;
+  border: 1px solid #d8e0e8;
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.120);
 }
 
 #mas-root .mas-lib-main {
@@ -858,8 +887,8 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
   flex: 1 1 auto;
 }
 
-#mas-root .mas-lib-meta { font-size: 11px; color: #8b949e; }
-#mas-root .mas-lib-desc { font-size: 11.5px; color: #cbd5e1; opacity: 0.85; }
+#mas-root .mas-lib-meta { font-size: 11px; color: #617083; }
+#mas-root .mas-lib-desc { font-size: 11.5px; color: #445468; opacity: 0.85; }
 #mas-root .mas-lib-actions { display: flex; gap: 4px; flex: 0 0 auto; }
 
 body.mas-standalone #mas-root .mas-lib-row { padding: 12px 14px; }
@@ -875,9 +904,9 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
   align-items: center;
   gap: 10px;
   padding: 8px;
-  border: 1px solid #343a44;
+  border: 1px solid #d8e0e8;
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.120);
 }
 
 #mas-root .mas-shot-thumb {
@@ -885,7 +914,7 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
   display: block;
   border-radius: 6px;
   overflow: hidden;
-  border: 1px solid #343a44;
+  border: 1px solid #d8e0e8;
 }
 
 #mas-root .mas-shot-thumb img {
@@ -902,11 +931,11 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
   flex-direction: column;
   gap: 2px;
   font-size: 11.5px;
-  color: #8b949e;
+  color: #617083;
 }
 
 #mas-root .mas-shot-meta b {
-  color: #e6e8ec;
+  color: #243244;
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -917,20 +946,20 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
 #mas-root .mas-texts { display: flex; flex-direction: column; gap: 6px; }
 
 #mas-root .mas-text {
-  border: 1px solid #343a44;
+  border: 1px solid #d8e0e8;
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.120);
   padding: 8px 10px;
 }
 
 #mas-root .mas-text summary {
   cursor: pointer;
   font-size: 12px;
-  color: #e6e8ec;
+  color: #243244;
   font-variant-numeric: tabular-nums;
 }
 
-#mas-root .mas-text-src { color: #8b949e; font-weight: 400; }
+#mas-root .mas-text-src { color: #617083; font-weight: 400; }
 
 #mas-root .mas-text pre {
   margin: 8px 0;
@@ -940,7 +969,7 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
   word-break: break-word;
   font-size: 11.5px;
   line-height: 1.7;
-  color: #cbd5e1;
+  color: #445468;
 }
 
 body.mas-standalone #mas-root .mas-shots {
@@ -968,7 +997,7 @@ body.mas-standalone #mas-root .mas-text pre { max-height: 420px; }
   border: 1px solid var(--mas-line);
   border-radius: 6px;
   padding: 8px;
-  background: rgba(255, 255, 255, 0.02);
+  background: rgba(15, 23, 42, 0.120);
   display: flex;
   flex-direction: column;
   gap: 6px;
@@ -1016,7 +1045,7 @@ body.mas-standalone #mas-root .mas-text pre { max-height: 420px; }
 }
 
 .mas-table td {
-  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.120);
   padding: 3px 4px;
   vertical-align: top;
   word-break: break-word;
@@ -1064,22 +1093,24 @@ body.mas-standalone #mas-root .mas-text pre { max-height: 420px; }
 
 #mas-root .mas-foot {
   z-index: 3;
-  box-shadow: 0 -6px 18px rgba(0, 0, 0, 0.35);
+  box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.10);
 }
 
+/* Sticky, never fixed: the page is a flex column (head / scrolling body /
+   footer), so the footer owns its row and no content can slip underneath it.
+   The 2026-10 fixed-footer experiment is exactly what caused rows seven and
+   friends to hide behind the run bar. */
 body.mas-standalone #mas-root .mas-foot {
-  position: fixed;
-  left: 0;
-  right: 0;
+  position: sticky;
   bottom: 0;
   width: auto;
   max-width: none;
-  background: rgba(18, 21, 26, 0.97);
-  border-top: 1px solid #343a44;
+  background: rgba(255, 255, 255, 0.97);
+  border-top: 1px solid #d8e0e8;
   backdrop-filter: blur(4px);
 }
 
-body.mas-standalone #mas-root .mas-body { padding-bottom: 104px; }
+body.mas-standalone #mas-root .mas-body { padding-bottom: 12px; }
 
 /* ------------------------------------------------------------------ *
  * Chat tab
@@ -1105,7 +1136,7 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
   padding: 7px 10px;
   border: 1px solid var(--mas-line);
   border-radius: 10px;
-  background: #1d2128;
+  background: #f1f5f9;
 }
 
 #mas-root .mas-bubble.is-mine {
@@ -1168,7 +1199,7 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
 #mas-root .mas-op {
   border: 1px solid var(--mas-line);
   border-radius: 8px;
-  background: #1a1e24;
+  background: #f1f5f9;
   padding: 8px 10px;
   display: flex;
   flex-direction: column;
@@ -1228,7 +1259,7 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
   word-break: break-all;
   font-family: ui-monospace, monospace;
   font-size: 11px;
-  background: #14181d;
+  background: #f8fafc;
   border: 1px solid var(--mas-line);
   border-radius: 4px;
   padding: 2px 5px;
@@ -1245,7 +1276,7 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
   padding: 8px;
   border: 1px dashed var(--mas-line);
   border-radius: 8px;
-  background: #14181d;
+  background: #f8fafc;
 }
 
 #mas-root .mas-cursor-dot {
@@ -1265,7 +1296,7 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
   flex-wrap: wrap;
   border: 1px solid var(--mas-line);
   border-radius: 8px;
-  background: #14181d;
+  background: #f8fafc;
   padding: 8px;
   margin-bottom: 8px;
 }
@@ -1300,11 +1331,11 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
 #mas-root {
   --mas-radius: 14px;
   --mas-radius-sm: 9px;
-  --mas-shadow: 0 6px 18px rgba(0, 0, 0, 0.28);
-  --mas-shadow-soft: 0 2px 8px rgba(0, 0, 0, 0.22);
-  --mas-accent-2: #22c1a8;
-  --mas-surface: #1f242c;
-  --mas-surface-2: #262c36;
+  --mas-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+  --mas-shadow-soft: 0 2px 8px rgba(15, 23, 42, 0.08);
+  --mas-accent-2: #14b8a6;
+  --mas-surface: #ffffff;
+  --mas-surface-2: #eef2f6;
   --mas-gap: 10px;
 }
 
@@ -1317,7 +1348,7 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
   overflow-y: hidden;
   flex-wrap: nowrap;
   border-bottom: 1px solid var(--mas-line);
-  background: linear-gradient(180deg, rgba(61, 139, 253, 0.10), transparent);
+  background: linear-gradient(180deg, rgba(15, 118, 110, 0.07), transparent);
   scrollbar-width: thin;
 }
 #mas-root .mas-tab {
@@ -1335,7 +1366,7 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
 #mas-root .mas-tab.is-active {
   background: linear-gradient(135deg, var(--mas-accent), var(--mas-accent-2));
   border-color: transparent;
-  color: #08131f;
+  color: #ffffff;
   font-weight: 700;
 }
 
@@ -1383,8 +1414,8 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
   font-size: 11px;
   white-space: nowrap;
 }
-#mas-root .mas-chip-ok { border-color: rgba(57, 192, 122, 0.55); color: #8ee6b6; }
-#mas-root .mas-chip-bad { border-color: rgba(229, 72, 77, 0.55); color: #ff9a9e; }
+#mas-root .mas-chip-ok { border-color: rgba(22, 163, 74, 0.45); color: #15803d; }
+#mas-root .mas-chip-bad { border-color: rgba(220, 38, 38, 0.45); color: #b42323; }
 
 /* -- buttons: one height, clear hierarchy ---------------------------- */
 #mas-root .mas-btn {
@@ -1401,26 +1432,26 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
 #mas-root .mas-btn.mas-primary {
   background: linear-gradient(135deg, var(--mas-accent), var(--mas-accent-2));
   border-color: transparent;
-  color: #08131f;
+  color: #ffffff;
   font-weight: 700;
 }
 #mas-root .mas-btn.mas-danger {
-  background: rgba(229, 72, 77, 0.16);
-  border-color: rgba(229, 72, 77, 0.5);
-  color: #ffb4b7;
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.45);
+  color: #b42323;
 }
 
 /* -- inputs and fields ------------------------------------------------ */
 #mas-root .mas-input {
   border: 1px solid var(--mas-line);
   border-radius: var(--mas-radius-sm);
-  background: #14181e;
+  background: #f8fafc;
   color: var(--mas-text);
   padding: 7px 9px;
   font-size: 12px;
 }
 #mas-root .mas-input:focus {
-  outline: 2px solid rgba(61, 139, 253, 0.45);
+  outline: 2px solid rgba(15, 118, 110, 0.30);
   outline-offset: 1px;
   border-color: var(--mas-accent);
 }
@@ -1456,17 +1487,17 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
 }
 #mas-root .mas-table td {
   padding: 7px 8px;
-  border-bottom: 1px solid rgba(52, 58, 68, 0.55);
+  border-bottom: 1px solid rgba(216, 224, 232, 0.9);
   vertical-align: top;
 }
-#mas-root .mas-table tbody tr:nth-child(even) td { background: rgba(255, 255, 255, 0.025); }
+#mas-root .mas-table tbody tr:nth-child(even) td { background: rgba(15, 23, 42, 0.03); }
 #mas-root .mas-table tbody tr:last-child td { border-bottom: none; }
 
 /* -- collapsible help, the «📖» rows the telegram pane leads with ----- */
 #mas-root .mas-help {
   border: 1px dashed var(--mas-line);
   border-radius: var(--mas-radius-sm);
-  background: rgba(61, 139, 253, 0.06);
+  background: rgba(15, 118, 110, 0.05);
   padding: 7px 10px;
   margin: 6px 0;
 }
@@ -1490,8 +1521,8 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
   background: var(--mas-surface-2);
   border: 1px solid var(--mas-line);
 }
-#mas-root .mas-diagnose-step.is-ok { border-color: rgba(57, 192, 122, 0.45); }
-#mas-root .mas-diagnose-step.is-bad { border-color: rgba(229, 72, 77, 0.55); }
+#mas-root .mas-diagnose-step.is-ok { border-color: rgba(22, 163, 74, 0.40); }
+#mas-root .mas-diagnose-step.is-bad { border-color: rgba(220, 38, 38, 0.45); }
 #mas-root .mas-diagnose-mark { flex: 0 0 auto; }
 #mas-root .mas-diagnose-step .mas-hint { flex: 1 1 auto; }
 
@@ -1507,5 +1538,5 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
 
 /* -- the telegram status card gets a slightly lifted surface --------- */
 #mas-root .mas-tg-status {
-  background: linear-gradient(160deg, rgba(34, 193, 168, 0.10), var(--mas-surface) 55%);
+  background: linear-gradient(160deg, rgba(20, 184, 166, 0.10), var(--mas-surface) 55%);
 }

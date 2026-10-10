@@ -14,14 +14,14 @@ toolbar.color: #10141a
 toolbar.colorTo: #1d2733
 toolbar.borderWidth: 1
 toolbar.borderColor: #2c3a4a
-toolbar.font: Noto Sans-11:bold
+toolbar.font: MasFont-11:bold
 toolbar.justify: center
 toolbar.clock: parentrelative
 toolbar.clock.color: #dfe7f0
-toolbar.clock.font: Noto Sans-11:bold
+toolbar.clock.font: MasFont-11:bold
 toolbar.label: parentrelative
 toolbar.label.color: #9fd0ff
-toolbar.label.font: Noto Sans-11:bold
+toolbar.label.font: MasFont-11:bold
 toolbar.workspaceLabel: parentrelative
 toolbar.workspaceLabel.color: #7ee6d2
 toolbar.button: parentrelative
@@ -35,10 +35,10 @@ toolbar.iconbar.empty: parentrelative
 toolbar.iconbar.focused: gradient vertical
 toolbar.iconbar.focused.color: #1f6feb
 toolbar.iconbar.focused.colorTo: #22c1a8
-toolbar.iconbar.focused.font: Noto Sans-11:bold
+toolbar.iconbar.focused.font: MasFont-11:bold
 toolbar.iconbar.focused.textColor: #06111c
 toolbar.iconbar.unfocused: parentrelative
-toolbar.iconbar.unfocused.font: Noto Sans-11
+toolbar.iconbar.unfocused.font: MasFont-11
 toolbar.iconbar.unfocused.textColor: #8d99a7
 toolbar.systray: parentrelative
 
@@ -47,7 +47,7 @@ window.title.height: 26
 window.bevelWidth: 4
 window.borderWidth: 1
 window.borderColor: #2c3a4a
-window.font: Noto Sans-11
+window.font: MasFont-11
 window.justify: left
 window.label.height: 26
 window.roundCorners: 6px
@@ -77,11 +77,11 @@ menu.bevelWidth: 6
 menu.borderWidth: 1
 menu.borderColor: #2c3a4a
 menu.borderWidth: 1
-menu.font: Noto Sans-12
+menu.font: MasFont-12
 menu.title: gradient vertical
 menu.title.color: #1f6feb
 menu.title.colorTo: #22c1a8
-menu.title.font: Noto Sans-12:bold
+menu.title.font: MasFont-12:bold
 menu.title.textColor: #06111c
 menu.title.justify: center
 menu.frame: flat solid
@@ -110,7 +110,7 @@ background.colorTo: #123c3a
 tab.bevelWidth: 3
 tab.borderWidth: 1
 tab.borderColor: #2c3a4a
-tab.font: Noto Sans-11
+tab.font: MasFont-11
 tab.focus: gradient vertical
 tab.focus.color: #1f6feb
 tab.focus.colorTo: #16324a

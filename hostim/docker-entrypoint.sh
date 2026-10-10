@@ -49,6 +49,9 @@ XKB_OPTIONS=${XKB_OPTIONS:-grp:alt_shift_toggle}
 # A fresh Xvfb session starts with NumLock off, so the keypad sends arrows
 # instead of digits. "on" (default) enables it; anything else leaves it alone.
 NUMLOCK=${NUMLOCK:-on}
+# "off" drops the Persian group and leaves a plain English desktop, for anyone
+# who finds the Alt+Shift toggle more annoying than useful.
+PERSIAN_KEYBOARD=${PERSIAN_KEYBOARD:-on}
 # The coworker agent's own browser. It runs on a SECOND display and a SECOND
 # Chrome profile so it can never fight the automation for the one mouse and
 # keyboard on :1, and so `wmctrl -a "Google Chrome"` cannot pick the wrong
@@ -287,6 +290,18 @@ prepare_desktop() {
   mkdir -p "$fb_dir" 2>/dev/null || true
   if [[ -f "$APP_DIR/hostim/fluxbox-style" ]]; then
     cp -f "$APP_DIR/hostim/fluxbox-style" "$fb_dir/mas-style" 2>/dev/null || true
+    # The style ships with a MasFont placeholder: fluxbox draws its menus and
+    # toolbar with Xft, and a family without Persian glyphs would show squares
+    # exactly where the Persian labels are. Pick whatever the image actually
+    # has that covers fa, and substitute it in.
+    local mas_font=""
+    if command -v fc-list >/dev/null 2>&1; then
+      mas_font=$(fc-list :lang=fa family 2>/dev/null | sort -u | head -1)
+      mas_font=${mas_font%%,*}
+    fi
+    mas_font=${mas_font:-DejaVu Sans}
+    sed -i "s/MasFont/${mas_font//\//\\/}/g" "$fb_dir/mas-style" 2>/dev/null || true
+    log "desktop font: $mas_font"
   fi
   if [[ -f "$APP_DIR/hostim/fluxbox-menu" ]]; then
     cp -f "$APP_DIR/hostim/fluxbox-menu" "$fb_dir/mas-menu" 2>/dev/null || true
@@ -367,14 +382,24 @@ configure_keyboard() {
   #
   # Both are best-effort on purpose: a missing tool costs one convenience and
   # must never stop the container from serving the desktop.
-  local args=(-model "$XKB_MODEL" -layout "$XKB_LAYOUTS")
-  if [[ -n "$XKB_OPTIONS" ]]; then
+  local layouts="$XKB_LAYOUTS"
+  if [[ "$PERSIAN_KEYBOARD" == "off" ]]; then
+    layouts="us"
+  fi
+  local args=(-model "$XKB_MODEL" -layout "$layouts")
+  if [[ -n "$XKB_OPTIONS" && "$layouts" == *","* ]]; then
     args+=(-option "$XKB_OPTIONS")
   fi
 
   if command -v setxkbmap >/dev/null 2>&1; then
     if setxkbmap "${args[@]}" 2>>"$LOG_DIR/keyboard.log"; then
-      log "keyboard layouts: $XKB_LAYOUTS (toggle: ${XKB_OPTIONS:-none})"
+      log "keyboard layouts: $layouts (toggle: ${XKB_OPTIONS:-none})"
+      # The agent's own Chrome lives on a second display; it needs the same
+      # layout or Persian pasted by the agent would turn into gibberish there.
+      if [[ -n "${AI_DISPLAY:-}" && "$AI_DISPLAY" != "${DISPLAY:-}" ]]; then
+        DISPLAY="$AI_DISPLAY" setxkbmap "${args[@]}" \
+          2>>"$LOG_DIR/keyboard.log" || true
+      fi
     else
       log "WARN: setxkbmap failed; Persian typing may not work (see $LOG_DIR/keyboard.log)"
     fi

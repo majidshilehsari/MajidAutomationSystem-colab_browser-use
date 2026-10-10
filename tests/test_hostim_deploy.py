@@ -808,6 +808,27 @@ class TestDesktopUsability(unittest.TestCase):
                       "a missing Persian font must fail the build, not ship boxes")
         self.assertIn("no Persian-capable font", self.font_layer)
 
+    def test_persian_keyboard_can_be_switched_off_wholesale(self):
+        # The operator's fallback: one knob turns the desktop plain-English.
+        self.assertIn("PERSIAN_KEYBOARD=${PERSIAN_KEYBOARD:-on}", self.entrypoint)
+        self.assertIn('if [[ "$PERSIAN_KEYBOARD" == "off" ]]; then', self.keyboard)
+        self.assertIn('layouts="us"', self.keyboard)
+        # and the toggle option is only sent when a group actually exists
+        self.assertIn('"$layouts" == *","*', self.keyboard)
+
+    def test_keyboard_is_configured_on_the_agent_display_too(self):
+        self.assertIn('DISPLAY="$AI_DISPLAY" setxkbmap', self.keyboard)
+
+    def test_desktop_font_is_chosen_by_persian_coverage_not_hardcoded(self):
+        # fluxbox draws menus with Xft; a family without fa glyphs shows boxes.
+        # The style ships a MasFont placeholder the entrypoint substitutes.
+        self.assertIn("fc-list :lang=fa family", self.entrypoint)
+        self.assertIn("s/MasFont/", self.entrypoint)
+        style = read(os.path.join(os.path.dirname(ENTRYPOINT), "fluxbox-style"))
+        self.assertIn("MasFont-", style)
+        self.assertNotIn("Noto Sans-", style,
+                         "a hardcoded family would ignore what the image has")
+
     def test_font_install_does_not_bet_on_a_single_package_name(self):
         for candidate in ("fonts-noto-core", "fonts-freefont-ttf", "fonts-kacst"):
             self.assertIn(candidate, self.font_layer)

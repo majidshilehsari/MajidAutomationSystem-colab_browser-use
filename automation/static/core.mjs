@@ -729,6 +729,12 @@ export const STRINGS = {
     brDownloads: 'دانلودها', brColFile: 'فایل',
     brClosed: '🔒 تب‌های بسته‌شدهٔ اخیر', brClosedNone: 'موردی پیدا نشد.',
     brClosedHint: 'از تفریقِ «سابقهٔ ۲۴ ساعت اخیر» منهای «تب‌های باز» به دست می‌آید؛ فایل session باینری کروم خوانده نمی‌شود، پس فهرستِ دقیقِ «recently closed» خودِ کروم نیست.',
+    agentSubPrompt: 'پرامپت',
+    chatToolsOpen: 'رفتن به زیرتب «پرامپت» در ایجنت همکار',
+    tgSubStatus: 'وضعیت و تست', tgSubSettings: 'تنظیمات', tgSubTargets: 'مقصدها',
+    tgSubMailbox: 'لیست پیام‌ها', tgSubPrograms: 'برنامه‌ها', tgSubWrite: 'نوشتن و فرستادن',
+    tgTargetsHint: 'هر مقصد را می‌توانی همین‌جا ویرایش کنی: شناسه، عنوان و نوع. بعد «ذخیرهٔ مقصدها» را بزن تا روی سرور بنشیند.',
+    tgTargetAdd: 'افزودن مقصد دستی', tgSaveTargets: 'ذخیرهٔ مقصدها',
   },
   en: {
     title: 'Automation',
@@ -1052,6 +1058,12 @@ export const STRINGS = {
     brDownloads: 'downloads', brColFile: 'file',
     brClosed: 'recently closed tabs', brClosedNone: 'none found.',
     brClosedHint: 'derived from the last 24 hours of history minus the open tabs; Chrome\'s binary session file is not parsed, so this is not its exact "recently closed" list.',
+    agentSubPrompt: 'Prompt',
+    chatToolsOpen: 'open the Prompt sub-tab in the coworker agent',
+    tgSubStatus: 'status & test', tgSubSettings: 'settings', tgSubTargets: 'targets',
+    tgSubMailbox: 'message list', tgSubPrograms: 'programs', tgSubWrite: 'write & send',
+    tgTargetsHint: 'every target is editable right here: id, title and type. Press "save targets" to persist them on the server.',
+    tgTargetAdd: 'add a target by hand', tgSaveTargets: 'save targets',
   },
 };
 

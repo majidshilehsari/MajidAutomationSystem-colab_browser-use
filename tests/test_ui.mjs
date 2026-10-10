@@ -602,12 +602,12 @@ test('a wrong token says so in the banner, not in a toast', async () => {
   }
 });
 
-test('the panel declares a dark colour scheme so dropdowns do not turn white', async () => {
+test('the panel declares a light colour scheme so widgets stay consistent', async () => {
   const page = await mount();
   try {
     const root = page.doc.getElementById('mas-root');
-    assert.equal(page.window.getComputedStyle(root).colorScheme, 'dark',
-      'without color-scheme:dark Chrome paints the opened <select> popup white');
+    assert.equal(page.window.getComputedStyle(root).colorScheme, 'light',
+      'without color-scheme:light Chrome may mix dark popups into the light panel');
   } finally {
     await page.cleanup();
   }
@@ -624,8 +624,8 @@ test('step list shows no numbering and options are styled dark', async () => {
     assert.equal(page.window.getComputedStyle(list).listStyleType, 'none');
     const selectBg = page.window.getComputedStyle(
       page.doc.querySelector('select.mas-input')).backgroundColor;
-    assert.ok(selectBg.startsWith('rgb(20, 24, 30)'),
-      `the select must not be white, got ${selectBg}`);
+    assert.ok(selectBg.startsWith('rgb(248, 250, 252)'),
+      `the select must carry the light surface, got ${selectBg}`);
   } finally {
     await page.cleanup();
   }
@@ -771,10 +771,7 @@ test('the agent assistant sends the user request and an absolute origin', async 
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
 
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const agentTab = tab(page, 'chat');
-    agentTab.dispatchEvent(new page.window.Event('click'));
-    await page.wait(10);
+    await openPrompt(page);
 
     const box = page.doc.getElementById('mas-ai-request');
     assert.ok(box, 'the request box is missing');
@@ -783,11 +780,11 @@ test('the agent assistant sends the user request and an absolute origin', async 
 
     // Switching tabs and back must not lose what the human typed.
     clickTab(page, 'flow');
-    agentTab.dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'agent');
     await page.wait(10);
     assert.equal(page.doc.getElementById('mas-ai-request').value, 'روی اولین نتیجه کلیک کن');
 
-    const build = Array.from(page.doc.querySelectorAll('#mas-chat-assistant button'))
+    const build = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
       .find((b) => b.textContent.includes('🧩'));
     build.dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
@@ -990,10 +987,7 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
     input.value = VALID_TOKEN;
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const agentTab = tab(page, 'chat');
-    agentTab.dispatchEvent(new page.window.Event('click'));
-    await page.wait(10);
+    await openPrompt(page);
 
     const reply = page.doc.getElementById('mas-ai-reply');
     assert.ok(reply, 'no AI reply box');
@@ -1002,7 +996,7 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
       + '### ۳) سؤال و نکته\nکدام نتیجه را کلیک کنم؟';
     reply.dispatchEvent(new page.window.Event('input'));
 
-    const build = Array.from(page.doc.querySelectorAll('#mas-chat-assistant button'))
+    const build = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
       .find((b) => b.textContent.includes('🧩'));
     build.dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
@@ -1013,11 +1007,11 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
       'the previous answer was not sent back');
 
     // Importing shows the model's prose, not just its code.
-    const importBtn = Array.from(page.doc.querySelectorAll('#mas-chat-assistant button'))
+    const importBtn = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
       .find((b) => b.textContent.includes('وارد کردن'));
     importBtn.dispatchEvent(new page.window.Event('click'));
     await page.wait(40);
-    agentTab.dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'agent');
     await page.wait(10);
     const notes = page.doc.querySelector('.mas-ai-notes');
     assert.ok(notes, 'the AI notes box did not appear');
@@ -1138,8 +1132,8 @@ test('record layer stays hidden until recording starts', async () => {
  * The coworker agent tab
  * ------------------------------------------------------------------ */
 
-const AGENT_SUB_LABELS = ['کلید ایجنت', 'تلگرام', 'مرورگر', 'نشانگر', 'وظایف',
-  'کپچا', 'اسکریپت', 'داده‌ها', 'کلیدها'];
+const AGENT_SUB_LABELS = ['پرامپت', 'کلید ایجنت', 'تلگرام', 'مرورگر', 'نشانگر',
+  'وظایف', 'کپچا', 'اسکریپت', 'داده‌ها', 'کلیدها'];
 
 /** Open the panel, authenticate, switch to the agent tab and one sub-pane. */
 async function openAgentSub(page, label) {
@@ -1161,6 +1155,25 @@ async function openAgentSub(page, label) {
   await page.until(() => page.doc.querySelector('#mas-agent-sub .mas-box') !== null);
 }
 
+/** Authenticate and open the agent's prompt sub-tab (the first one). */
+async function openPrompt(page) {
+  const input = page.doc.getElementById('mas-token-input');
+  input.value = VALID_TOKEN;
+  page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+  await page.wait(60);
+  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+  clickTab(page, 'agent');
+  const ready = await page.until(() => page.doc.getElementById('mas-ai-request') !== null);
+  assert.ok(ready, 'the prompt sub-tab never rendered');
+}
+
+/** Switch inside the telegram pane to one of its nested sub-tabs. */
+function clickTgSub(page, name) {
+  const sub = page.doc.querySelector(`#mas-agent-sub [data-tgsub="${name}"]`);
+  assert.ok(sub, `telegram sub-tab ${name} is missing`);
+  sub.dispatchEvent(new page.window.Event('click'));
+}
+
 function paneText(page) {
   const pane = page.doc.getElementById('mas-agent-sub');
   return pane ? pane.textContent : '';
@@ -1178,15 +1191,21 @@ test('the agent tab lists its sub-panes and the chat tab keeps the assistant', a
     const labels = Array.from(page.doc.querySelectorAll('#mas-tab-agent [data-sub]'))
       .map((node) => node.textContent.trim());
     assert.deepEqual(labels, AGENT_SUB_LABELS);
-    // The old copy-prompt/import workflow survived, but it moved into the chat
-    // tab's toolbox: one place to talk to a model instead of two.
-    clickTab(page, 'chat');
-    await page.wait(10);
+    // The prompt workspace is the agent's first sub-tab now; the chat tab
+    // only keeps a pointer button, so there is one home for prompts.
+    assert.equal(page.doc.querySelectorAll('#mas-tab-agent [data-sub]')[0]
+      .textContent.trim(), 'پرامپت', 'the prompt sub-tab must come first');
     assert.ok(page.doc.getElementById('mas-ai-request'), 'the request box is gone');
     assert.ok(page.doc.getElementById('mas-ai-reply'), 'the import box is gone');
-    assert.ok(findButton(page, '🧩', '#mas-tab-chat'), 'the copy-prompt button is gone');
-    assert.ok(findButton(page, '🤖', '#mas-tab-chat'),
+    assert.ok(findButton(page, '🧩', '#mas-tab-agent'), 'the copy-prompt button is gone');
+    assert.ok(findButton(page, '🤖', '#mas-tab-agent'),
       'the ask-the-agent-directly button is missing');
+    clickTab(page, 'chat');
+    await page.wait(10);
+    assert.ok(!page.doc.querySelector('#mas-tab-chat #mas-ai-request'),
+      'the chat tab must not embed a second prompt workspace');
+    assert.ok(findButton(page, 'پرامپت', '#mas-tab-chat'),
+      'the chat tab needs its pointer into the prompt sub-tab');
     assert.ok(page.doc.querySelector('#mas-tab-chat .mas-chat-tools'),
       'the toolbox is not part of the chat tab');
   } finally {
@@ -1250,8 +1269,12 @@ test('the telegram pane shows the saved target and can discover chats', async ()
   const page = await mount();
   try {
     await openAgentSub(page, 'تلگرام');
-    assert.ok(await page.until(() => paneText(page).includes('گروه من')),
-      'the configured target never appeared');
+    clickTgSub(page, 'targets');
+    // editable rows: the saved target shows up as an input value, not as text
+    assert.ok(await page.until(() => Array.from(
+      page.doc.querySelectorAll('#mas-agent-sub input'))
+      .some((node) => node.value === 'گروه من')),
+      'the configured target never appeared in an editable field');
     findButton(page, 'پیدا کردن چت‌ها').dispatchEvent(new page.window.Event('click'));
     assert.ok(await page.until(() => paneText(page).includes('Found group')),
       'the discovered chat never appeared');
@@ -1621,8 +1644,11 @@ test('the telegram pane offers both channels and routes each kind of message', a
     const modes = Array.from(page.doc.querySelectorAll('#mas-agent-sub select'))[0];
     assert.deepEqual(Array.from(modes.options).map((node) => node.value),
       ['off', 'bot', 'account', 'both'], 'both channels must be selectable');
-    const routes = Array.from(page.doc.querySelectorAll('#mas-agent-sub .mas-tg-route'));
-    assert.equal(routes.length, 4, 'handoff, captcha, jobs and manual');
+    clickTgSub(page, 'settings');
+    // renderAgentTelegram fetches before it paints, so wait for the rows.
+    const drawn = await page.until(() =>
+      page.doc.querySelectorAll('#mas-agent-sub .mas-tg-route').length === 4);
+    assert.ok(drawn, 'handoff, captcha, jobs and manual');
     assert.ok(paneText(page).includes('تحویل به انسان'));
     assert.ok(paneText(page).includes('هر دو'));
   } finally {
@@ -1654,18 +1680,20 @@ test('the telegram test message always carries a target', async () => {
  * The run bar stays on screen
  * ------------------------------------------------------------------ */
 
-test('the run bar is a fixed footer on the dedicated page', async () => {
+test('the run bar sticks to the bottom without covering content', async () => {
   const page = await mount({ standalone: true });
   try {
     const foot = page.doc.querySelector('.mas-foot');
     const style = page.window.getComputedStyle(foot);
-    assert.equal(style.position, 'fixed', 'the footer scrolls away on the panel page');
+    // sticky, not fixed: the footer stays glued to the bottom of the viewport
+    // while keeping its place in the flow, so no row can ever slip under it.
+    assert.equal(style.position, 'sticky', 'the footer must stick on the panel page');
     assert.equal(style.bottom, '0px');
     assert.ok(foot.querySelector('#mas-run'), 'the run button left the footer');
     assert.ok(foot.querySelector('#mas-progress'), 'the counter left the footer');
     const body = page.window.getComputedStyle(page.doc.querySelector('.mas-body'));
-    assert.notEqual(body.paddingBottom, '0px',
-      'the body needs room so the last line is not hidden behind the footer');
+    assert.equal(body.overflowY, 'auto',
+      'the body must scroll inside its own box, not under the footer');
   } finally {
     await page.cleanup();
   }
@@ -1677,6 +1705,8 @@ test('inside noVNC the footer stays part of the panel column', async () => {
     const style = page.window.getComputedStyle(page.doc.querySelector('.mas-foot'));
     assert.notEqual(style.position, 'fixed',
       'the overlay panel is already fixed; a second fixed footer would float over noVNC');
+    assert.notEqual(style.position, 'sticky',
+      'inside noVNC the footer scrolls with the panel column');
   } finally {
     await page.cleanup();
   }
@@ -1686,6 +1716,7 @@ test('the agent can be given a message to send, with a purpose', async () => {
   const page = await mount();
   try {
     await openAgentSub(page, 'تلگرام');
+    clickTgSub(page, 'write');
     const ready = await page.until(
       () => page.byText('button', '📤 فرستادن پیام دلخواه') !== undefined);
     assert.ok(ready, 'the send box is missing');
@@ -1698,7 +1729,7 @@ test('the agent can be given a message to send, with a purpose', async () => {
       0, 'an empty message should not be sent');
 
     const boxes = Array.from(page.doc.querySelectorAll('#mas-agent-sub .mas-box'));
-    const sendBox = boxes[boxes.length - 1];
+    const sendBox = boxes[boxes.length - 1];   // the write sub-tab's only card
     const text = sendBox.querySelector('input.mas-input');
     text.value = 'کار تمام شد';
     text.dispatchEvent(new page.window.Event('input'));

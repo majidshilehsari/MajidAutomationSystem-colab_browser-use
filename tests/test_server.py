@@ -5,6 +5,7 @@ loop) against a stand-in RFB server, then drives it with a real HTTP client and
 a real WebSocket client (node + ws). Skipped when websockify is not installed.
 """
 
+import http.client
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -447,8 +449,25 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertIn(b"noVNC", body)
 
     def test_directory_listing_is_disabled(self):
-        status, _ = http_request(self.url("/"))
-        self.assertEqual(status, 404)
+        # `/` no longer 404s: the bare Hostim domain must open the product,
+        # so the root bounces to the viewer. http.client keeps us from
+        # following the redirect (urllib would hide the 302).
+        parsed = urllib.parse.urlparse(self.base)
+        for method in ("GET", "HEAD"):
+            conn = http.client.HTTPConnection(parsed.hostname, parsed.port,
+                                              timeout=5)
+            try:
+                conn.request(method, "/")
+                response = conn.getresponse()
+                response.read()
+                self.assertEqual(response.status, 302, method)
+                self.assertEqual(response.getheader("Location"), "/vnc.html")
+            finally:
+                conn.close()
+        # ...and following the bounce lands on the viewer, never on a listing.
+        status, body = http_request(self.url("/"))
+        self.assertEqual(status, 200)
+        self.assertIn(b"noVNC", body)
 
     def test_path_traversal_is_blocked(self):
         status, _ = http_request(self.url("/../../etc/passwd"))
