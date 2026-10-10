@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="fa" dir="rtl">
+<html lang="fa" dir="rtl" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -16,14 +16,15 @@
   The asset URLs below get a ?v=<hash> appended by automation/server.py on
   every start, so a new build is never served from the browser cache.
 -->
-<link rel="stylesheet" crossorigin="anonymous"
-      href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700&display=swap">
+<!-- Vazirmatn is self-hosted (automation.css @font-face): no external,
+     render-blocking request, so the page paints even fully offline. -->
 <link rel="stylesheet" href="automation.css">
 </head>
 <body class="mas-standalone">
   <header class="mas-page-head">
     <h1>🤖 پنل اتوماسیون</h1>
     <span class="mas-sub">کنترل همان مرورگر، از صفحه‌ای جدا — اجرا روی سرور انجام می‌شود، نه در این تب</span>
+    <button id="mas-theme-toggle" class="mas-theme-btn" type="button">🌙 تم تاریک</button>
   </header>
   <script type="module" src="automation.js"></script>
 </body>

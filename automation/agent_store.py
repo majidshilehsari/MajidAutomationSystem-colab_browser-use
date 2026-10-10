@@ -137,6 +137,49 @@ CREATE INDEX IF NOT EXISTS idx_jobs_next ON jobs (enabled, next_run_at);
 CREATE INDEX IF NOT EXISTS idx_scripts_status ON scripts (status);
 CREATE INDEX IF NOT EXISTS idx_chat_created ON chat (created_at);
 CREATE INDEX IF NOT EXISTS idx_ops_name ON operations (name);
+
+CREATE TABLE IF NOT EXISTS devlog (
+    id    INTEGER PRIMARY KEY AUTOINCREMENT,
+    at    REAL NOT NULL,
+    actor TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL,
+    body  TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS agent_pages (
+    id         INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    title      TEXT NOT NULL DEFAULT '',
+    html       TEXT NOT NULL DEFAULT '',
+    actor      TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS suggestions (
+    id           INTEGER PRIMARY KEY AUTOINCREMENT,
+    created_at   REAL NOT NULL,
+    updated_at   REAL NOT NULL,
+    title        TEXT NOT NULL DEFAULT '',
+    problem      TEXT NOT NULL DEFAULT '',
+    section      TEXT NOT NULL DEFAULT '',
+    kind         TEXT NOT NULL DEFAULT 'feature',
+    evidence     TEXT NOT NULL DEFAULT '',
+    proposal     TEXT NOT NULL DEFAULT '',
+    before_state TEXT NOT NULL DEFAULT '',
+    after_state  TEXT NOT NULL DEFAULT '',
+    reason       TEXT NOT NULL DEFAULT '',
+    risk         TEXT NOT NULL DEFAULT 'low',
+    impact       TEXT NOT NULL DEFAULT '',
+    needs_human  INTEGER NOT NULL DEFAULT 1,
+    status       TEXT NOT NULL DEFAULT 'draft',
+    apply_result TEXT NOT NULL DEFAULT '',
+    rollback_note TEXT NOT NULL DEFAULT '',
+    actor        TEXT NOT NULL DEFAULT ''
+);
+
+CREATE INDEX IF NOT EXISTS idx_devlog_at ON devlog (at);
+CREATE INDEX IF NOT EXISTS idx_pages_updated ON agent_pages (updated_at);
+CREATE INDEX IF NOT EXISTS idx_sugg_status ON suggestions (status);
 """
 
 # Job schedule kinds. "at" fires once at a unix timestamp, "every" fires on an
@@ -154,6 +197,17 @@ SCRIPT_REJECTED = "rejected"
 _JOB_FIELDS = ("name", "kind", "schedule", "target", "payload", "enabled",
                "timeout", "next_run_at")
 _SCRIPT_FIELDS = ("name", "language", "code", "timeout")
+
+# Columns a caller may set on a suggestion; everything else (id, timestamps,
+# status transitions the caller may not invent) is ignored, same idea as jobs.
+_SUGGESTION_FIELDS = ("title", "problem", "section", "kind", "evidence",
+                      "proposal", "before_state", "after_state", "reason",
+                      "risk", "impact", "needs_human", "status",
+                      "apply_result", "rollback_note")
+
+SUGGESTION_STATUSES = ("draft", "pending", "approved", "rejected", "applied",
+                       "failed", "archived")
+SUGGESTION_RISKS = ("low", "medium", "high")
 
 
 def new_id(prefix: str = "") -> str:
@@ -599,6 +653,113 @@ class AgentStore:
                 "sent": counts.get("sent", 0) + counts.get("partial", 0),
                 "failed": counts.get("failed", 0),
                 "cancelled": counts.get("cancelled", 0)}
+
+    # -- devlog: the development-progress journal -----------------------
+    def add_devlog(self, title: str, body: str = "",
+                   actor: str = "") -> Dict[str, Any]:
+        now = round(self._clock(), 3)
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO devlog (at, actor, title, body) VALUES (?, ?, ?, ?)",
+                (now, actor, str(title)[:300], str(body)[:100000]))
+            self._db.commit()
+            row_id = int(cursor.lastrowid)
+        rows = self._query("SELECT * FROM devlog WHERE id = ?", (row_id,))
+        return rows[0] if rows else {"id": row_id}
+
+    def list_devlog(self, limit: int = 50) -> List[Dict[str, Any]]:
+        limit = max(1, min(int(limit), 500))
+        return self._query(
+            "SELECT * FROM devlog ORDER BY id DESC LIMIT ?", (limit,))
+
+    # -- agent pages: HTML the coworker agent builds, kept in the db -----
+    def list_pages(self) -> List[Dict[str, Any]]:
+        return self._query(
+            "SELECT id, created_at, updated_at, title, length(html) AS size,"
+            " actor FROM agent_pages ORDER BY updated_at DESC")
+
+    def get_page(self, page_id: int) -> Optional[Dict[str, Any]]:
+        rows = self._query("SELECT * FROM agent_pages WHERE id = ?",
+                           (int(page_id),))
+        return rows[0] if rows else None
+
+    def save_page(self, title: str, html: str, page_id: Optional[int] = None,
+                  actor: str = "") -> Dict[str, Any]:
+        now = round(self._clock(), 3)
+        with self._lock:
+            if page_id is not None and self.get_page(page_id):
+                self._db.execute(
+                    "UPDATE agent_pages SET title = ?, html = ?, updated_at = ?,"
+                    " actor = ? WHERE id = ?",
+                    (str(title)[:300], str(html), now, actor, int(page_id)))
+            else:
+                cursor = self._db.execute(
+                    "INSERT INTO agent_pages (created_at, updated_at, title,"
+                    " html, actor) VALUES (?, ?, ?, ?, ?)",
+                    (now, now, str(title)[:300], str(html), actor))
+                page_id = int(cursor.lastrowid)
+            self._db.commit()
+        return self.get_page(page_id) or {"id": page_id}
+
+    def delete_page(self, page_id: int) -> int:
+        return self._execute("DELETE FROM agent_pages WHERE id = ?",
+                             (int(page_id),))
+
+    # -- suggestions: structured proposals with human gates -------------
+    def save_suggestion(self, data: Dict[str, Any],
+                        suggestion_id: Optional[int] = None,
+                        actor: str = "") -> Dict[str, Any]:
+        now = round(self._clock(), 3)
+        fields = {name: data[name] for name in _SUGGESTION_FIELDS
+                  if name in data}
+        if "needs_human" in fields:
+            fields["needs_human"] = 1 if fields["needs_human"] else 0
+        with self._lock:
+            if suggestion_id is not None and self.get_suggestion(suggestion_id):
+                fields["updated_at"] = now
+                assigns = ", ".join("%s = ?" % name for name in fields)
+                self._db.execute(
+                    "UPDATE suggestions SET %s WHERE id = ?" % assigns,
+                    tuple(fields.values()) + (int(suggestion_id),))
+            else:
+                fields.setdefault("status", "draft")
+                fields.update(created_at=now, updated_at=now, actor=actor)
+                columns = ", ".join(fields)
+                marks = ", ".join("?" for _ in fields)
+                cursor = self._db.execute(
+                    "INSERT INTO suggestions (%s) VALUES (%s)" % (columns, marks),
+                    tuple(fields.values()))
+                suggestion_id = int(cursor.lastrowid)
+            self._db.commit()
+        return self.get_suggestion(suggestion_id) or {"id": suggestion_id}
+
+    def get_suggestion(self, suggestion_id: int) -> Optional[Dict[str, Any]]:
+        rows = self._query("SELECT * FROM suggestions WHERE id = ?",
+                           (int(suggestion_id),))
+        return rows[0] if rows else None
+
+    def list_suggestions(self, status: str = "", section: str = "",
+                         kind: str = "", risk: str = "", q: str = "",
+                         limit: int = 100,
+                         include_archived: bool = False) -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM suggestions WHERE 1=1"
+        args: List[Any] = []
+        if status:
+            sql += " AND status = ?"
+            args.append(status)
+        elif not include_archived:
+            sql += " AND status != 'archived'"
+        for column, value in (("section", section), ("kind", kind),
+                              ("risk", risk)):
+            if value:
+                sql += " AND %s = ?" % column
+                args.append(value)
+        if q:
+            sql += " AND (title LIKE ? OR problem LIKE ? OR proposal LIKE ?)"
+            args.extend(["%%%s%%" % q] * 3)
+        sql += " ORDER BY updated_at DESC LIMIT ?"
+        args.append(max(1, min(int(limit), 500)))
+        return self._query(sql, args)
 
     # -- the operations library -------------------------------------------
     def list_operations(self) -> List[Dict[str, Any]]:

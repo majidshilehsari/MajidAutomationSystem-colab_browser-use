@@ -133,11 +133,10 @@ def inject_block(static_dir: str) -> str:
     query = cache_query(static_dir)
     return (
         MARKER + "\n"
-        # A Persian-first webfont; offline deployments simply fall back to the
-        # system stack, so this is decoration, never a dependency.
-        '<link rel="stylesheet" crossorigin="anonymous"'
-        ' href="https://fonts.googleapis.com/css2?family=Vazirmatn:wght@400;500;600;700'
-        '&display=swap">\n'
+        # No external font link here on purpose: a render-blocking stylesheet
+        # from fonts.googleapis.com left the viewer blank for operators whose
+        # network cannot reach Google. Vazirmatn ships self-hosted inside
+        # automation.css (@font-face, woff2 next to the css).
         '<link rel="stylesheet" href="automation/automation.css%s">\n'
         '<script type="module" src="automation/automation.js%s"></script>\n'
         "%s\n" % (query, query, END_MARKER)
@@ -188,6 +187,11 @@ def prepare_web_root(web_root: str, novnc_dir: str, static_dir: str) -> Dict[str
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(web_root, "automation", name))
                 report["staticCopied"].append(name)
+            elif os.path.isdir(src):
+                # self-hosted webfonts and any future asset folder
+                shutil.copytree(src, os.path.join(web_root, "automation", name),
+                                dirs_exist_ok=True)
+                report["staticCopied"].append(name + "/")
     report["versionedImports"] = version_module_imports(
         os.path.join(web_root, "automation"))
 
@@ -268,22 +272,39 @@ def make_handler_class(api: AutomationApi, base_handler: Type) -> Type:
                 self.wfile.write(payload)
             return True
 
+        ROOT_PAGE = (
+            "<!doctype html>\n<html lang=\"fa\" dir=\"rtl\">\n<head>\n"
+            "<meta charset=\"utf-8\">\n"
+            "<meta http-equiv=\"refresh\" content=\"0; url=/vnc.html\">\n"
+            "<title>Majid Automation System</title>\n</head>\n"
+            "<body onload=\"location.replace('/vnc.html')\">\n"
+            "<p style=\"font-family:sans-serif;text-align:center;margin-top:20vh\">"
+            "\u062f\u0631 \u062d\u0627\u0644 \u0627\u0646\u062a\u0642\u0627\u0644 "
+            "\u0628\u0647 \u062f\u0633\u06a9\u062a\u0627\u067e\u2026 "
+            "<a href=\"/vnc.html\">/vnc.html</a></p>\n</body>\n</html>\n"
+        )
+
         def _root_redirect(self) -> bool:
             """The platform's own domain must open the product, not a 404.
 
-            Hostim hands every app a bare domain and a health path; operators
-            type the domain and expect the desktop. `/` therefore bounces to
-            the noVNC viewer (which carries the sidebar), while `/info` and
-            the API keep working exactly as before.
+            Hostim hands every app a bare domain, and its health check demands
+            HTTP 200 — a 302 on `/` made the platform mark the app unhealthy
+            and stop routing to it (the operator saw a page that "opened but
+            showed nothing"). So `/` answers 200 with a tiny page that
+            redirects itself to the viewer immediately; probes are happy and
+            humans land on the desktop. `/info` and the API are untouched.
             """
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path not in ("", "/"):
                 return False
-            self.send_response(302)
-            self.send_header("Location", "/vnc.html")
+            body = self.ROOT_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Cache-Control", "no-store")
-            self.send_header("Content-Length", "0")
+            self.send_header("Content-Length", str(len(body)))
             self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
             return True
 
         def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler naming

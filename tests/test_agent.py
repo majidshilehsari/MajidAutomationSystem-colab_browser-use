@@ -2826,10 +2826,16 @@ class WebRootPhase7Test(TempDirCase):
         self.assertIn("noVNC_setting_resize", html)
         self.assertLess(html.index(srv.VIEW_MARKER), html.index("</head>"))
         self.assertIn("overflow: hidden", html)
-        # Phase 8: the viewer must also offer the Persian webfont, so the
-        # injected block carries a fonts.googleapis stylesheet link.
-        self.assertIn("fonts.googleapis.com", html)
-        self.assertIn("Vazirmatn", html)
+        # Phase 9: the viewer must NOT carry a render-blocking external font
+        # link (blank page behind filtered networks); Vazirmatn is self-hosted.
+        self.assertNotIn("fonts.googleapis.com", html)
+        with open(os.path.join(web, "automation", "automation.css"),
+                  encoding="utf-8") as fh:
+            css = fh.read()
+        self.assertIn("@font-face", css)
+        self.assertTrue(os.path.isfile(os.path.join(
+            web, "automation", "fonts", "Vazirmatn-Regular.woff2")),
+            "the woff2 files must be copied next to the css")
         with open(os.path.join(web, "automation", "automation.js"),
                   encoding="utf-8") as fh:
             script = fh.read()
@@ -2839,7 +2845,6 @@ class WebRootPhase7Test(TempDirCase):
         with open(os.path.join(web, "vnc.html"), encoding="utf-8") as fh:
             html = fh.read()
         self.assertEqual(html.count(srv.VIEW_MARKER), 1)
-        self.assertEqual(html.count("fonts.googleapis.com"), 1)
 
 
 class LabelCoverageTest(unittest.TestCase):
@@ -2871,3 +2876,174 @@ class LabelCoverageTest(unittest.TestCase):
         # the fa block must really sit inside the fa object: a stray close
         # brace would turn labels into dead JS labels and fail silently.
         self.assertNotIn("},\n    tabDb:", core)
+
+
+class Phase9Test(HubCase):
+    """Round nine: journal, dedicated pages, gated suggestions, read-only db."""
+
+    def test_devlog_seeds_with_the_letter_and_grows(self) -> None:
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        status, data = self.call(api, "GET", "/agent/devlog")
+        self.assertEqual(status, 200)
+        self.assertTrue(any("ایجنت همکار" in entry["title"]
+                            for entry in data["entries"]),
+                        "the journal must start with the agent letter")
+        status, data = self.call(api, "POST", "/agent/devlog",
+                                 body={"title": "دور نهم", "body": "کلیپ‌بورد"})
+        self.assertEqual(status, 201)
+        status, data = self.call(api, "GET", "/agent/devlog")
+        self.assertEqual(len(data["entries"]), 2)
+        status, _ = self.call(api, "POST", "/agent/devlog", body={"title": ""})
+        self.assertEqual(status, 400)
+
+    def test_pages_persist_html_and_delete_is_operator_only(self) -> None:
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        key = hub.agent_key_reveal()["key"]
+        status, data = self.call(api, "POST", "/agent/pages",
+                                 headers={"x-agent-key": key},
+                                 body={"title": "گزارش روز", "html": "<b>سلام</b>"})
+        self.assertEqual(status, 201)
+        page_id = data["page"]["id"]
+        status, data = self.call(api, "GET", "/agent/pages")
+        self.assertEqual(data["pages"][0]["size"], len("<b>سلام</b>"))
+        status, data = self.call(api, "GET", "/agent/pages",
+                                 query={"id": [str(page_id)]})
+        self.assertEqual(data["html"], "<b>سلام</b>")
+        status, _ = self.call(api, "POST", "/agent/pages",
+                              headers={"x-agent-key": key},
+                              body={"title": "x", "html": "  "})
+        self.assertEqual(status, 400, "empty html must not be saved")
+        status, _ = self.call(api, "POST", "/agent/page-delete",
+                              headers={"x-agent-key": key}, body={"id": page_id})
+        self.assertEqual(status, 403, "the agent must not delete pages")
+        status, _ = self.call(api, "POST", "/agent/page-delete",
+                              body={"id": page_id})
+        self.assertEqual(status, 200)
+        status, _ = self.call(api, "GET", "/agent/pages",
+                              query={"id": [str(page_id)]})
+        self.assertEqual(status, 404)
+
+    def test_suggestions_never_apply_without_a_human(self) -> None:
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        key = hub.agent_key_reveal()["key"]
+        proposal = {"title": "تم پیش‌فرض تاریک", "kind": "settings",
+                    "section": "تم", "risk": "low",
+                    "status": "approved",  # self-approval must be ignored
+                    "before_state": json.dumps({"key": "ui.theme", "value": "light"}),
+                    "after_state": json.dumps({"key": "ui.theme", "value": "dark"})}
+        status, data = self.call(api, "POST", "/agent/suggestions",
+                                 headers={"x-agent-key": key}, body=proposal)
+        self.assertEqual(status, 201)
+        sid = data["suggestion"]["id"]
+        self.assertEqual(data["suggestion"]["status"], "draft")
+        # the agent cannot decide, apply, rollback or delete
+        for path in ("/agent/suggestion-decision", "/agent/suggestion-apply",
+                     "/agent/suggestion-rollback", "/agent/suggestion-delete"):
+            status, _ = self.call(api, "POST", path,
+                                  headers={"x-agent-key": key},
+                                  body={"id": sid, "decision": "approve"})
+            self.assertEqual(status, 403, path)
+        # operator, but before approval: still refused
+        status, _ = self.call(api, "POST", "/agent/suggestion-apply",
+                              body={"id": sid})
+        self.assertEqual(status, 409)
+        status, data = self.call(api, "POST", "/agent/suggestion-decision",
+                                 body={"id": sid, "decision": "approve"})
+        self.assertEqual(status, 200)
+        self.assertEqual(data["suggestion"]["status"], "approved")
+        status, data = self.call(api, "POST", "/agent/suggestion-apply",
+                                 body={"id": sid})
+        self.assertEqual(status, 200)
+        self.assertTrue(data["ok"])
+        self.assertEqual(hub.store.get_setting("ui.theme"), "dark")
+        status, _ = self.call(api, "POST", "/agent/suggestion-rollback",
+                              body={"id": sid})
+        self.assertEqual(status, 200)
+        self.assertEqual(hub.store.get_setting("ui.theme"), "light")
+        # editing cannot smuggle a status change
+        status, data = self.call(api, "POST", "/agent/suggestion-update",
+                                 headers={"x-agent-key": key},
+                                 body={"id": sid, "title": "عنوان تازه",
+                                       "status": "applied"})
+        self.assertEqual(data["suggestion"]["title"], "عنوان تازه")
+        self.assertNotEqual(data["suggestion"]["status"], "applied")
+        # soft delete: archived, never destroyed
+        status, _ = self.call(api, "POST", "/agent/suggestion-delete",
+                              body={"id": sid})
+        self.assertEqual(status, 200)
+        status, data = self.call(api, "GET", "/agent/suggestions")
+        self.assertEqual(data["suggestions"], [])
+        status, data = self.call(api, "GET", "/agent/suggestions",
+                                 query={"archived": ["1"]})
+        self.assertEqual(len(data["suggestions"]), 1)
+        status, data = self.call(api, "GET", "/agent/suggestions",
+                                 query={"id": [str(sid)]})
+        self.assertEqual(data["suggestion"]["status"], "archived")
+
+    def test_non_settings_suggestions_refuse_to_auto_apply(self) -> None:
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        status, data = self.call(api, "POST", "/agent/suggestions",
+                                 body={"title": "تغییر UI", "kind": "ui"})
+        sid = data["suggestion"]["id"]
+        self.call(api, "POST", "/agent/suggestion-decision",
+                  body={"id": sid, "decision": "approve"})
+        status, _ = self.call(api, "POST", "/agent/suggestion-apply",
+                              body={"id": sid})
+        self.assertEqual(status, 409, "no silent appliers for other kinds")
+
+    def test_db_window_is_read_only_and_masks_secrets(self) -> None:
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        hub.store.set_setting("ui.theme", "light", actor="t")
+        hub.store.set_setting("telegram.botToken", "123456:ABC-SECRET",
+                              secret=True, actor="t")
+        status, data = self.call(api, "GET", "/agent/db/schema")
+        self.assertEqual(status, 200)
+        names = [table["name"] for table in data["tables"]]
+        for table in ("settings", "suggestions", "devlog", "agent_pages"):
+            self.assertIn(table, names)
+        status, data = self.call(api, "POST", "/agent/db/query",
+                                 body={"sql": "SELECT * FROM settings"})
+        self.assertEqual(status, 200)
+        by_key = {row["key"]: row["value"] for row in data["rows"]}
+        # the settings table stores JSON-encoded values
+        self.assertEqual(json.loads(by_key["ui.theme"]), "light")
+        token_value = by_key["telegram.botToken"]
+        self.assertIsInstance(token_value, dict)
+        self.assertTrue(token_value["masked"])
+        self.assertNotIn("ABC-SECRET", json.dumps(data["rows"], ensure_ascii=False))
+        status, data = self.call(api, "POST", "/agent/db/query",
+                                 body={"sql": "WITH x AS (SELECT 1 n) SELECT n FROM x"})
+        self.assertEqual(data["rows"], [{"n": 1}])
+        for bad in ("UPDATE settings SET value='x'",
+                    "DELETE FROM devlog", "DROP TABLE settings",
+                    "SELECT 1; SELECT 2", "ATTACH '/tmp/x' AS y",
+                    "INSERT INTO devlog (at,title) VALUES (1,'a')", ""):
+            status, _ = self.call(api, "POST", "/agent/db/query",
+                                  body={"sql": bad})
+            self.assertEqual(status, 400, "must refuse: %r" % bad)
+
+    def test_clipboard_route_is_authed_and_validated(self) -> None:
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        status, _ = self.call(api, "GET", "/clipboard", headers={})
+        self.assertEqual(status, 401)
+        status, _ = self.call(api, "POST", "/clipboard", body={})
+        self.assertEqual(status, 400)
+        status, _ = self.call(api, "POST", "/clipboard", body={"text": "سلام"})
+        self.assertIn(status, (200, 409),
+                      "no xclip in the sandbox is fine, but it must answer")
+
+    def test_agent_key_use_is_audited_and_shown(self) -> None:
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        key = hub.agent_key_reveal()["key"]
+        self.call(api, "GET", "/agent/devlog", headers={"x-agent-key": key})
+        rows = [row for row in hub.audit(50) if row["actor"] == "agent-key"]
+        self.assertTrue(rows and "/agent/devlog" in rows[0]["detail"])
+        last = hub.agent_key_info()["lastUse"]
+        self.assertEqual(last["endpoint"], "GET /agent/devlog")

@@ -15,7 +15,7 @@ import {
 
 /** Tab order, and the tab the panel opens on. */
 const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages', 'shots',
-  'texts', 'db', 'agent', 'log'];
+  'texts', 'db', 'settings', 'agent', 'log'];
 const DEFAULT_TAB = 'chat';
 
 /** The tab the panel opens on: the remembered one, else the first. */
@@ -28,11 +28,13 @@ const LS = {
   token: 'mas.token', lang: 'mas.lang', flow: 'mas.flow', panel: 'mas.panelOpen',
   request: 'mas.userRequest', reply: 'mas.aiReply',
   provider: 'mas.chatProvider', context: 'mas.chatContext', tab: 'mas.tab',
+  theme: 'mas.theme',
 };
 
 const state = {
   lang: localStorage.getItem(LS.lang) || 'fa',
   token: localStorage.getItem(LS.token) || '',
+  theme: localStorage.getItem(LS.theme) || 'light',
   flow: loadFlow(),
   info: null,
   status: { status: 'idle', entries: [] },
@@ -201,6 +203,10 @@ function buildPanel() {
         },
       }, [el('option', { value: 'fa' }, 'FA'), el('option', { value: 'en' }, 'EN')]),
       el('button', {
+        id: 'mas-theme-btn', class: 'mas-theme-btn', type: 'button',
+        title: t('settingsThemeTitle'), onClick: () => cycleTheme(),
+      }),
+      el('button', {
         class: 'mas-icon', type: 'button', text: '×', title: t('close'),
         onClick: () => setPanelOpen(false),
       }),
@@ -229,6 +235,7 @@ function buildPanel() {
       el('section', { id: 'mas-tab-shots', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-texts', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-db', class: 'mas-tabpane', hidden: true }),
+      el('section', { id: 'mas-tab-settings', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-agent', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-log', class: 'mas-tabpane', hidden: true }),
     ]),
@@ -322,6 +329,7 @@ function selectTab(name) {
   if (name === 'texts') renderTexts();
   if (name === 'log') renderLog();
   if (name === 'db') renderDatabase();
+  if (name === 'settings') renderSettings();
   if (name === 'agent') renderAgent();
   if (name === 'flow') renderFlow();
   if (name === 'record') renderRecord();
@@ -336,7 +344,11 @@ function selectTab(name) {
 async function refreshAgentTabs() {
   let missing = false;
   try {
-    await api('/agent');
+    const data = await api('/agent');
+    // The chosen theme lives in the database, so it follows the operator to
+    // any browser; localStorage is only the pre-login fallback.
+    const saved = data && data.settings ? data.settings['ui.theme'] : null;
+    if (saved === 'dark' || saved === 'light') applyTheme(saved, { save: false });
   } catch (error) {
     missing = error.status === 404;
   }
@@ -1787,11 +1799,13 @@ async function buildPrompt() {
 
 // «پرامپت» comes first on purpose: building a prompt for a model is its own
 // workspace, separate from the ordinary chat, and it is where the panel opens.
-const AGENT_SUBS = ['prompt', 'agentkey', 'telegram', 'browser', 'cursor',
-  'jobs', 'captcha', 'scripts', 'data', 'keys'];
+const AGENT_SUBS = ['prompt', 'pages', 'suggestions', 'agentkey', 'telegram',
+  'browser', 'cursor', 'jobs', 'captcha', 'scripts', 'data', 'keys'];
 
 const AGENT_RENDERERS = {
   prompt: renderAgentPrompt,
+  pages: renderAgentPages,
+  suggestions: renderAgentSuggestions,
   agentkey: renderAgentKey,
   cursor: renderAgentCursor,
   jobs: renderAgentJobs,
@@ -1838,10 +1852,12 @@ function agentCounts(overview) {
 }
 
 function agentTable(columns, rows) {
-  return el('table', { class: 'mas-table' }, [
-    el('thead', {}, el('tr', {}, columns.map((name) => el('th', { text: name })))),
-    el('tbody', {}, rows.map((cells) => el('tr', {}, cells.map((cell) => el('td', {},
-      typeof cell === 'string' || typeof cell === 'number' ? [String(cell)] : [cell]))))),
+  return el('div', { class: 'mas-tablewrap' }, [
+    el('table', { class: 'mas-table' }, [
+      el('thead', {}, el('tr', {}, columns.map((name) => el('th', { text: name })))),
+      el('tbody', {}, rows.map((cells) => el('tr', {}, cells.map((cell) => el('td', {},
+        typeof cell === 'string' || typeof cell === 'number' ? [String(cell)] : [cell]))))),
+    ]),
   ]);
 }
 
@@ -1857,9 +1873,12 @@ async function renderAgent() {
   // even when this deployment has no agent attached at all (--no-agent, or an
   // unreachable API), while a sub-pane is allowed to show that error itself.
   replace(pane,
-    el('div', { class: 'mas-row mas-wrap' }, AGENT_SUBS.map((name) => button(
-      agentSubLabel(name), () => selectAgentSub(name),
-      { class: 'mas-btn' + (name === active ? ' mas-primary' : ''), dataset: { sub: name } }))),
+    // Sub-tabs speak the exact same visual language as the top tabs.
+    el('div', { class: 'mas-tabs mas-subtabs' }, AGENT_SUBS.map((name) => el('button', {
+      class: 'mas-tab' + (name === active ? ' is-active' : ''),
+      dataset: { sub: name }, type: 'button', text: agentSubLabel(name),
+      onClick: () => selectAgentSub(name),
+    }))),
     el('div', { id: 'mas-agent-bar', class: 'mas-row mas-wrap' },
       [el('span', { class: 'mas-hint', text: '\u2026' })]),
     el('div', { id: 'mas-agent-sub', class: 'mas-agent-sub' }),
@@ -2694,12 +2713,15 @@ async function renderAgentTelegram(host) {
   /* -- nested sub-tabs, styled exactly like the top tab bar ------------- */
   const TG_SUBS = ['status', 'settings', 'targets', 'mailbox', 'programs', 'write'];
   const activeSub = TG_SUBS.includes(state.tgSub) ? state.tgSub : 'status';
-  const subBar = el('div', { class: 'mas-tabs mas-subtabs' }, TG_SUBS.map((name) => el('button', {
-    class: 'mas-tab' + (name === activeSub ? ' is-active' : ''),
-    dataset: { tgsub: name }, type: 'button',
-    text: t('tgSub' + name.charAt(0).toUpperCase() + name.slice(1)),
-    onClick: () => { state.tgSub = name; renderAgentSub('telegram'); },
-  })));
+  const subBar = el('div', { class: 'mas-tabs mas-subtabs' }, TG_SUBS.map((name) => {
+    const badge = name === 'mailbox' && counts.all
+      ? el('span', { class: 'mas-tab-count', text: String(counts.all) }) : null;
+    return el('button', {
+      class: 'mas-tab' + (name === activeSub ? ' is-active' : ''),
+      dataset: { tgsub: name }, type: 'button',
+      onClick: () => { state.tgSub = name; renderAgentSub('telegram'); },
+    }, [t('tgSub' + name.charAt(0).toUpperCase() + name.slice(1)), badge]);
+  }));
   const cards = {
     status: testCard, settings: settingsCard, targets: targetsCard,
     mailbox: mailCard, programs: programCard, write: sendCard,
@@ -2724,7 +2746,42 @@ async function renderAgentData(host) {
     onInput: (event) => { state.agentSql = event.target.value; },
   });
 
+  const dbWinSql = el('textarea', {
+    id: 'mas-dbwin-sql', class: 'mas-input mas-mono', rows: 3,
+    placeholder: t('dbWinPh'),
+  });
   replace(host,
+    el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' }, [el('b', { text: '🗄 ' + t('dbWinTitle') })]),
+      el('p', { class: 'mas-hint', text: t('dbWinHint') }),
+      el('button', { class: 'mas-btn', type: 'button', text: '🗺 ' + t('dbWinSchema'), onClick: async () => {
+        try {
+          const map = await api('/agent/db/schema');
+          replace(host.querySelector('.mas-dbschema-out'),
+            agentTable([t('dbWinTables'), t('dbWinRows'), t('dbWinCols'), t('dbWinSensitive')],
+              (map.tables || []).map((row) => [
+                row.name, String(row.rows), String((row.columns || []).length),
+                (row.sensitiveColumns || []).join(', ') || '—',
+              ])));
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+      el('div', { class: 'mas-dbschema-out' }),
+      dbWinSql,
+      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '▶ ' + t('dbWinRun'), onClick: async () => {
+        try {
+          const result = await api('/agent/db/query', { method: 'POST', body: { sql: dbWinSql.value } });
+          const fmt = (value) => (value && typeof value === 'object' && value.masked
+            ? `🔒 ${t('dbWinMaskedNote')}`
+            : String(value === null || value === undefined ? '' : value).slice(0, 140));
+          replace(host.querySelector('.mas-dbquery-out'),
+            result.rows.length
+              ? agentTable(result.columns, result.rows.map((row) => result.columns.map((column) => fmt(row[column]))))
+              : el('p', { class: 'mas-hint', text: t('agentEmpty') }));
+          if (result.truncated) toast(t('dbWinTruncated'), 'warn');
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+      el('div', { class: 'mas-dbquery-out' }),
+    ]),
     el('div', { class: 'mas-box' }, [
       el('b', { text: t('agentQuery') }),
       sqlBox,
@@ -3368,9 +3425,26 @@ async function renderAgentKey(host) {
         el('span', { class: 'mas-hint', text: `${t('keyCreatedAt')}: ${agentTime(info.createdAt)}` }),
         el('span', { class: 'mas-hint', text: `${t('keyLastUsed')}: ${agentTime(info.lastUsedAt)}` }),
         el('span', { class: 'mas-hint', text: `${t('keyLength')}: ${info.length || 0}` }),
+        el('span', { class: 'mas-hint', text: `${t('keyLastUse')}: ${
+          info.lastUse ? `${info.lastUse.endpoint || ''} — ${tehranWhen(info.lastUse.at)}` : '—'}` }),
       ]),
       el('div', { class: 'mas-row mas-wrap' }, radios),
       el('div', { class: 'mas-row mas-wrap' }, [
+        button('🔌 ' + t('keyTestConn'), async () => {
+          // The connector check the agent letter asked for: prove the key
+          // itself opens GET /agent, over a header, without ?k= anywhere.
+          try {
+            if (!state.revealedKey) {
+              state.revealedKey = (await api('/agent/key/reveal', { method: 'POST', body: {} })).key || '';
+            }
+            const response = await fetch(API_PREFIX + '/agent', {
+              headers: { 'x-agent-key': state.revealedKey },
+            });
+            toast(response.ok ? t('keyTestOk') : `${t('keyTestFail')} (HTTP ${response.status})`,
+              response.ok ? 'ok' : 'error');
+            renderAgentSub('agentkey');
+          } catch (error) { toast(error.message, 'error'); }
+        }),
         button('⏸ ' + t('keyCut'), async () => {
           try {
             await api('/agent/key/enable', { method: 'POST', body: { enabled: false } });
@@ -3511,7 +3585,10 @@ function renderLog() {
 
 function start() {
   const standalone = isStandalone();
+  applyTheme(state.theme, { save: false });
   buildPanel();
+  const pageToggle = document.getElementById('mas-theme-toggle');
+  if (pageToggle) pageToggle.addEventListener('click', () => cycleTheme());
   if (standalone) {
     // The panel is the whole page here, so the collapse tab is pointless and a
     // link back to the live browser view is not.
@@ -3889,4 +3966,431 @@ async function renderAgentBrowser(host) {
   ]);
 
   replace(host, headCard, tabsCard, histCard, closedCard);
+}
+
+/* ------------------------------------------------------------------ *
+ * Theme: light/dark, chosen in the header, remembered in the database
+ * ------------------------------------------------------------------ */
+
+function applyTheme(mode, { save = false } = {}) {
+  state.theme = mode === 'dark' ? 'dark' : 'light';
+  document.documentElement.dataset.theme = state.theme;
+  try { localStorage.setItem(LS.theme, state.theme); } catch (_) { /* private mode */ }
+  const label = state.theme === 'dark' ? '☀️ ' + t('themeLight') : '🌙 ' + t('themeDark');
+  for (const id of ['mas-theme-btn', 'mas-theme-toggle']) {
+    const node = document.getElementById(id);
+    if (node) node.textContent = label;
+  }
+  if (save && state.token) {
+    // Persist through the flat settings map; a deployment without the agent
+    // simply keeps the localStorage choice.
+    api('/agent/settings', { method: 'POST', body: { 'ui.theme': state.theme } })
+      .catch(() => { /* no agent here — the local choice still stands */ });
+  }
+}
+
+function cycleTheme() {
+  applyTheme(state.theme === 'dark' ? 'light' : 'dark', { save: true });
+  const settings = document.getElementById('mas-tab-settings');
+  if (settings && !settings.hidden) renderSettings();
+}
+
+/* ------------------------------------------------------------------ *
+ * Settings tab: theme, the clipboard bridge, the devlog, system info
+ * ------------------------------------------------------------------ */
+
+async function renderSettings() {
+  const pane = document.getElementById('mas-tab-settings');
+  if (!pane) return;
+  const dbTab = document.querySelector('.mas-tab[data-tab="db"]');
+  const hasAgent = !(dbTab && dbTab.hidden);
+
+  const themeCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '🎨 ' + t('settingsThemeTitle') })]),
+    el('p', { class: 'mas-hint', text: t('settingsThemeHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, ['light', 'dark'].map((mode) => el('button', {
+      class: 'mas-btn' + (state.theme === mode ? ' mas-primary' : ''), type: 'button',
+      text: mode === 'dark' ? '🌙 ' + t('settingsThemeDark') : '☀️ ' + t('settingsThemeLight'),
+      onClick: () => { applyTheme(mode, { save: true }); renderSettings(); },
+    }))),
+  ]);
+
+  const clipText = el('textarea', {
+    id: 'mas-clip-text', class: 'mas-input mas-mono', rows: 5,
+    placeholder: t('settingsClipPh'),
+  });
+  const clipCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '📋 ' + t('settingsClipTitle') })]),
+    el('p', { class: 'mas-hint', text: t('settingsClipHint') }),
+    clipText,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '📤 ' + t('settingsClipWrite'), onClick: async () => {
+        try { await api('/clipboard', { method: 'POST', body: { text: clipText.value } }); toast(t('settingsClipDone'), 'ok'); }
+        catch (error) { toast(error.message, 'error'); }
+      } }),
+      el('button', { class: 'mas-btn', type: 'button', text: '📥 ' + t('settingsClipRead'), onClick: async () => {
+        try { clipText.value = (await api('/clipboard')).text || ''; }
+        catch (error) { toast(error.message, 'error'); }
+      } }),
+      el('button', { class: 'mas-btn', type: 'button', text: '🖥 ' + t('settingsClipLocalWrite'), onClick: async () => {
+        try { await navigator.clipboard.writeText(clipText.value); toast(t('settingsClipDone'), 'ok'); }
+        catch (error) { toast(t('settingsClipFail'), 'error'); }
+      } }),
+      el('button', { class: 'mas-btn', type: 'button', text: '⬅ ' + t('settingsClipLocalRead'), onClick: async () => {
+        try { clipText.value = await navigator.clipboard.readText(); }
+        catch (error) { toast(t('settingsClipFail'), 'error'); }
+      } }),
+    ]),
+  ]);
+
+  const devlogList = el('div', { id: 'mas-devlog-list' }, [el('p', { class: 'mas-hint', text: '…' })]);
+  const devTitle = el('input', { class: 'mas-input', placeholder: t('settingsDevlogTitlePh') });
+  const devBody = el('textarea', { class: 'mas-input', rows: 4, placeholder: t('settingsDevlogBodyPh') });
+  const loadDevlog = async () => {
+    try {
+      const entries = (await api('/agent/devlog')).entries || [];
+      replace(devlogList, entries.length ? entries.map((entry) => el('details', { class: 'mas-devlog-item' }, [
+        el('summary', {}, [
+          el('b', { text: entry.title }), ' ',
+          el('span', { class: 'mas-hint', text: tehranWhen(entry.at) + (entry.actor ? ' · ' + entry.actor : '') }),
+        ]),
+        el('pre', { class: 'mas-pre mas-mono', text: entry.body || '' }),
+      ])) : [el('p', { class: 'mas-hint', text: t('settingsDevlogEmpty') })]);
+    } catch (error) { replace(devlogList, el('p', { class: 'mas-hint', text: error.message })); }
+  };
+  const devlogCard = hasAgent ? el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '📔 ' + t('settingsDevlogTitle') })]),
+    el('p', { class: 'mas-hint', text: t('settingsDevlogHint') }),
+    devlogList,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      devTitle,
+      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '＋ ' + t('settingsDevlogAdd'), onClick: async () => {
+        try {
+          await api('/agent/devlog', { method: 'POST', body: { title: devTitle.value, body: devBody.value } });
+          devTitle.value = ''; devBody.value = '';
+          toast(t('settingsDevlogSaved'), 'ok');
+          loadDevlog();
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+    ]),
+    devBody,
+  ]) : null;
+
+  const infoBody = el('div', {}, [el('p', { class: 'mas-hint', text: '…' })]);
+  (async () => {
+    try {
+      const info = await api('/info');
+      replace(infoBody, el('div', { class: 'mas-row mas-wrap mas-chips' }, [
+        el('span', { class: 'mas-chip', text: `${t('settingsInfoVersion')}: ${info.version || '?'}` }),
+        el('span', { class: 'mas-chip', text: `${t('settingsInfoViewport')}: ${(info.viewport || {}).width || '?'}×${(info.viewport || {}).height || '?'}` }),
+        el('span', { class: 'mas-chip', text: `${t('settingsInfoServerTime')}: ${tehranWhen(info.serverTime)}` }),
+      ]));
+    } catch (error) { replace(infoBody, el('p', { class: 'mas-hint', text: error.message })); }
+  })();
+  const infoCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: 'ℹ️ ' + t('settingsInfoTitle') })]),
+    infoBody,
+    el('p', { class: 'mas-hint', text: t('settingsInfoDesktopHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      el('button', { class: 'mas-btn', type: 'button', text: '✉️ ' + t('settingsGoTelegram'), onClick: () => { selectTab('agent'); selectAgentSub('telegram'); state.tgSub = 'settings'; } }),
+      el('button', { class: 'mas-btn', type: 'button', text: '🗄 ' + t('settingsGoBackup'), onClick: () => selectTab('db') }),
+      el('button', { class: 'mas-btn', type: 'button', text: '🔑 ' + t('settingsGoKey'), onClick: () => { selectTab('agent'); selectAgentSub('agentkey'); } }),
+    ]),
+  ]);
+
+  replace(pane, themeCard, clipCard, devlogCard, infoCard);
+  if (hasAgent) loadDevlog();
+}
+
+/* ------------------------------------------------------------------ *
+ * Dedicated pages: any HTML the agent builds, kept in the database
+ * ------------------------------------------------------------------ */
+
+const pageDraft = { id: null };
+
+async function renderAgentPages(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let pages = [];
+  try {
+    pages = (await api('/agent/pages')).pages || [];
+  } catch (error) { return agentError(host, error); }
+
+  const titleInput = el('input', { class: 'mas-input', placeholder: t('pagesTitlePh') });
+  const htmlInput = el('textarea', { class: 'mas-input mas-mono', rows: 14, placeholder: t('pagesHtmlPh') });
+  const preview = el('iframe', {
+    class: 'mas-page-preview', title: 'preview',
+    sandbox: 'allow-scripts allow-forms allow-modals allow-popups',
+  });
+  const showPreview = () => { preview.srcdoc = htmlInput.value || ''; };
+
+  const editPage = async (id) => {
+    try {
+      const page = await api('/agent/pages?id=' + encodeURIComponent(id));
+      pageDraft.id = page.id;
+      titleInput.value = page.title || '';
+      htmlInput.value = page.html || '';
+      showPreview();
+      toast(t('pagesLoaded'), 'ok');
+    } catch (error) { toast(error.message, 'error'); }
+  };
+  const save = async () => {
+    try {
+      const body = { title: titleInput.value, html: htmlInput.value };
+      if (pageDraft.id) body.id = pageDraft.id;
+      const result = await api('/agent/pages', { method: 'POST', body });
+      pageDraft.id = result.page.id;
+      showPreview();
+      toast(t('pagesSaved'), 'ok');
+      renderAgentSub('pages');
+    } catch (error) { toast(error.message, 'error'); }
+  };
+  const grabFromReply = () => {
+    const reply = document.getElementById('mas-ai-reply');
+    const text = reply ? reply.value : '';
+    const fenced = /```html\s*\n([\s\S]*?)```/i.exec(text);
+    const whole = /<!doctype html>[\s\S]*<\/html>/i.exec(text);
+    const html = fenced ? fenced[1] : (whole ? whole[0] : '');
+    if (!html) { toast(t('pagesNoHtml'), 'error'); return; }
+    htmlInput.value = html;
+    if (!titleInput.value) titleInput.value = t('pagesUntitled');
+    showPreview();
+    toast(t('pagesGrabbed'), 'ok');
+  };
+  const remove = async (id) => {
+    if (!window.confirm(t('pagesDeleteConfirm'))) return;
+    try {
+      await api('/agent/page-delete', { method: 'POST', body: { id } });
+      toast(t('pagesDeleted'), 'ok');
+      renderAgentSub('pages');
+    } catch (error) { toast(error.message, 'error'); }
+  };
+
+  const editorCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '📝 ' + t('pagesEditor') })]),
+    el('p', { class: 'mas-hint', text: t('pagesHint') }),
+    titleInput,
+    htmlInput,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '💾 ' + t('pagesSave'), onClick: save }),
+      el('button', { class: 'mas-btn', type: 'button', text: '🔄 ' + t('pagesPreview'), onClick: showPreview }),
+      el('button', { class: 'mas-btn', type: 'button', text: '📥 ' + t('pagesGrab'), onClick: grabFromReply }),
+      el('button', { class: 'mas-btn', type: 'button', text: '🧹 ' + t('pagesNew'), onClick: () => {
+        pageDraft.id = null; titleInput.value = ''; htmlInput.value = ''; preview.srcdoc = '';
+      } }),
+    ]),
+  ]);
+  const previewCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '🖼 ' + t('pagesPreviewTitle') })]),
+    el('p', { class: 'mas-hint', text: t('pagesSandboxHint') }),
+    preview,
+  ]);
+  const listCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: `📚 ${t('pagesListTitle')} (${pages.length})` })]),
+    pages.length ? agentTable(
+      [t('pagesColTitle'), t('dbColSize'), t('pagesColUpdated'), t('pagesColAction')],
+      pages.map((page) => [
+        page.title || t('pagesUntitled'),
+        String(page.size || 0),
+        tehranWhen(page.updated_at),
+        el('span', { class: 'mas-row' }, [
+          el('button', { class: 'mas-btn mas-mini', type: 'button', text: t('pagesOpen'), onClick: () => editPage(page.id) }),
+          el('button', { class: 'mas-btn mas-mini mas-danger', type: 'button', text: t('pagesDelete'), onClick: () => remove(page.id) }),
+        ]),
+      ])) : el('p', { class: 'mas-hint', text: t('pagesEmpty') }),
+  ]);
+
+  replace(host, editorCard, previewCard, listCard);
+}
+
+/* ------------------------------------------------------------------ *
+ * Agent suggestions: structured proposals behind human gates
+ * ------------------------------------------------------------------ */
+
+const SUGG_KINDS = ['operation', 'flow', 'settings', 'ui', 'db', 'bug', 'security', 'feature'];
+const SUGG_RISKS = ['low', 'medium', 'high'];
+const SUGG_STATUSES = ['draft', 'pending', 'approved', 'rejected', 'applied', 'failed'];
+const SUGG_CHIP = { applied: 'mas-chip-ok', approved: 'mas-chip-ok', rejected: 'mas-chip-bad',
+  failed: 'mas-chip-bad', pending: 'mas-chip-warn', draft: '', archived: '' };
+const suggState = { status: '', kind: '', risk: '', q: '', open: null, form: false, editing: false };
+const suggLabel = (prefix, value) => t(prefix + value.charAt(0).toUpperCase() + value.slice(1));
+
+async function renderAgentSuggestions(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+
+  if (suggState.open) {
+    let one;
+    try {
+      one = (await api('/agent/suggestions?id=' + encodeURIComponent(suggState.open))).suggestion;
+    } catch (error) {
+      suggState.open = null;
+      return agentError(host, error);
+    }
+    const pretty = (raw) => {
+      try { return JSON.stringify(JSON.parse(raw), null, 2); } catch (_) { return raw || ''; }
+    };
+    const editFields = {
+      problem: el('textarea', { class: 'mas-input', rows: 3 }),
+      proposal: el('textarea', { class: 'mas-input', rows: 3 }),
+      reason: el('textarea', { class: 'mas-input', rows: 2 }),
+      before_state: el('textarea', { class: 'mas-input mas-mono', rows: 4 }),
+      after_state: el('textarea', { class: 'mas-input mas-mono', rows: 4 }),
+    };
+    const fill = () => {
+      for (const [name, node] of Object.entries(editFields)) node.value = one[name] || '';
+    };
+    const editor = el('div', { id: 'mas-sugg-edit', hidden: !suggState.editing }, Object.entries(editFields).map(
+      ([name, node]) => agentField(suggLabel('sugg', name.replace(/_(\w)/g, (m, c) => c.toUpperCase())), node)));
+    fill();
+    const done = (message) => { toast(message, 'ok'); renderAgentSub('suggestions'); };
+    const fail = (error) => toast(error.message, 'error');
+    const detailCard = el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' }, [
+        el('b', { text: `💡 #${one.id} — ${one.title || ''}` }),
+        el('span', { class: 'mas-chip ' + (SUGG_CHIP[one.status] || ''), text: suggLabel('suggStatus', one.status) }),
+        el('span', { class: 'mas-chip', text: suggLabel('suggRisk', one.risk || 'low') }),
+        el('span', { class: 'mas-chip', text: suggLabel('suggKind', one.kind || 'feature') }),
+      ]),
+      el('p', { class: 'mas-hint', text: `${t('suggSection')}: ${one.section || '—'} · ${tehranWhen(one.updated_at)}` }),
+      el('b', { class: 'mas-subhead', text: t('suggProblem') }),
+      el('p', { text: one.problem || '—' }),
+      el('b', { class: 'mas-subhead', text: t('suggProposal') }),
+      el('p', { text: one.proposal || '—' }),
+      el('b', { class: 'mas-subhead', text: t('suggReason') }),
+      el('p', { text: one.reason || '—' }),
+      one.evidence ? el('div', {}, [el('b', { class: 'mas-subhead', text: t('suggEvidence') }),
+        el('pre', { class: 'mas-pre mas-mono', text: one.evidence })]) : null,
+      el('div', { class: 'mas-row mas-wrap mas-diff' }, [
+        el('div', { class: 'mas-diff-col' }, [el('b', { class: 'mas-subhead', text: t('suggBefore') }),
+          el('pre', { class: 'mas-pre mas-mono', text: pretty(one.before_state) })]),
+        el('div', { class: 'mas-diff-col' }, [el('b', { class: 'mas-subhead', text: t('suggAfter') }),
+          el('pre', { class: 'mas-pre mas-mono', text: pretty(one.after_state) })]),
+      ]),
+      one.apply_result ? el('p', { class: 'mas-hint', text: `${t('suggApplyResult')}: ${one.apply_result}` }) : null,
+      one.rollback_note ? el('p', { class: 'mas-hint', text: `${t('suggRollbackNote')}: ${one.rollback_note}` }) : null,
+      editor,
+      el('div', { class: 'mas-row mas-wrap' }, [
+        el('button', { class: 'mas-btn', type: 'button', text: '→ ' + t('suggBack'), onClick: () => { suggState.open = null; suggState.editing = false; rerender(); } }),
+        el('button', { class: 'mas-btn mas-primary', type: 'button', text: '✔ ' + t('suggApprove'), onClick: () => api('/agent/suggestion-decision', { method: 'POST', body: { id: one.id, decision: 'approve' } }).then(() => done(t('suggDecided'))).catch(fail) }),
+        el('button', { class: 'mas-btn mas-danger', type: 'button', text: '✖ ' + t('suggReject'), onClick: () => api('/agent/suggestion-decision', { method: 'POST', body: { id: one.id, decision: 'reject' } }).then(() => done(t('suggDecided'))).catch(fail) }),
+        el('button', { class: 'mas-btn', type: 'button', text: '↩ ' + t('suggRequestChanges'), onClick: () => api('/agent/suggestion-decision', { method: 'POST', body: { id: one.id, decision: 'request_changes' } }).then(() => done(t('suggDecided'))).catch(fail) }),
+        el('button', { class: 'mas-btn mas-primary', type: 'button', text: '⚙ ' + t('suggApply'), onClick: () => {
+          if (!window.confirm(t('suggApplyConfirm'))) return;
+          api('/agent/suggestion-apply', { method: 'POST', body: { id: one.id } })
+            .then(() => done(t('suggApplied'))).catch(fail);
+        } }),
+        el('button', { class: 'mas-btn', type: 'button', text: '⏪ ' + t('suggRollback'), onClick: () => api('/agent/suggestion-rollback', { method: 'POST', body: { id: one.id } }).then(() => done(t('suggRolledBack'))).catch(fail) }),
+        el('button', { class: 'mas-btn mas-danger', type: 'button', text: '🗑 ' + t('suggArchive'), onClick: () => {
+          if (!window.confirm(t('suggArchiveConfirm'))) return;
+          api('/agent/suggestion-delete', { method: 'POST', body: { id: one.id } })
+            .then(() => done(t('suggArchived'))).catch(fail);
+        } }),
+        el('button', { class: 'mas-btn', type: 'button', text: '✏ ' + t('suggEdit'), onClick: () => {
+          suggState.editing = !suggState.editing;
+          editor.hidden = !suggState.editing;
+        } }),
+        el('button', { class: 'mas-btn mas-primary', type: 'button', text: '💾 ' + t('suggSaveEdit'), onClick: async () => {
+          const body = { id: one.id };
+          for (const [name, node] of Object.entries(editFields)) body[name] = node.value;
+          try { await api('/agent/suggestion-update', { method: 'POST', body }); toast(t('suggSavedEdit'), 'ok'); rerender(); }
+          catch (error) { toast(error.message, 'error'); }
+        } }),
+      ]),
+      el('p', { class: 'mas-hint', text: t('suggOperatorOnly') }),
+    ]);
+    replace(host, detailCard);
+    return;
+  }
+
+  const qs = [];
+  if (suggState.status) qs.push('status=' + encodeURIComponent(suggState.status));
+  if (suggState.kind) qs.push('kind=' + encodeURIComponent(suggState.kind));
+  if (suggState.risk) qs.push('risk=' + encodeURIComponent(suggState.risk));
+  if (suggState.q) qs.push('q=' + encodeURIComponent(suggState.q));
+  let data;
+  try {
+    data = await api('/agent/suggestions' + (qs.length ? '?' + qs.join('&') : ''));
+  } catch (error) { return agentError(host, error); }
+  const rows = data.suggestions || [];
+  const counts = data.counts || {};
+
+  const chips = el('div', { class: 'mas-row mas-wrap mas-chips' },
+    SUGG_STATUSES.map((status) => el('span', {
+      class: 'mas-chip ' + (SUGG_CHIP[status] || ''),
+      text: `${counts[status] || 0} ${suggLabel('suggStatus', status)}`,
+    })));
+
+  const qInput = el('input', { class: 'mas-input', placeholder: t('suggSearchPh'), value: suggState.q,
+    onKeydown: (event) => { if (event.key === 'Enter') { suggState.q = qInput.value; renderAgentSub('suggestions'); } } });
+  const filters = el('div', { class: 'mas-row mas-wrap' }, [
+    agentSelect([{ value: '', label: t('suggAllStatuses') }]
+      .concat(SUGG_STATUSES.map((s) => ({ value: s, label: suggLabel('suggStatus', s) }))),
+    suggState.status, (event) => { suggState.status = event.target.value; renderAgentSub('suggestions'); }),
+    agentSelect([{ value: '', label: t('suggAllKinds') }]
+      .concat(SUGG_KINDS.map((k) => ({ value: k, label: suggLabel('suggKind', k) }))),
+    suggState.kind, (event) => { suggState.kind = event.target.value; renderAgentSub('suggestions'); }),
+    agentSelect([{ value: '', label: t('suggAllRisks') }]
+      .concat(SUGG_RISKS.map((r) => ({ value: r, label: suggLabel('suggRisk', r) }))),
+    suggState.risk, (event) => { suggState.risk = event.target.value; renderAgentSub('suggestions'); }),
+    qInput,
+    el('button', { class: 'mas-btn', type: 'button', text: '🔎', onClick: () => { suggState.q = qInput.value; renderAgentSub('suggestions'); } }),
+    el('button', { class: 'mas-btn mas-primary', type: 'button', text: '＋ ' + t('suggNew'), onClick: () => { suggState.form = !suggState.form; renderAgentSub('suggestions'); } }),
+  ]);
+
+  const formFields = {
+    title: el('input', { class: 'mas-input', placeholder: t('suggTitlePh') }),
+    section: el('input', { class: 'mas-input', placeholder: t('suggSectionPh') }),
+    kind: agentSelect(SUGG_KINDS.map((k) => ({ value: k, label: suggLabel('suggKind', k) })), 'feature'),
+    risk: agentSelect(SUGG_RISKS.map((r) => ({ value: r, label: suggLabel('suggRisk', r) })), 'low'),
+    problem: el('textarea', { class: 'mas-input', rows: 3, placeholder: t('suggProblem') }),
+    proposal: el('textarea', { class: 'mas-input', rows: 3, placeholder: t('suggProposal') }),
+    evidence: el('textarea', { class: 'mas-input mas-mono', rows: 2, placeholder: t('suggEvidence') }),
+    before_state: el('textarea', { class: 'mas-input mas-mono', rows: 3, placeholder: t('suggBefore') }),
+    after_state: el('textarea', { class: 'mas-input mas-mono', rows: 3, placeholder: t('suggAfter') }),
+    reason: el('textarea', { class: 'mas-input', rows: 2, placeholder: t('suggReason') }),
+    impact: el('textarea', { class: 'mas-input', rows: 2, placeholder: t('suggImpact') }),
+  };
+  const formCard = suggState.form ? el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '🧾 ' + t('suggNew') })]),
+    el('p', { class: 'mas-hint', text: t('suggFormHint') }),
+    ...Object.entries(formFields).map(([name, node]) => agentField(
+      name === 'title' ? t('suggColTitle') : name === 'section' ? t('suggSection')
+        : name === 'kind' ? t('suggKind') : name === 'risk' ? t('suggRisk')
+          : suggLabel('sugg', name.replace(/_(\w)/g, (m, c) => c.toUpperCase())), node)),
+    el('button', { class: 'mas-btn mas-primary', type: 'button', text: '💾 ' + t('suggCreate'), onClick: async () => {
+      const body = { needs_human: 1 };
+      for (const [name, node] of Object.entries(formFields)) body[name] = node.value;
+      try {
+        const result = await api('/agent/suggestions', { method: 'POST', body });
+        suggState.form = false;
+        suggState.open = result.suggestion.id;
+        toast(t('suggCreated'), 'ok');
+        renderAgentSub('suggestions');
+      } catch (error) { toast(error.message, 'error'); }
+    } }),
+  ]) : null;
+
+  const listCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: `🗂 ${t('suggListTitle')} (${rows.length})` })]),
+    rows.length ? agentTable(
+      ['#', t('suggColTitle'), t('suggColKind'), t('suggColRisk'), t('suggColStatus'), t('suggColUpdated'), ''],
+      rows.map((row) => [
+        String(row.id),
+        row.title || '',
+        suggLabel('suggKind', row.kind || 'feature'),
+        suggLabel('suggRisk', row.risk || 'low'),
+        el('span', { class: 'mas-chip ' + (SUGG_CHIP[row.status] || ''), text: suggLabel('suggStatus', row.status) }),
+        tehranWhen(row.updated_at),
+        el('button', { class: 'mas-btn mas-mini', type: 'button', text: t('suggDetail'), onClick: () => { suggState.open = row.id; renderAgentSub('suggestions'); } }),
+      ])) : el('p', { class: 'mas-hint', text: t('suggEmpty') }),
+  ]);
+
+  replace(host,
+    el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' }, [el('b', { text: '💡 ' + t('agentSubSuggestions') })]),
+      el('p', { class: 'mas-hint', text: t('suggHint') }),
+      chips,
+      filters,
+    ]),
+    formCard,
+    listCard);
 }

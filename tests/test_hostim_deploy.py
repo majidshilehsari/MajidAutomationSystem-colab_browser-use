@@ -409,7 +409,11 @@ class TestSecretHandling(unittest.TestCase):
     def test_secrets_are_generated_when_absent(self):
         body = read(ENTRYPOINT)
         self.assertIn("openssl rand -hex 8", body, "AUTOMATION_TOKEN generator")
-        self.assertIn("openssl rand -hex 4", body, "VNC password generator")
+        # ONE password for every gate: the VNC gate defaults to the very same
+        # AUTOMATION_TOKEN, any length; an explicit VNC_PASSWORD still wins.
+        self.assertIn('VNC_PASSWORD="${env_pass:-$AUTOMATION_TOKEN}"', body)
+        self.assertNotIn("openssl rand -hex 4", body,
+                         "the separate VNC password generator must be gone")
 
     def test_secrets_file_is_locked_down(self):
         body = read(ENTRYPOINT)
@@ -699,8 +703,9 @@ class TestSecretPrecedenceIsReal(unittest.TestCase):
     def test_first_boot_generates_and_locks_down_the_file(self):
         token, password, stored, _ = self.run_it()
         self.assertRegex(token, r"^[0-9a-f]{16}$")
-        self.assertRegex(password, r"^[0-9a-f]{8}$")
-        self.assertEqual(stored, {"AUTOMATION_TOKEN": token, "VNC_PASSWORD": password})
+        self.assertEqual(password, token,
+                         "one password must open both the VNC gate and the API")
+        self.assertEqual(stored, {"AUTOMATION_TOKEN": token, "VNC_PASSWORD": token})
         self.assertEqual(stat.S_IMODE(os.stat(self.secrets).st_mode), 0o600)
 
     def test_second_boot_reuses_the_file_unchanged(self):
@@ -732,8 +737,16 @@ class TestSecretPrecedenceIsReal(unittest.TestCase):
     def test_env_alone_on_a_fresh_volume_is_kept_and_persisted(self):
         token, password, stored, _ = self.run_it({"AUTOMATION_TOKEN": "c" * 16})
         self.assertEqual(token, "c" * 16)
-        self.assertRegex(password, r"^[0-9a-f]{8}$", "the password should still be generated")
-        self.assertEqual(stored["AUTOMATION_TOKEN"], "c" * 16)
+        self.assertEqual(password, "c" * 16,
+                         "the operator's own password is the only password")
+
+    def test_any_password_length_is_accepted(self):
+        # the old folklore said "it must be eight characters"; it must not.
+        for candidate in ("short", "a-very-long-passphrase-with-dashes!", "۱۲۳۴"):
+            token, password, stored, _ = self.run_it(
+                {"AUTOMATION_TOKEN": candidate})
+            self.assertEqual((token, password), (candidate, candidate))
+            self.assertEqual(stored["AUTOMATION_TOKEN"], candidate)
 
     def test_the_function_logs_the_path_but_never_the_values(self):
         token, password, _, logged = self.run_it()
@@ -815,6 +828,27 @@ class TestDesktopUsability(unittest.TestCase):
         self.assertIn('layouts="us"', self.keyboard)
         # and the toggle option is only sent when a group actually exists
         self.assertIn('"$layouts" == *","*', self.keyboard)
+
+    def test_desktop_clock_shows_time_date_and_zone(self):
+        self.assertIn("DESKTOP_TZ=${DESKTOP_TZ:-Asia/Tehran}", self.entrypoint)
+        self.assertIn('export TZ="$DESKTOP_TZ"', self.entrypoint)
+        self.assertIn("%H:%M  %Y/%m/%d  (%Z)", self.entrypoint)
+
+    def test_focus_behaves_like_windows_and_the_taskbar_shows_icons(self):
+        # autoRaise:true was what kept re-topping stray dialogs over Chrome.
+        self.assertIn('"session.screen0.focusModel": "ClickToFocus"', self.entrypoint)
+        self.assertIn('"session.autoRaise": "false"', self.entrypoint)
+        self.assertIn('"session.screen0.iconbar.usePixmap": "true"', self.entrypoint)
+        self.assertIn('"session.screen0.iconbar.iconWidth": "36"', self.entrypoint)
+        style = read(os.path.join(HOSTIM_DIR, "fluxbox-style"))
+        self.assertIn("toolbar.height: 40", style)
+        # icon-only buttons: the title is painted in the button's own colour
+        self.assertIn("toolbar.iconbar.unfocused.textColor: #10141a", style)
+
+    def test_menu_can_clean_a_sticky_file_dialog(self):
+        menu = read(os.path.join(HOSTIM_DIR, "fluxbox-menu"))
+        self.assertIn("Open File", menu)
+        self.assertIn("wmctrl -ic", menu)
 
     def test_keyboard_is_configured_on_the_agent_display_too(self):
         self.assertIn('DISPLAY="$AI_DISPLAY" setxkbmap', self.keyboard)

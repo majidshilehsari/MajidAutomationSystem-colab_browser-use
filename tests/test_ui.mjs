@@ -39,6 +39,13 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false) {
       return json({ authRequired: true, viewport: { width: 1366, height: 768 },
                     engineBusy: false, detector: 'x11+cdp', cdpAvailable: false });
     }
+    if ((options.method || 'GET').toUpperCase() === 'POST'
+        && (clean.endsWith('/clipboard') || clean.endsWith('/agent/devlog')
+            || clean.endsWith('/agent/pages') || clean.endsWith('/agent/suggestions')
+            || clean.includes('/agent/suggestion-'))) {
+      return json({ ok: true, page: { id: 7, title: 'x' },
+        suggestion: { id: 3, status: 'draft' } });
+    }
     if (token !== VALID_TOKEN) {
       return { ok: false, status: 401,
                text: async () => '{"error":"missing or wrong X-Automation-Token header"}' };
@@ -49,7 +56,8 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false) {
     }
     if (clean.endsWith('/agent')) {
       return json({
-        settings: {}, llm: { provider: 'ai-browser', chatProvider: 'deepseek',
+        settings: { 'ui.theme': 'dark' },
+        llm: { provider: 'ai-browser', chatProvider: 'deepseek',
                              configured: true, browser: { available: false } },
         telegram: { mode: 'bot', targets: [] },
         captcha: { enabled: true, strategies: ['vision', 'human'], autoClick: false,
@@ -102,6 +110,50 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false) {
             purpose: 'manual', target: '\u06af\u0631\u0648\u0647 \u0645\u0646',
             body: '\u0633\u0644\u0627\u0645', error: '' },
         ] });
+    }
+    if (clean.endsWith('/clipboard')) {
+      return json({ ok: true, text: '\u0633\u0644\u0627\u0645 \u06a9\u0644\u06cc\u067e', length: 10 });
+    }
+    if (clean.endsWith('/agent/devlog')) {
+      return json({ entries: [{ id: 1, at: 1760000000, actor: 'system',
+        title: '\u0646\u0627\u0645\u0647 \u0628\u0647 \u0627\u06cc\u062c\u0646\u062a',
+        body: '\u0645\u062a\u0646 \u0646\u0627\u0645\u0647' }] });
+    }
+    if (clean.endsWith('/agent/pages')) {
+      if (path.includes('id=')) {
+        return json({ id: 7, title: '\u06af\u0632\u0627\u0631\u0634',
+          html: '<b>\u0633\u0644\u0627\u0645</b>', created_at: 1760000000,
+          updated_at: 1760000000, actor: 'agent' });
+      }
+      return json({ pages: [{ id: 7, title: '\u06af\u0632\u0627\u0631\u0634', size: 18,
+        created_at: 1760000000, updated_at: 1760000000, actor: 'agent' }] });
+    }
+    if (clean.endsWith('/agent/suggestions')) {
+      const one = { id: 3, title: '\u062a\u0645 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636',
+        problem: '\u0645\u0634\u06a9\u0644', proposal: '\u067e\u06cc\u0634\u0646\u0647\u0627\u062f',
+        reason: '\u062f\u0644\u06cc\u0644', evidence: '', section: '\u062a\u0645',
+        kind: 'settings', risk: 'low', needs_human: 1, status: 'approved',
+        before_state: '{"key":"ui.theme","value":"light"}',
+        after_state: '{"key":"ui.theme","value":"dark"}',
+        apply_result: '', rollback_note: '', actor: 'agent',
+        created_at: 1760000000, updated_at: 1760000000 };
+      if (path.includes('id=')) return json({ suggestion: one });
+      return json({ suggestions: [one], counts: { approved: 1 } });
+    }
+    if (clean.includes('/agent/suggestion-') || clean.endsWith('/agent/page-delete')) {
+      return json({ ok: true, suggestion: { id: 3, status: 'applied' } });
+    }
+    if (clean.endsWith('/agent/db/schema')) {
+      return json({ ok: true, database: 'agent.db',
+        tables: [{ name: 'settings', rows: 2,
+          columns: [{ name: 'key' }, { name: 'value' }],
+          indexes: [], sensitiveColumns: ['value'] }], note: '' });
+    }
+    if (clean.endsWith('/agent/db/query')) {
+      return json({ ok: true, columns: ['key', 'value'],
+        rows: [{ key: 'telegram.botToken',
+          value: { masked: true, configured: true, length: 15, last4: 'CRET' } }],
+        count: 1, truncated: false, maskedColumns: ['value'] });
     }
     if (clean.endsWith('/agent/backups')) {
       return json({
@@ -602,12 +654,17 @@ test('a wrong token says so in the banner, not in a toast', async () => {
   }
 });
 
-test('the panel declares a light colour scheme so widgets stay consistent', async () => {
+test('the panel follows the persisted theme from the database', async () => {
   const page = await mount();
   try {
+    await authenticate(page);
+    // the fake /agent carries ui.theme=dark: boot must honour the db choice
+    const applied = await page.until(
+      () => page.doc.documentElement.dataset.theme === 'dark');
+    assert.ok(applied, 'the persisted dark theme was never applied');
     const root = page.doc.getElementById('mas-root');
-    assert.equal(page.window.getComputedStyle(root).colorScheme, 'light',
-      'without color-scheme:light Chrome may mix dark popups into the light panel');
+    assert.equal(page.window.getComputedStyle(root).colorScheme, 'dark',
+      'widgets must follow the chosen theme, not fight it');
   } finally {
     await page.cleanup();
   }
@@ -622,10 +679,17 @@ test('step list shows no numbering and options are styled dark', async () => {
     await page.wait(10);
     const list = page.doc.querySelector('.mas-steps');
     assert.equal(page.window.getComputedStyle(list).listStyleType, 'none');
-    const selectBg = page.window.getComputedStyle(
-      page.doc.querySelector('select.mas-input')).backgroundColor;
-    assert.ok(selectBg.startsWith('rgb(248, 250, 252)'),
-      `the select must carry the light surface, got ${selectBg}`);
+    // jsdom does not resolve var(), so check the token layer in the source:
+    // the select paints with --bg-solid, which both themes define.
+    // jsdom shadows the global URL, so derive the path as a plain string.
+    const cssPath = decodeURIComponent(import.meta.url.replace(/^file:\/\//, ''))
+      .replace(/tests\/test_ui\.mjs$/, 'automation/static/automation.css');
+    const css = fs.readFileSync(cssPath, 'utf8');
+    assert.match(css, /select\.mas-input \{[^}]*background: var\(--bg-solid\)/s,
+      'selects must use the surface token');
+    assert.match(css, /:root \{[^}]*--bg-solid: #ffffff/s, 'light token missing');
+    assert.match(css, /html\[data-theme='dark'\] \{[^}]*--bg-solid: #171b21/s,
+      'dark token missing');
   } finally {
     await page.cleanup();
   }
@@ -633,7 +697,7 @@ test('step list shows no numbering and options are styled dark', async () => {
 
 /** Tabs by name. Chat is first and the library comes before the stages. */
 const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages', 'shots', 'texts',
-  'db', 'agent', 'log'];
+  'db', 'settings', 'agent', 'log'];
 
 function tab(page, name) {
   const node = Array.from(page.doc.querySelectorAll('.mas-tab'))
@@ -1132,8 +1196,9 @@ test('record layer stays hidden until recording starts', async () => {
  * The coworker agent tab
  * ------------------------------------------------------------------ */
 
-const AGENT_SUB_LABELS = ['پرامپت', 'کلید ایجنت', 'تلگرام', 'مرورگر', 'نشانگر',
-  'وظایف', 'کپچا', 'اسکریپت', 'داده‌ها', 'کلیدها'];
+const AGENT_SUB_LABELS = ['پرامپت', 'صفحه اختصاصی', 'پیشنهادات ایجنت',
+  'کلید ایجنت', 'تلگرام', 'مرورگر', 'نشانگر', 'وظایف', 'کپچا', 'اسکریپت',
+  'داده‌ها', 'کلیدها'];
 
 /** Open the panel, authenticate, switch to the agent tab and one sub-pane. */
 async function openAgentSub(page, label) {
@@ -1311,7 +1376,8 @@ test('the data pane offers a read-only query and shows the audit trail', async (
     assert.ok(await page.until(() => paneText(page).includes('یادداشت')),
       'the notes never appeared');
     assert.ok(paneText(page).includes('setting.stored'), 'the audit trail is not shown');
-    const sql = page.doc.querySelector('#mas-agent-sub textarea');
+    // the phase-9 db-window card is .mas-card; the classic query box is not
+    const sql = page.doc.querySelector('#mas-agent-sub .mas-box:not(.mas-card) textarea');
     assert.ok(sql, 'the SQL box is missing');
     sql.value = 'SELECT id, name FROM jobs';
     sql.dispatchEvent(new page.window.Event('input'));
@@ -1765,10 +1831,134 @@ test('without an agent the chat and library tabs disappear', async () => {
     assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'flow',
       'the panel must fall back to the stages');
     assert.equal(page.display('#mas-tab-flow'), 'block');
-    // The other seven tabs are exactly the sidebar this project always had.
+    // The rest is exactly the sidebar this project always had — settings
+    // stays visible because theme and clipboard work without the agent too.
     assert.deepEqual(Array.from(page.doc.querySelectorAll('.mas-tab'))
       .filter((node) => !node.hidden).map((node) => node.dataset.tab),
-    ['flow', 'record', 'pages', 'shots', 'texts', 'agent', 'log']);
+    ['flow', 'record', 'pages', 'shots', 'texts', 'settings', 'agent', 'log']);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Phase 9: settings tab, theme persistence, dedicated pages and the
+ * human-gated suggestion pipeline.
+ * ------------------------------------------------------------------ */
+
+test('the settings tab brings theme, clipboard bridge and devlog together', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'settings');
+    const ready = await page.until(
+      () => page.doc.getElementById('mas-clip-text') !== null);
+    assert.ok(ready, 'the clipboard card never rendered');
+    const pane = () => page.doc.getElementById('mas-tab-settings').textContent;
+
+    const dark = findButton(page, 'تاریک', '#mas-tab-settings');
+    assert.ok(dark, 'no dark theme button in the header card');
+    dark.dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    assert.equal(page.doc.documentElement.dataset.theme, 'dark');
+    const saved = page.posts.filter((p) => p.url.endsWith('/agent/settings')).pop();
+    assert.ok(saved, 'the theme choice was never persisted');
+    assert.equal(JSON.parse(saved.body)['ui.theme'], 'dark',
+      'the database is what makes the choice follow the operator');
+
+    assert.ok(await page.until(() => pane().includes('نامه به ایجنت')),
+      'the seeded devlog letter never appeared');
+
+    const read = findButton(page, 'از دسکتاپ بخوان', '#mas-tab-settings');
+    read.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() =>
+      page.doc.getElementById('mas-clip-text').value.includes('کلیپ')),
+      'reading the desktop clipboard never filled the box');
+    const write = findButton(page, 'بفرست به دسکتاپ', '#mas-tab-settings');
+    write.dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    assert.ok(page.posts.some((p) => p.url.endsWith('/clipboard')),
+      'writing to the desktop clipboard never hit the api');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the agent grows a dedicated-page sub-tab backed by the database', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    await openAgentSub(page, 'صفحه اختصاصی');
+    assert.ok(await page.until(() => paneText(page).includes('گزارش')),
+      'the saved page never showed up');
+    assert.ok(page.doc.querySelector('#mas-agent-sub iframe.mas-page-preview'),
+      'the sandboxed preview frame is missing');
+    const open = findButton(page, 'باز کردن', '#mas-agent-sub');
+    open.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() =>
+      page.doc.querySelector('#mas-agent-sub textarea').value.includes('<b>')),
+      'opening a page must load its HTML into the editor');
+    const save = findButton(page, '💾', '#mas-agent-sub');
+    save.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    assert.ok(page.posts.some((p) => p.url.endsWith('/agent/pages')),
+      'saving never hit /agent/pages');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('agent suggestions live behind human gates', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    await openAgentSub(page, 'پیشنهادات ایجنت');
+    assert.ok(await page.until(() => paneText(page).includes('تم پیش‌فرض')),
+      'the saved suggestion never showed up');
+    const detail = findButton(page, 'جزئیات', '#mas-agent-sub');
+    detail.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => paneText(page).includes('"key": "ui.theme"')),
+      'the before/after diff never rendered');
+    const apply = findButton(page, '⚙', '#mas-agent-sub');
+    assert.ok(apply, 'the apply button is missing');
+    // nothing is automatic: cancelling the confirm must not apply
+    page.window.confirm = () => false;
+    apply.dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    assert.ok(!page.posts.some((p) => p.url.endsWith('/agent/suggestion-apply')),
+      'apply fired even though the human cancelled');
+    page.window.confirm = () => true;
+    apply.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    assert.ok(page.posts.some((p) => p.url.endsWith('/agent/suggestion-apply')),
+      'apply never reached the api');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the data pane grows a read-only database window with masking', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'داده‌ها');
+    const schemaBtn = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
+      .find((b) => b.textContent.includes('نقشهٔ دیتابیس'));
+    assert.ok(schemaBtn, 'the schema button is missing');
+    schemaBtn.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.doc.querySelector('.mas-dbschema-out')
+      && page.doc.querySelector('.mas-dbschema-out').textContent.includes('settings')),
+      'the schema map never rendered');
+    const sql = page.doc.getElementById('mas-dbwin-sql');
+    sql.value = 'SELECT * FROM settings';
+    const runBtn = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
+      .find((b) => b.textContent.includes('کوئری فقط‌خواندنی'));
+    runBtn.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts
+      .some((post) => post.url.endsWith('/agent/db/query'))),
+      'the read-only query never hit the api');
+    assert.ok(await page.until(() => page.doc.querySelector('.mas-dbquery-out')
+      && page.doc.querySelector('.mas-dbquery-out').textContent.includes('ماسک‌شده')),
+      'masked values must be visible as masked, never as plaintext');
   } finally {
     await page.cleanup();
   }

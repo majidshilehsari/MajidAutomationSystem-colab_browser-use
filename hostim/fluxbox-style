@@ -7,7 +7,7 @@
 ! نکته: این فایل فقط در مسیر Hostim استفاده می‌شود؛ مسیر Colab دست‌نخورده است.
 
 ! -- toolbar (taskbar) -----------------------------------------------------
-toolbar.height: 34
+toolbar.height: 40
 toolbar.bevelWidth: 4
 toolbar: gradient vertical
 toolbar.color: #10141a
@@ -36,10 +36,10 @@ toolbar.iconbar.focused: gradient vertical
 toolbar.iconbar.focused.color: #1f6feb
 toolbar.iconbar.focused.colorTo: #22c1a8
 toolbar.iconbar.focused.font: MasFont-11:bold
-toolbar.iconbar.focused.textColor: #06111c
+toolbar.iconbar.focused.textColor: #1f6feb
 toolbar.iconbar.unfocused: parentrelative
 toolbar.iconbar.unfocused.font: MasFont-11
-toolbar.iconbar.unfocused.textColor: #8d99a7
+toolbar.iconbar.unfocused.textColor: #10141a
 toolbar.systray: parentrelative
 
 ! -- windows ----------------------------------------------------------------

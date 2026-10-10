@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from . import schema
+from . import clipboard
 from .agent import AgentError
 from .engine import TERMINAL_STATES, png_size
 
@@ -170,6 +171,10 @@ class AutomationApi:
             ("POST", "/texts", self.route_text_add),
             ("DELETE", "/texts/*", self.route_text_delete),
             ("POST", "/prompt", self.route_prompt),
+            # The browser<->desktop clipboard bridge (noVNC carries keys, not
+            # clipboard text, so the panel moves it explicitly).
+            ("GET", "/clipboard", self.route_clipboard_read),
+            ("POST", "/clipboard", self.route_clipboard_write),
         ]
         if agent is not None:
             self.routes.extend(self._agent_routes())
@@ -255,6 +260,23 @@ class AutomationApi:
             # the trustworthy telegram test
             ("GET", "/agent/telegram/log", self.route_agent_telegram_log),
             ("POST", "/agent/telegram/diagnose", self.route_agent_telegram_diagnose),
+            # Phase 9: the development journal, dedicated HTML pages,
+            # structured suggestions behind human gates, and a strictly
+            # read-only window into the whole database.
+            ("GET", "/agent/devlog", self.route_agent_devlog_list),
+            ("POST", "/agent/devlog", self.route_agent_devlog_add),
+            ("GET", "/agent/pages", self.route_agent_pages_list),
+            ("POST", "/agent/pages", self.route_agent_pages_save),
+            ("POST", "/agent/page-delete", self.route_agent_page_delete),
+            ("GET", "/agent/suggestions", self.route_agent_suggestions_list),
+            ("POST", "/agent/suggestions", self.route_agent_suggestion_create),
+            ("POST", "/agent/suggestion-update", self.route_agent_suggestion_update),
+            ("POST", "/agent/suggestion-decision", self.route_agent_suggestion_decision),
+            ("POST", "/agent/suggestion-apply", self.route_agent_suggestion_apply),
+            ("POST", "/agent/suggestion-rollback", self.route_agent_suggestion_rollback),
+            ("POST", "/agent/suggestion-delete", self.route_agent_suggestion_delete),
+            ("GET", "/agent/db/schema", self.route_agent_db_schema),
+            ("POST", "/agent/db/query", self.route_agent_db_query),
         ]
 
     # -- helpers --------------------------------------------------------
@@ -317,6 +339,16 @@ class AutomationApi:
                      "is on. The operator's own token still works.")
         if verdict == "denied":
             return error_response(401, "missing or wrong X-Automation-Token header")
+        # Routes with a human gate (decisions, apply, rollback, deletes) read
+        # this to tell the operator's own token from the agent key.
+        self._last_verdict = verdict
+        if verdict == "agent" and self.agent is not None:
+            # The connector promise: every agent-key call is audited, with the
+            # endpoint but never the key itself, and never through ?k= logs.
+            try:
+                self.agent.audit_key_use(method, path)
+            except Exception:
+                pass
 
         for route_method, pattern, handler in self.routes:
             if route_method != method:
@@ -1035,6 +1067,149 @@ class AutomationApi:
             target=payload.get("target") or "",
             channel=str(payload.get("channel") or ""),
             text=str(payload.get("text") or "")))
+
+    # -- clipboard bridge (operator surface) -----------------------------
+    def route_clipboard_read(self, **_: Any) -> Response:
+        try:
+            text = clipboard.read_text()
+        except clipboard.ClipboardError as exc:
+            raise ApiError(409, str(exc))
+        return json_response(200, {"ok": True, "text": text,
+                                   "length": len(text)})
+
+    def route_clipboard_write(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        if "text" not in payload:
+            raise ApiError(400, "missing 'text'")
+        try:
+            result = clipboard.write_text(str(payload.get("text") or ""))
+        except clipboard.ClipboardError as exc:
+            raise ApiError(409, str(exc))
+        return json_response(200, result)
+
+    # -- Phase 9 agent surfaces ------------------------------------------
+    def _actor(self) -> str:
+        return "agent" if getattr(self, "_last_verdict", "operator") == "agent" \
+            else "operator"
+
+    def _require_operator(self) -> None:
+        if self._actor() != "operator":
+            raise ApiError(403, "این عمل فقط با رمز خودِ اپراتور انجام می‌شود؛"
+                                " کلید ایجنت اجازهٔ آن را ندارد.")
+
+    def _int_id(self, payload: Dict[str, Any], name: str = "id") -> int:
+        try:
+            return int(payload.get(name))
+        except (TypeError, ValueError):
+            raise ApiError(400, "'%s' must be a number" % name)
+
+    def _int_query(self, query: Optional[Dict[str, List[str]]], name: str,
+                   default: int = 0) -> int:
+        raw = ((query or {}).get(name) or [""])[0]
+        if raw == "":
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            raise ApiError(400, "'%s' must be a number" % name)
+
+    def route_agent_devlog_list(self, *,
+                                query: Optional[Dict[str, List[str]]] = None,
+                                **_: Any) -> Response:
+        return json_response(200, self.agent.devlog_list(
+            limit=self._int_query(query, "limit", 50)))
+
+    def route_agent_devlog_add(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(201, self.agent.devlog_add(
+            str(payload.get("title") or ""), str(payload.get("body") or ""),
+            actor=self._actor()))
+
+    def route_agent_pages_list(self, *,
+                               query: Optional[Dict[str, List[str]]] = None,
+                               **_: Any) -> Response:
+        page_id = self._int_query(query, "id", 0)
+        if page_id:
+            return json_response(200, self.agent.pages_get(page_id))
+        return json_response(200, self.agent.pages_list())
+
+    def route_agent_pages_save(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(201, self.agent.pages_save(
+            str(payload.get("title") or ""), str(payload.get("html") or ""),
+            page_id=payload.get("id"), actor=self._actor()))
+
+    def route_agent_page_delete(self, *, body: bytes = b"", **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.pages_delete(
+            self._int_id(payload), actor=self._actor()))
+
+    def route_agent_suggestions_list(self, *,
+                                     query: Optional[Dict[str, List[str]]] = None,
+                                     **_: Any) -> Response:
+        suggestion_id = self._int_query(query, "id", 0)
+        if suggestion_id:
+            return json_response(200, {"suggestion":
+                                       self.agent.suggestion_get(suggestion_id)})
+        def one(name: str) -> str:
+            return ((query or {}).get(name) or [""])[0]
+        return json_response(200, self.agent.suggestions_list(
+            status=one("status"), section=one("section"), kind=one("kind"),
+            risk=one("risk"), q=one("q"),
+            limit=self._int_query(query, "limit", 100),
+            include_archived=one("archived") in ("1", "true")))
+
+    def route_agent_suggestion_create(self, *, body: bytes = b"",
+                                      **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(201, self.agent.suggestion_create(
+            payload, actor=self._actor()))
+
+    def route_agent_suggestion_update(self, *, body: bytes = b"",
+                                      **_: Any) -> Response:
+        payload = self.read_json(body)
+        suggestion_id = self._int_id(payload)
+        payload.pop("id", None)
+        return json_response(200, self.agent.suggestion_update(
+            suggestion_id, payload, actor=self._actor()))
+
+    def route_agent_suggestion_decision(self, *, body: bytes = b"",
+                                        **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.suggestion_decision(
+            self._int_id(payload), str(payload.get("decision") or ""),
+            note=str(payload.get("note") or ""), actor=self._actor()))
+
+    def route_agent_suggestion_apply(self, *, body: bytes = b"",
+                                     **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.suggestion_apply(
+            self._int_id(payload), actor=self._actor()))
+
+    def route_agent_suggestion_rollback(self, *, body: bytes = b"",
+                                        **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.suggestion_rollback(
+            self._int_id(payload), actor=self._actor()))
+
+    def route_agent_suggestion_delete(self, *, body: bytes = b"",
+                                      **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.suggestion_remove(
+            self._int_id(payload), actor=self._actor()))
+
+    def route_agent_db_schema(self, **_: Any) -> Response:
+        return json_response(200, self.agent.db_schema())
+
+    def route_agent_db_query(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.db_query(
+            str(payload.get("sql") or ""), actor=self._actor()))
 
     def route_agent_api_index(self, **_: Any) -> Response:
         return json_response(200, {"endpoints": self.agent.api_index(),

@@ -304,6 +304,64 @@ API_INDEX = [
                                          "ارسال واقعی.",
      "Step-by-step Telegram test: mode, bot login, account session, target "
      "and one real send."),
+    ("GET", "/agent/devlog", "📔 لاگ پیشرفت توسعه: یادداشت‌هایی که می‌گویند "
+                             "تا اینجا چه ساخته‌ایم؛ اولین یادداشت، نامهٔ "
+                             "خودت است.",
+     "The development journal: notes on what has been built so far; the "
+     "first entry is your own letter."),
+    ("POST", "/agent/devlog", "📔 ثبت یادداشت پیشرفت {title, body}؛ ایجنت و "
+                              "اپراتور هر دو می‌توانند.",
+     "Add a progress note {title, body}; both agent and operator may."),
+    ("GET", "/agent/pages", "📄 صفحه‌های اختصاصی: فهرست HTMLهای ساختهٔ ایجنت "
+                            "(?id= یک صفحهٔ کامل را برمی‌گرداند).",
+     "Dedicated pages: every HTML the agent built (?id= returns one page)."),
+    ("POST", "/agent/pages", "📄 ساخت/ویرایش صفحهٔ اختصاصی {title, html, id?}؛ "
+                             "در دیتابیس می‌ماند.",
+     "Create/update a dedicated page {title, html, id?}; persisted in the db."),
+    ("POST", "/agent/page-delete", "📄 حذف صفحهٔ اختصاصی {id}؛ فقط اپراتور.",
+     "Delete a dedicated page {id}; operator only."),
+    ("GET", "/agent/suggestions", "💡 پیشنهادها با فیلتر status/section/kind/"
+                                  "risk/q و شمارش وضعیت‌ها (?id= یکی را کامل "
+                                  "برمی‌گرداند).",
+     "Suggestions with filters and per-status counts (?id= returns one)."),
+    ("POST", "/agent/suggestions", "💡 ثبت پیشنهاد ساختاریافته؛ همیشه با "
+                                   "وضعیت draft/pending شروع می‌شود — هیچ‌کس "
+                                   "خودش را تأیید نمی‌کند.",
+     "Create a structured suggestion; always starts as draft/pending — "
+     "nobody self-approves."),
+    ("POST", "/agent/suggestion-update", "💡 ویرایش پیشنهاد {id, ...} پیش از "
+                                         "تصمیم؛ وضعیت و نتیجهٔ اعمال با این "
+                                         "مسیر عوض نمی‌شوند.",
+     "Edit a suggestion before decision; status/apply fields are ignored."),
+    ("POST", "/agent/suggestion-decision", "⚖️ تصمیم انسانی {id, decision: "
+                                           "approve|reject|request_changes, "
+                                           "note}؛ فقط اپراتور.",
+     "Human decision {id, decision, note}; operator only."),
+    ("POST", "/agent/suggestion-apply", "⚖️ اعمال پیشنهادِ تأییدشده {id}؛ "
+                                        "بدون تأیید انسانی ۴۰۹ می‌گیرد و "
+                                        "تنظیمات واقعاً نوشته می‌شود.",
+     "Apply an APPROVED suggestion {id}; 409 without human approval."),
+    ("POST", "/agent/suggestion-rollback", "↩️ بازگرداندن پیشنهادِ اعمال‌شده "
+                                           "{id} به وضعیت before_state؛ فقط "
+                                           "اپراتور.",
+     "Roll an applied suggestion {id} back to its before_state."),
+    ("POST", "/agent/suggestion-delete", "🗑 بایگانی نرم پیشنهاد {id} — حذف "
+                                         "واقعی انجام نمی‌شود؛ فقط اپراتور.",
+     "Soft-delete (archive) a suggestion {id}; operator only."),
+    ("GET", "/agent/db/schema", "🗄 نقشهٔ فقط‌خواندنی دیتابیس: جدول‌ها، "
+                                "ستون‌ها، ایندکس‌ها، تعداد رکوردها و ستون‌های "
+                                "حساس.",
+     "Read-only database map: tables, columns, indexes, row counts."),
+    ("POST", "/agent/db/query", "🗄 اجرای SELECT/WITH/PRAGMA/EXPLAIN روی "
+                                "دیتابیس (اتصال mode=ro، حداکثر ۵۰۰ ردیف، "
+                                "ستون‌های حساس ماسک‌شده).",
+     "Run SELECT/WITH/PRAGMA/EXPLAIN read-only, 500-row cap, secrets masked."),
+    ("GET", "/clipboard", "📋 خواندن کلیپ‌بورد دسکتاپ — noVNC کلیدها را می‌برد "
+                          "ولی کلیپ‌بورد را نه؛ این پلِ آن است.",
+     "Read the desktop clipboard — the bridge noVNC does not provide."),
+    ("POST", "/clipboard", "📋 نوشتن در کلیپ‌بورد دسکتاپ {text}؛ آمادهٔ Ctrl+V "
+                           "داخل مرورگر.",
+     "Write {text} to the desktop clipboard, ready for Ctrl+V."),
 ]
 
 
@@ -340,6 +398,7 @@ class AgentHub:
         # cannot start two runs against the same single mouse.
         self._job_lock = threading.Lock()
         self._chat_threads: List[threading.Thread] = []
+        self._key_use_stamp = 0.0
 
         self.store = store if store is not None else AgentStore(data_dir, clock=clock)
         if public_base:
@@ -686,7 +745,9 @@ class AgentHub:
         screenshot."""
         if not self.store.get_secret(self.store.AGENT_KEY, ""):
             self.store.agent_key(actor="startup")
-        return self.store.agent_key_info()
+        info = self.store.agent_key_info()
+        info["lastUse"] = self.store.get_setting("agentKey.lastUse")
+        return info
 
     def agent_key_reveal(self, actor: str = "operator") -> Dict[str, Any]:
         self.store.audit(actor, "agentKey.revealed",
@@ -1559,6 +1620,333 @@ class AgentHub:
 
     def audit(self, limit: int = 200) -> List[Dict[str, Any]]:
         return self.store.list_audit(limit=limit)
+
+    # -- devlog: the development-progress journal -----------------------
+    DEVLOG_SEED_TITLE = "نامه به ایجنت همکار — آنچه تا اینجا ساخته شده"
+    DEVLOG_SEED_BODY = (
+        "سلام ایجنت همکار،\n\n"
+        "این اولین یادداشتِ «لاگ پیشرفت توسعه» است؛ از حالا هر تغییر مهم در"
+        " همین جدول ثبت می‌شود و تو می‌توانی آن را با GET /agent/devlog بخوانی"
+        " تا همیشه بدانی کجای کار هستیم.\n\n"
+        "خلاصهٔ آنچه تا امروز (دور نهم) ساخته شده:\n"
+        "۱) دیپلوی Hostim بدون دست زدن به نسخهٔ پایدار Colab: Dockerfile،"
+        " entrypoint، حجم /data، یک پورت عمومی، HTTPS خودکار.\n"
+        "۲) دسکتاپ گرافیکی: Xvfb + fluxbox با تسک‌بار شبه‌ویندوزی، منوی"
+        " راست‌کلیک فارسی، کیبورد us,fa با Alt+Shift، NumLock، فونت فارسی"
+        " خودمیزبان (وزیرمتن) و ساعت با تاریخ و منطقهٔ زمانی.\n"
+        "۳) پنل اتوماسیون فارسی با تب‌های چت/کتابخانه/مسیر/ضبط/صفحات/"
+        "اسکرین‌شات/متن‌ها/دیتابیس/ایجنت/لاگ، تم روشن و تاریک با ذخیرهٔ"
+        " انتخاب کاربر در دیتابیس.\n"
+        "۴) ایجنت همکار: کلید اختصاصی با rotate/revoke/kill-switch، چت،"
+        " ساخت مسیر، نشانگر ماوس، وظایف زمان‌بندی‌شده، اسکریپت با تأیید"
+        " انسانی، کپچا فقط رایگان و با تحویل به انسان، دسترسی کامل به"
+        " کروم (تب‌ها/تاریخچه/تب‌های بسته‌شده).\n"
+        "۵) تلگرام: بات + یوزربات، مسیریابی هر نوع پیام، مقصدهای"
+        " ویرایش‌پذیر، لاگ پیام‌ها، تست مرحله‌به‌مرحله.\n"
+        "۶) دیتابیس و پشتیبان‌گیری: پشتیبان دستی و خودکار (cron/every/at)،"
+        " دانلود، ارسال به تلگرام، هرس خودکار.\n"
+        "۷) دور نهم: صفحهٔ اختصاصی (HTML سازندهٔ تو، ذخیره در دیتابیس)،"
+        " پیشنهادهای ساختاریافته با دروازهٔ تأیید انسانی، پنجرهٔ"
+        " فقط‌خواندنی دیتابیس با ماسک‌سازی محرمانه‌ها، پل کلیپ‌بورد"
+        " مرورگر↔دسکتاپ، و رمز ورود واحد با طول دلخواه.\n\n"
+        "قواعد بازی برای تو: خواندن آزاد؛ پیشنهاد دادن آزاد؛ اما هر تغییر،ِ"
+        " اجرا، ارسال پیام یا حذف فقط با تأیید انسان. کپچا و بررسی امنیتی"
+        " همیشه توقف کامل و تحویل به انسان. کلیدها و توکن‌ها هرگز در چت یا"
+        " URL نمی‌آیند — از هدر x-agent-key یا Authorization: Bearer استفاده"
+        " کن که connector خودش تزریق می‌کند.\n\n"
+        "— ایجنت مادر")
+
+    def devlog_seed_if_empty(self) -> None:
+        """The journal starts with the letter that brings the agent up to speed."""
+        if not self.store.list_devlog(limit=1):
+            self.store.add_devlog(self.DEVLOG_SEED_TITLE,
+                                  self.DEVLOG_SEED_BODY, actor="system")
+
+    def devlog_add(self, title: str, body: str = "",
+                   actor: str = "agent") -> Dict[str, Any]:
+        if not str(title or "").strip():
+            raise AgentError("عنوان یادداشت خالی است.")
+        entry = self.store.add_devlog(title, body, actor=actor)
+        self.store.audit(actor, "devlog-add", str(title)[:200])
+        return {"ok": True, "entry": entry}
+
+    def devlog_list(self, limit: int = 50) -> Dict[str, Any]:
+        self.devlog_seed_if_empty()
+        return {"entries": self.store.list_devlog(limit=limit)}
+
+    # -- dedicated pages: HTML the agent builds, persisted --------------
+    def pages_list(self) -> Dict[str, Any]:
+        return {"pages": self.store.list_pages()}
+
+    def pages_get(self, page_id: Any) -> Dict[str, Any]:
+        page = self.store.get_page(int(page_id))
+        if not page:
+            raise AgentError("صفحه‌ای با این شناسه نیست.", 404)
+        return page
+
+    def pages_save(self, title: str, html: str, page_id: Any = None,
+                   actor: str = "agent") -> Dict[str, Any]:
+        if not str(html or "").strip():
+            raise AgentError("HTML خالی ذخیره نمی‌شود.")
+        page = self.store.save_page(title or "بی‌عنوان", html,
+                                    page_id=int(page_id) if page_id else None,
+                                    actor=actor)
+        self.store.audit(actor, "page-save",
+                         "id=%s title=%s" % (page.get("id"), str(title)[:100]))
+        return {"ok": True, "page": {key: page.get(key) for key in
+                                     ("id", "title", "created_at",
+                                      "updated_at", "actor")},
+                "size": len(html)}
+
+    def pages_delete(self, page_id: Any, actor: str = "operator") -> Dict[str, Any]:
+        if not self.store.delete_page(int(page_id)):
+            raise AgentError("صفحه‌ای با این شناسه نیست.", 404)
+        self.store.audit(actor, "page-delete", "id=%s" % page_id)
+        return {"ok": True, "deleted": int(page_id)}
+
+    # -- suggestions: structured proposals behind human gates -----------
+    _SUGGESTION_DECISIONS = {"approve": "approved", "reject": "rejected",
+                             "request_changes": "pending"}
+
+    def suggestions_list(self, **filters: Any) -> Dict[str, Any]:
+        rows = self.store.list_suggestions(**filters)
+        counts: Dict[str, int] = {}
+        for row in self.store.list_suggestions(include_archived=True, limit=500):
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
+        return {"suggestions": rows, "counts": counts}
+
+    def suggestion_get(self, suggestion_id: Any) -> Dict[str, Any]:
+        row = self.store.get_suggestion(int(suggestion_id))
+        if not row:
+            raise AgentError("پیشنهادی با این شناسه نیست.", 404)
+        return row
+
+    def suggestion_create(self, data: Dict[str, Any],
+                          actor: str = "agent") -> Dict[str, Any]:
+        if not str(data.get("title") or "").strip():
+            raise AgentError("پیشنهاد بدون عنوان ثبت نمی‌شود.")
+        payload = dict(data)
+        # Nobody self-approves: a fresh suggestion is a draft (or pending when
+        # the agent explicitly hands it over for review).
+        if payload.get("status") not in ("draft", "pending"):
+            payload["status"] = "draft"
+        if payload.get("risk") not in ("low", "medium", "high"):
+            payload["risk"] = "low"
+        row = self.store.save_suggestion(payload, actor=actor)
+        self.store.audit(actor, "suggestion-create",
+                         "id=%s title=%s" % (row.get("id"), str(payload["title"])[:150]))
+        return {"ok": True, "suggestion": row}
+
+    def suggestion_update(self, suggestion_id: Any, data: Dict[str, Any],
+                          actor: str = "agent") -> Dict[str, Any]:
+        current = self.suggestion_get(suggestion_id)
+        payload = dict(data)
+        # status only moves through decision/apply/rollback — not through a
+        # plain edit, and never by the agent's own hand.
+        payload.pop("status", None)
+        payload.pop("apply_result", None)
+        payload.pop("rollback_note", None)
+        row = self.store.save_suggestion(payload,
+                                         suggestion_id=int(current["id"]),
+                                         actor=actor)
+        self.store.audit(actor, "suggestion-update", "id=%s" % current["id"])
+        return {"ok": True, "suggestion": row}
+
+    def suggestion_decision(self, suggestion_id: Any, decision: str,
+                            note: str = "",
+                            actor: str = "operator") -> Dict[str, Any]:
+        current = self.suggestion_get(suggestion_id)
+        status = self._SUGGESTION_DECISIONS.get(str(decision or ""))
+        if not status:
+            raise AgentError("تصمیم نامعتبر؛ یکی از approve/reject/"
+                             "request_changes بدهید.")
+        if current["status"] == "archived":
+            raise AgentError("پیشنهاد بایگانی‌شده تصمیم نمی‌گیرد.", 409)
+        row = self.store.save_suggestion(
+            {"status": status, "apply_result": str(note or "")[:2000]},
+            suggestion_id=int(current["id"]), actor=actor)
+        self.store.audit(actor, "suggestion-decision",
+                         "id=%s decision=%s" % (current["id"], decision))
+        return {"ok": True, "suggestion": row}
+
+    def suggestion_apply(self, suggestion_id: Any,
+                         actor: str = "operator") -> Dict[str, Any]:
+        """Apply an APPROVED suggestion. Human approval is a precondition:
+        the agent can propose and even draft the change, but this door only
+        opens after a decision of `approve` (and the route only lets the
+        operator's own token through it)."""
+        current = self.suggestion_get(suggestion_id)
+        if current["status"] != "approved":
+            raise AgentError("اول باید یک انسان این پیشنهاد را تأیید کند"
+                             " (وضعیت فعلی: %s)." % current["status"], 409)
+        kind = str(current.get("kind") or "")
+        try:
+            if kind == "settings":
+                after = json.loads(current.get("after_state") or "{}")
+                key = str(after.get("key") or "")
+                if not key:
+                    raise ValueError("after_state باید {key, value} باشد.")
+                result = {"applied": "settings", "key": key}
+                self.store.set_setting(key, after.get("value"), actor=actor)
+            else:
+                raise AgentError(
+                    "این نوع پیشنهاد (%s) اعمال خودکارِ امن ندارد؛ تغییر را"
+                    " دستی انجام بده و نتیجه را ثبت کن. هیچ چیزی عوض نشد."
+                    % (kind or "نامشخص"), 409)
+            row = self.store.save_suggestion(
+                {"status": "applied",
+                 "apply_result": json.dumps(result, ensure_ascii=False)},
+                suggestion_id=int(current["id"]), actor=actor)
+            self.store.audit(actor, "suggestion-apply", "id=%s" % current["id"])
+            return {"ok": True, "suggestion": row, "result": result}
+        except AgentError:
+            raise
+        except Exception as exc:  # the apply failed; say so, keep the trail
+            row = self.store.save_suggestion(
+                {"status": "failed", "apply_result": str(exc)[:2000]},
+                suggestion_id=int(current["id"]), actor=actor)
+            self.store.audit(actor, "suggestion-apply-failed",
+                             "id=%s error=%s" % (current["id"], str(exc)[:200]))
+            return {"ok": False, "suggestion": row, "error": str(exc)}
+
+    def suggestion_rollback(self, suggestion_id: Any,
+                            actor: str = "operator") -> Dict[str, Any]:
+        current = self.suggestion_get(suggestion_id)
+        if current["status"] != "applied":
+            raise AgentError("فقط پیشنهادِ اعمال‌شده rollback می‌شود.", 409)
+        if str(current.get("kind") or "") != "settings":
+            raise AgentError("برای این نوع پیشنهاد بازگشت خودکار وجود ندارد؛"
+                             " دستی برگردان و نتیجه را ثبت کن.", 409)
+        before = json.loads(current.get("before_state") or "{}")
+        key = str(before.get("key") or "")
+        if not key:
+            raise AgentError("before_state برای بازگشت موجود نیست.", 409)
+        self.store.set_setting(key, before.get("value"), actor=actor)
+        row = self.store.save_suggestion(
+            {"status": "pending",
+             "rollback_note": "بازگشت به وضعیت قبل توسط %s" % actor},
+            suggestion_id=int(current["id"]), actor=actor)
+        self.store.audit(actor, "suggestion-rollback", "id=%s key=%s"
+                         % (current["id"], key))
+        return {"ok": True, "suggestion": row}
+
+    def suggestion_remove(self, suggestion_id: Any,
+                          actor: str = "operator") -> Dict[str, Any]:
+        """Soft-delete: suggestions are archived, never truly destroyed."""
+        current = self.suggestion_get(suggestion_id)
+        row = self.store.save_suggestion({"status": "archived"},
+                                         suggestion_id=int(current["id"]),
+                                         actor=actor)
+        self.store.audit(actor, "suggestion-archive", "id=%s" % current["id"])
+        return {"ok": True, "suggestion": row}
+
+    # -- a strictly read-only window into the whole database ------------
+    SENSITIVE_COLUMN = re.compile(
+        r"(token|secret|password|passwd|hash|cookie|session|otp|cvv|card|"
+        r"api[_-]?key|agent[_-]?key|private[_-]?key|credential)", re.IGNORECASE)
+    QUERY_PREFIXES = ("select", "with", "pragma", "explain")
+    QUERY_BANNED = re.compile(
+        r"\b(attach|detach|load_extension)\b", re.IGNORECASE)
+
+    def _mask_value(self, value: Any) -> Any:
+        text = "" if value is None else str(value)
+        if not text:
+            return {"masked": True, "configured": False}
+        return {"masked": True, "configured": True, "length": len(text),
+                "last4": text[-4:] if len(text) >= 4 else "*" * len(text)}
+
+    def _mask_row(self, columns: List[str], row: List[Any]) -> Dict[str, Any]:
+        out: Dict[str, Any] = {}
+        for column, value in zip(columns, row):
+            out[column] = (self._mask_value(value)
+                           if self.SENSITIVE_COLUMN.search(column) else value)
+        return out
+
+    def _readonly_connect(self) -> sqlite3.Connection:
+        # mode=ro is the hard guarantee: even a smuggled write statement dies
+        # at the SQLite layer, whatever the string checks above let through.
+        uri = "file:%s?mode=ro" % self.store.db_path
+        return sqlite3.connect(uri, uri=True, timeout=10.0)
+
+    def db_schema(self) -> Dict[str, Any]:
+        tables: List[Dict[str, Any]] = []
+        with self._readonly_connect() as db:
+            names = [row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+                " AND name NOT LIKE 'sqlite_%' ORDER BY name")]
+            for name in names:
+                columns = [{"name": row[1], "type": row[2],
+                            "notnull": bool(row[3]), "pk": bool(row[5])}
+                           for row in db.execute(
+                               'PRAGMA table_info("%s")' % name.replace('"', ""))]
+                indexes = [row[0] for row in db.execute(
+                    'PRAGMA index_list("%s")' % name.replace('"', ""))]
+                count = db.execute(
+                    'SELECT count(*) FROM "%s"' % name.replace('"', "")
+                ).fetchone()[0]
+                tables.append({"name": name, "columns": columns,
+                               "indexes": indexes, "rows": int(count),
+                               "sensitiveColumns": [
+                                   column["name"] for column in columns
+                                   if self.SENSITIVE_COLUMN.search(column["name"])]})
+        return {"ok": True, "database": os.path.basename(self.store.db_path),
+                "tables": tables,
+                "note": "این پنجره فقط‌خواندنی است؛ ستون‌های حساس در هر"
+                        " پاسخی ماسک می‌شوند."}
+
+    def db_query(self, sql: str, actor: str = "agent") -> Dict[str, Any]:
+        text = str(sql or "").strip().rstrip(";")
+        if not text:
+            raise AgentError("کوئری خالی است.")
+        if ";" in text:
+            raise AgentError("فقط یک دستور در هر درخواست؛ «;» میانی ممنوع.")
+        lowered = text.lower()
+        if not lowered.startswith(self.QUERY_PREFIXES):
+            raise AgentError("فقط SELECT/WITH/PRAGMA/EXPLAIN مجاز است.")
+        if self.QUERY_BANNED.search(text):
+            raise AgentError("ATTACH/DETACH/load_extension ممنوع است.")
+        self.store.audit(actor, "db-query", text[:200])
+        try:
+            with self._readonly_connect() as db:
+                cursor = db.execute(text)
+                columns = [d[0] for d in cursor.description or []]
+                rows = cursor.fetchmany(500)
+                truncated = cursor.fetchone() is not None
+        except sqlite3.Error as exc:
+            raise AgentError("کوئری رد شد: %s" % exc)
+        masked = [c for c in columns if self.SENSITIVE_COLUMN.search(c)]
+        rows_out: List[Dict[str, Any]] = []
+        for row in rows:
+            masked_row = self._mask_row(columns, list(row))
+            # The settings table keeps secrets in ordinary-looking columns:
+            # mask `value` row-by-row whenever the row itself is flagged or
+            # its key smells like a credential. Column names alone are not
+            # enough, and "read the whole db" must never leak a token.
+            if "key" in columns and "value" in columns:
+                key_value = str(row[columns.index("key")] or "")
+                flag = (row[columns.index("secret")]
+                        if "secret" in columns else None)
+                if flag or self.SENSITIVE_COLUMN.search(key_value):
+                    masked_row["value"] = self._mask_value(
+                        row[columns.index("value")])
+                    if "value" not in masked:
+                        masked.append("value")
+            rows_out.append(masked_row)
+        return {"ok": True, "columns": columns, "rows": rows_out,
+                "count": len(rows), "truncated": truncated,
+                "maskedColumns": masked}
+
+    # -- the agent-key connector: audited, never in the URL -------------
+    def audit_key_use(self, method: str, path: str) -> None:
+        """Every request authenticated with the agent key leaves a trace:
+        an audit row plus a throttled "last use" stamp the panel shows."""
+        self.store.audit("agent-key", "api-use", "%s %s" % (method, path))
+        now = self._clock()
+        last = float(self._key_use_stamp or 0)
+        if now - last >= 60.0:
+            self._key_use_stamp = now
+            self.store.set_setting("agentKey.lastUse", {
+                "at": round(now, 3), "endpoint": "%s %s" % (method, path)})
 
 
 def _png_size(path: str) -> Optional[Dict[str, int]]:

@@ -52,6 +52,10 @@ NUMLOCK=${NUMLOCK:-on}
 # "off" drops the Persian group and leaves a plain English desktop, for anyone
 # who finds the Alt+Shift toggle more annoying than useful.
 PERSIAN_KEYBOARD=${PERSIAN_KEYBOARD:-on}
+# Timezone of the desktop clock. Tehran by default so the taskbar time matches
+# what the operator's wall clock says; change it and the clock follows.
+DESKTOP_TZ=${DESKTOP_TZ:-Asia/Tehran}
+export TZ="$DESKTOP_TZ"
 # The coworker agent's own browser. It runs on a SECOND display and a SECOND
 # Chrome profile so it can never fight the automation for the one mouse and
 # keyboard on :1, and so `wmctrl -a "Google Chrome"` cannot pick the wrong
@@ -181,16 +185,19 @@ load_or_create_secrets() {
   fi
 
   AUTOMATION_TOKEN="${env_token:-$file_token}"
-  VNC_PASSWORD="${env_pass:-$file_pass}"
 
-  # 8 hex characters for the VNC password: x11vnc truncates it to 8 bytes
-  # anyway, and this matches what start_colab_browser.sh generates.
+  # ONE password for everything. The operator asked to drop the separate VNC
+  # password and the old minimum-length folklore: whatever sits in
+  # AUTOMATION_TOKEN (any length, any characters) is THE login password —
+  # the noVNC gate, the panel gate and the API header all accept exactly it.
+  # Note: the VNC protocol itself only carries the first 8 bytes of a
+  # password, so x11vnc and the noVNC client both truncate longer ones the
+  # same way; typing the full password still opens the gate. An explicit
+  # VNC_PASSWORD env remains an override for anyone who wants two values.
   if [[ -z "$AUTOMATION_TOKEN" ]]; then
     AUTOMATION_TOKEN=$(openssl rand -hex 8)
   fi
-  if [[ -z "$VNC_PASSWORD" ]]; then
-    VNC_PASSWORD=$(openssl rand -hex 4)
-  fi
+  VNC_PASSWORD="${env_pass:-$AUTOMATION_TOKEN}"
 
   # Keep the file in sync with the values actually in use. Otherwise a later
   # restart without the env override would fall back to a stale password and
@@ -326,14 +333,23 @@ keys = {
     "session.screen0.toolbar.autoHide": "false",
     "session.screen0.toolbar.placement": "BottomCenter",
     "session.screen0.toolbar.widthPercent": "100",
-    "session.screen0.toolbar.height": "34",
+    "session.screen0.toolbar.height": "40",
     "session.screen0.toolbar.tools":
         "prevworkspace, workspacename, nextworkspace, iconbar, systemtray, clock",
     "session.screen0.workspaceNames":
         "ورک‌اسپیس ۱, ورک‌اسپیس ۲, ورک‌اسپیس ۳, ورک‌اسپیس ۴",
     "session.screen0.tabs.usePixmap": "false",
-    "session.screen0.focusModel": "ClickFocus",
-    "session.autoRaise": "true",
+    # Windows-like stacking: a click focuses AND raises that one window, and
+    # nothing raises itself just because the mouse slid over it. autoRaise:true
+    # was what kept re-topping stray dialogs over Chrome.
+    "session.screen0.focusModel": "ClickToFocus",
+    "session.autoRaise": "false",
+    # Icon-only taskbar buttons with the app's own pixmap icon.
+    "session.screen0.iconbar.usePixmap": "true",
+    "session.screen0.iconbar.iconWidth": "36",
+    # Clock: time, date and the zone it belongs to, exactly as asked.
+    "session.screen0.strftimeFormat": "%H:%M  %Y/%m/%d  (%Z)",
+    "session.screen0.clockMode": "24",
 }
 lines = init.read_text(encoding="utf-8").splitlines() if init.exists() else []
 out, seen = [], set()

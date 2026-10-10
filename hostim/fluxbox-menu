@@ -10,6 +10,7 @@
   [separator]
   [windowsmenu] (🪟 پنجره‌های باز)
   [workspacesmenu] (🗂 فضاهای کاری)
+  [exec] (🧹 جمع‌کردن پنجرهٔ مزاحم «Open File») {sh -c "for w in $(wmctrl -l | grep -iE 'open file|file chooser|باز کردن پرونده' | awk '{print $1}'); do wmctrl -ic $w; done"}
   [exec] (✖ بستن پنجرهٔ فعال) {xdotool getwindowfocus windowkill}
   [separator]
   [config] (⚙️ تنظیمات دسکتاپ)
