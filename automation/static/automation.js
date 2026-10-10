@@ -13,9 +13,21 @@ import {
   stepDef, truncate, structuredCloneSafe, compact, formatDateTime,
 } from './core.mjs';
 
+/** Tab order, and the tab the panel opens on. */
+const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages', 'shots',
+  'texts', 'agent', 'log'];
+const DEFAULT_TAB = 'chat';
+
+/** The tab the panel opens on: the remembered one, else the first. */
+function initialTab() {
+  const saved = localStorage.getItem(LS.tab);
+  return TAB_ORDER.includes(saved) ? saved : DEFAULT_TAB;
+}
+
 const LS = {
   token: 'mas.token', lang: 'mas.lang', flow: 'mas.flow', panel: 'mas.panelOpen',
   request: 'mas.userRequest', reply: 'mas.aiReply',
+  provider: 'mas.chatProvider', context: 'mas.chatContext', tab: 'mas.tab',
 };
 
 const state = {
@@ -45,6 +57,21 @@ const state = {
   userRequest: localStorage.getItem(LS.request) || '',
   aiReply: localStorage.getItem(LS.reply) || '',
   aiNotes: '',
+  // Chat tab: the draft survives a re-render, the provider and the context
+  // switch survive a tab change, and the answer arrives by polling.
+  chatDraft: '',
+  chatProvider: localStorage.getItem(LS.provider) || '',
+  chatContext: localStorage.getItem(LS.context) === '1',
+  chatProviders: [],
+  // Library tab: operations, the step catalogue that documents them, and the
+  // row currently being edited (a draft, so a cancel loses nothing saved).
+  operations: [],
+  stepTypes: {},
+  editingOperation: null,
+  deleteArmed: '',
+  // Agent tab: a revealed key is kept in memory only, never in localStorage.
+  revealedKey: '',
+  apiIndex: null,
 };
 
 function loadFlow() {
@@ -153,8 +180,10 @@ function buildPanel() {
     title: t('title'), onClick: () => setPanelOpen(true),
   }, '◀');
 
-  const tabs = ['flow', 'record', 'pages', 'shots', 'texts', 'agent', 'log']
-    .map((name) => el('button', {
+  // Chat first because talking to the model is now the entry point of the
+  // panel, and the operations library right before the stages tab because an
+  // operation is what you open *into* the stages.
+  const tabs = TAB_ORDER.map((name) => el('button', {
     class: 'mas-tab', dataset: { tab: name }, type: 'button',
     text: t('tab' + name[0].toUpperCase() + name.slice(1)),
     onClick: () => selectTab(name),
@@ -192,7 +221,9 @@ function buildPanel() {
       ]),
     ]),
     el('div', { class: 'mas-body' }, [
-      el('section', { id: 'mas-tab-flow', class: 'mas-tabpane' }),
+      el('section', { id: 'mas-tab-chat', class: 'mas-tabpane' }),
+      el('section', { id: 'mas-tab-library', class: 'mas-tabpane', hidden: true }),
+      el('section', { id: 'mas-tab-flow', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-record', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-pages', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-shots', class: 'mas-tabpane', hidden: true }),
@@ -271,7 +302,7 @@ function setPanelOpen(open) {
 
 function currentTab() {
   const active = document.querySelector('.mas-tab.is-active');
-  return (active && active.dataset.tab) || 'flow';
+  return (active && active.dataset.tab) || initialTab();
 }
 
 function selectTab(name) {
@@ -281,6 +312,10 @@ function selectTab(name) {
   document.querySelectorAll('.mas-tabpane').forEach((node) => {
     node.hidden = node.id !== `mas-tab-${name}`;
   });
+  if (name !== 'chat') stopChatPolling();
+  try { localStorage.setItem(LS.tab, name); } catch (_) { /* quota */ }
+  if (name === 'chat') renderChat();
+  if (name === 'library') renderOperations();
   if (name === 'pages') renderPages();
   if (name === 'shots') renderShots();
   if (name === 'texts') renderTexts();
@@ -290,11 +325,32 @@ function selectTab(name) {
   if (name === 'record') renderRecord();
 }
 
+/** Hide the two tabs that need the coworker agent, when there is none.
+ *
+ *  A 404 means this deployment was built without an agent (`--no-agent`), which
+ *  is a configuration, not a fault. A 401 only means no token yet, so the tabs
+ *  stay: an operator who is about to type one must not watch them vanish.
+ */
+async function refreshAgentTabs() {
+  let missing = false;
+  try {
+    await api('/agent');
+  } catch (error) {
+    missing = error.status === 404;
+  }
+  for (const name of ['chat', 'library']) {
+    const node = document.querySelector(`.mas-tab[data-tab="${name}"]`);
+    if (node) node.hidden = missing;
+  }
+  if (missing && ['chat', 'library'].includes(currentTab())) selectTab('flow');
+  return !missing;
+}
+
 function rerenderAll() {
   document.getElementById('mas-root').remove();
   buildPanel();
   setPanelOpen(localStorage.getItem(LS.panel) === '1');
-  selectTab('flow');
+  selectTab(initialTab());
 }
 
 /* ------------------------------------------------------------------ *
@@ -911,6 +967,9 @@ function renderTokenBar(show, detail = '') {
 }
 
 function setConnected(ok, needsToken = false) {
+  // Only on a change, not on every poll: this fires an extra /agent request.
+  if (ok && lastConnected !== true) refreshAgentTabs();
+  lastConnected = ok;
   const dot = document.getElementById('mas-conn');
   if (!dot) return;
   dot.className = 'mas-dot ' + (ok ? 'is-ok' : 'is-bad');
@@ -1298,7 +1357,7 @@ async function renderPages() {
     if (page.screenshot) {
       imageBlobUrl('/artifact?path=' + encodeURIComponent(page.screenshot)).then((url) => {
         if (url) thumb.appendChild(el('img', { src: url, alt: page.pageKey }));
-      });
+      }).catch(() => { /* a thumbnail is never worth an error */ });
     }
     list.appendChild(el('div', { class: 'mas-page' }, [
       thumb,
@@ -1321,9 +1380,54 @@ async function renderPages() {
     ]));
   }
 
+  // The detected page goes *above* the list: after pressing detect you want
+  // the screenshot right there, not scrolled away under seven other pages.
   const detail = el('div', { id: 'mas-page-detail' });
   if (state.activePage) renderPageDetail(detail, state.activePage);
-  replace(pane, head, list, detail);
+  replace(pane, head, detail, list);
+}
+
+/** One primitive on the real desktop, no flow needed. */
+async function manualControl(body, okMessage) {
+  try {
+    const data = await api('/control', { method: 'POST', body });
+    toast(okMessage || 'ok', 'ok');
+    return data;
+  } catch (error) {
+    toast(error.message, 'error');
+    return null;
+  }
+}
+
+/** The screenshot of a detected page: image first, absolute link beside it. */
+function pageShotBlock(page) {
+  const box = el('div', { class: 'mas-shotfirst' });
+  const name = page.screenshot || page.publicShot || '';
+  const publicUrl = page.publicShot
+    ? `${window.location.origin}${API_PREFIX}/public/shot/`
+      + encodeURIComponent(page.publicShot)
+    : '';
+  if (name) {
+    const img = el('img', { class: 'mas-shotfirst-img', alt: page.pageKey || 'screenshot' });
+    imageBlobUrl('/artifact?path=' + encodeURIComponent(name)).then((url) => {
+      if (url) img.src = url;
+    }).catch(() => { /* the link below still works */ });
+    box.appendChild(img);
+  } else {
+    box.appendChild(el('p', { class: 'mas-hint', text: t('noShotForPage') }));
+  }
+  const meta = el('div', { class: 'mas-shotfirst-meta' }, [
+    el('b', { text: truncate(page.title || page.pageKey || '', 60) }),
+    page.url ? el('div', { class: 'mas-hint', text: truncate(page.url, 90) }) : null,
+    el('div', { class: 'mas-hint', text: `${formatTime(page.capturedAt)} · ${(page.elements || []).length} ${t('elements')}` }),
+    publicUrl ? el('a', { class: 'mas-shotfirst-link', href: publicUrl, target: '_blank', rel: 'noopener', text: publicUrl }) : null,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      publicUrl ? button('📋 ' + t('copyShotLink'), () => copyText(publicUrl)) : null,
+      name ? button('🖱 ' + t('refreshShot'), () => manualControl({ action: 'screenshot' }, t('shotTaken'))) : null,
+    ]),
+  ]);
+  box.appendChild(meta);
+  return box;
 }
 
 function renderPageDetail(container, page) {
@@ -1331,24 +1435,35 @@ function renderPageDetail(container, page) {
     el('td', {}, el('code', { text: truncate(item.selector, 40) })),
     el('td', { text: truncate(item.text || item.href || '', 28) }),
     el('td', { text: `${item.desktop.x},${item.desktop.y}` }),
-    el('td', {}, el('button', {
-      class: 'mas-btn mas-mini', type: 'button', text: t('useAsClick'),
-      onClick: () => {
-        addStep(createStep('click', { x: item.desktop.x, y: item.desktop.y }));
-        toast(labelFor(state.flow.steps[state.flow.steps.length - 1]), 'ok');
-      },
-    })),
+    el('td', {}, el('div', { class: 'mas-row' }, [
+      // A real click: it moves the actual pointer on the desktop, right now.
+      el('button', {
+        class: 'mas-btn mas-mini mas-primary', type: 'button', text: t('clickNow'),
+        title: t('clickNowHint'),
+        onClick: () => manualControl(
+          { action: 'click', x: item.desktop.x, y: item.desktop.y },
+          `${t('clickNow')}: ${item.desktop.x},${item.desktop.y}`),
+      }),
+      el('button', {
+        class: 'mas-btn mas-mini', type: 'button', text: t('useAsClick'),
+        onClick: () => {
+          addStep(createStep('click', { x: item.desktop.x, y: item.desktop.y }));
+          toast(labelFor(state.flow.steps[state.flow.steps.length - 1]), 'ok');
+        },
+      }),
+    ])),
   ]));
 
   const challenge = page.challenge || { detected: false, signals: [] };
   replace(container,
+    pageShotBlock(page),
     challenge.detected ? el('div', { class: 'mas-challenge-warning' }, [
       el('b', { text: '⚠ ' + t('possibleChallenge') }),
       el('div', { class: 'mas-hint', text: `${t('challengeSignals')}: ${(challenge.signals || []).join(', ')}` }),
       el('div', { class: 'mas-hint', text: t('challengeBody') }),
     ]) : el('p', { class: 'mas-hint', text: t('noChallengeDetected') }),
     el('h4', { text: `${t('elements')} (${(page.elements || []).length})` }),
-    page.url ? el('div', { class: 'mas-hint', text: page.url }) : null,
+    el('p', { class: 'mas-hint', text: t('elementsClickHint') }),
     el('table', { class: 'mas-table' }, [
       el('thead', {}, el('tr', {}, [
         el('th', { text: t('elementSelector') }),
@@ -1525,7 +1640,10 @@ async function renderTexts() {
  * ------------------------------------------------------------------ */
 
 function renderAgentAssistant(host) {
-  const pane = host || document.getElementById('mas-agent-sub');
+  // Its home is the chat tab's toolbox now; the old agent sub-pane id stays as
+  // a fallback so an older panel.html keeps working.
+  const pane = host || document.getElementById('mas-chat-assistant')
+    || document.getElementById('mas-agent-sub');
   if (!pane) return;
   // The model's whole answer. Kept so the next prompt can hand it back, which
   // is what turns one shot into a conversation.
@@ -1664,10 +1782,12 @@ async function buildPrompt() {
  * so a failure in one cannot blank the others.
  * ------------------------------------------------------------------ */
 
-const AGENT_SUBS = ['assistant', 'jobs', 'captcha', 'telegram', 'scripts', 'data', 'keys'];
+const AGENT_SUBS = ['agentkey', 'telegram', 'cursor', 'jobs', 'captcha',
+  'scripts', 'data', 'keys'];
 
 const AGENT_RENDERERS = {
-  assistant: renderAgentAssistant,
+  agentkey: renderAgentKey,
+  cursor: renderAgentCursor,
   jobs: renderAgentJobs,
   captcha: renderAgentCaptcha,
   telegram: renderAgentTelegram,
@@ -1725,10 +1845,10 @@ async function agentError(host, error) {
 async function renderAgent() {
   const pane = document.getElementById('mas-tab-agent');
   if (!pane) return;
-  const active = state.agentSub || 'assistant';
-  // The status bar is filled in separately, on purpose: the assistant sub-pane
-  // is the copy-prompt/import workflow and must keep working even when this
-  // deployment has no agent attached at all (--no-agent, or an unreachable API).
+  const active = state.agentSub || AGENT_SUBS[0];
+  // The status bar is filled in separately, on purpose: it must keep working
+  // even when this deployment has no agent attached at all (--no-agent, or an
+  // unreachable API), while a sub-pane is allowed to show that error itself.
   replace(pane,
     el('div', { class: 'mas-row mas-wrap' }, AGENT_SUBS.map((name) => button(
       agentSubLabel(name), () => selectAgentSub(name),
@@ -1779,7 +1899,7 @@ function selectAgentSub(name) {
 function renderAgentSub(name) {
   const host = document.getElementById('mas-agent-sub');
   if (!host) return;
-  (AGENT_RENDERERS[name] || renderAgentAssistant)(host);
+  (AGENT_RENDERERS[name] || AGENT_RENDERERS[AGENT_SUBS[0]])(host);
 }
 
 /* -- jobs ------------------------------------------------------------ */
@@ -2055,94 +2175,289 @@ async function renderAgentCaptcha(host) {
 /* -- telegram -------------------------------------------------------- */
 
 async function renderAgentTelegram(host) {
-  replace(host, el('p', { class: 'mas-empty', text: '…' }));
-  let status; let settings = {};
+  replace(host, el('p', { class: 'mas-empty', text: '\u2026' }));
+  let status;
   try {
     status = await api('/agent/telegram/status');
-    settings = (state.agent && state.agent.settings) || {};
   } catch (error) { return agentError(host, error); }
-  const targets = status.targets || [];
-  const draft = { mode: status.mode };
 
-  // Chats found through getUpdates. Kept apart from the saved targets on
-  // purpose: this list is a picker, and rendering the saved targets here showed
-  // the operator their own list back and made discovery look broken.
+  const targets = status.targets || [];
+  const channels = status.channels || {};
+  const routing = status.routing || {};
+  const purposes = status.purposes || ['handoff', 'captcha', 'jobs', 'manual'];
+  const draft = { mode: status.mode, routing: Object.assign({}, routing) };
+  const test = { target: '', channel: '', text: '' };
+  const send = { target: '', channel: '', text: '', purpose: 'manual' };
+  // Both transports are offered everywhere: the bot is the easy one, the
+  // personal account is the one that can write to any chat, and "both" sends
+  // through whichever is usable.
+  const wantsAccount = draft.mode === 'account' || draft.mode === 'both';
+
+  const channelLabel = (name) => t('tgChannel' + name.charAt(0).toUpperCase() + name.slice(1));
+  const routeOptions = [
+    { value: '', label: t('tgRouteFollow') },
+    { value: 'bot', label: channelLabel('bot') },
+    { value: 'account', label: channelLabel('account') },
+    { value: 'both', label: t('tgModeBoth') },
+  ];
+
+  /* -- 1. channels and who gets what -------------------------------- */
+  const channelRows = ['bot', 'account'].map((name) => {
+    const info = channels[name] || {};
+    const ready = name === 'bot' ? info.configured : info.sessionExists;
+    return [
+      channelLabel(name),
+      ready ? '\u2713 ' + t('tgReady') : '\u2715 ' + t('tgNotReady'),
+      info.needs || '',
+      info.sessionPath ? String(info.sessionPath) : '',
+    ];
+  });
+
+  /* -- 2. the test message, which needs a target --------------------- */
+  const targetSelect = el('select', {
+    class: 'mas-input',
+    onChange: (event) => { test.target = event.target.value; },
+  }, targets.length
+    ? targets.map((target) => el('option',
+      { value: String(target.id) },
+      `${target.title || target.id} (${target.type || '?'})`))
+    : [el('option', { value: '' }, t('tgTestNoTargets'))]);
+  if (targets.length) test.target = String(targets[0].id);
+
+  /* -- 3. chats found through getUpdates ------------------------------ */
+  // Kept apart from the saved targets on purpose: this list is a picker, and
+  // rendering the saved targets here showed the operator their own list back
+  // and made discovery look broken.
   const found = state.agentTgFound || [];
   const foundRows = found.map((target) => [
     String(target.id), target.title || '', target.type || '',
-    button('＋', async () => {
+    button('\uff0b', async () => {
       const next = targets.slice();
       next.push(target);
-      try { await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': next } }); toast(t('agentSaved'), 'ok'); renderAgentSub('telegram'); } catch (error) { toast(error.message, 'error'); }
+      try {
+        await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': next } });
+        toast(t('agentSaved'), 'ok');
+        renderAgentSub('telegram');
+      } catch (error) { toast(error.message, 'error'); }
     }, { class: 'mas-btn mas-primary' }),
   ]);
 
+  const saveSettings = async (extra) => {
+    const body = Object.assign({ 'telegram.mode': draft.mode }, extra || {});
+    for (const purpose of purposes) {
+      body['telegram.channel.' + purpose] = draft.routing[purpose] || '';
+    }
+    try {
+      await api('/agent/settings', { method: 'POST', body });
+      toast(t('agentSaved'), 'ok');
+      renderAgentSub('telegram');
+    } catch (error) { toast(error.message, 'error'); }
+  };
+
   replace(host,
     el('div', { class: 'mas-box' }, [
-      el('b', { text: t('agentSubTelegram') }),
-      agentField(t('agentTgMode'), agentSelect(['off', 'bot', 'account'], status.mode,
-        (event) => { draft.mode = event.target.value; })),
+      el('b', { text: '1. ' + t('tgChannels') }),
+      el('p', { class: 'mas-hint', text: t('tgChannelsHint') }),
+      agentField(t('agentTgMode'), agentSelect([
+        { value: 'off', label: t('tgModeOff') },
+        { value: 'bot', label: t('tgModeBot') },
+        { value: 'account', label: t('tgModeAccount') },
+        { value: 'both', label: t('tgModeBoth') },
+      ], draft.mode, (event) => { draft.mode = event.target.value; })),
+      agentTable([t('tgChannel'), t('tgState'), t('tgNeeds'), t('tgSession')], channelRows),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        button('💾 ' + t('agentSave'), () => saveSettings(),
+          { class: 'mas-btn mas-primary' }),
+        button('🩺 probe', async () => {
+          try {
+            const probe = await api('/agent/telegram/status?probe=1');
+            toast(probe.error || JSON.stringify(probe.identity || {}),
+              probe.error ? 'error' : 'ok');
+          } catch (error) { toast(error.message, 'error'); }
+        }),
+      ]),
+      status.error ? el('p', { class: 'mas-warn', text: status.error }) : null,
+    ]),
+
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: '2. ' + t('tgRouting') }),
+      el('p', { class: 'mas-hint', text: t('tgRoutingHint') }),
+      purposes.map((purpose) => el('div', { class: 'mas-row mas-wrap mas-tg-route' }, [
+        el('span', {
+          class: 'mas-tg-purpose',
+          text: t('tgPurpose' + purpose.charAt(0).toUpperCase() + purpose.slice(1)),
+        }),
+        agentSelect(routeOptions, draft.routing[purpose] || '', (event) => {
+          draft.routing[purpose] = event.target.value;
+        }),
+      ])),
+      button('💾 ' + t('agentSave'), () => saveSettings(),
+        { class: 'mas-btn mas-primary' }),
+    ]),
+
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: '3. ' + channelLabel('bot') }),
       agentField(t('agentTgBotToken'), el('input', {
-        class: 'mas-input', type: 'password', placeholder: status.botTokenSet ? '•••••• (stored)' : '',
+        class: 'mas-input', type: 'password',
+        placeholder: status.botTokenSet ? '\u2022\u2022\u2022\u2022\u2022\u2022 (stored)' : '',
         onInput: (event) => { draft.botToken = event.target.value; },
       })),
-      status.mode === 'account' ? el('div', {}, [
-        el('p', { class: 'mas-warn', text: t('agentTgAccountWarn') }),
-        el('div', { class: 'mas-row mas-wrap' }, [
-          agentField('api_id', el('input', { class: 'mas-input', placeholder: status.apiCredentialsSet ? '•••••• (stored)' : '', onInput: (event) => { draft.apiId = event.target.value; } })),
-          agentField('api_hash', el('input', { class: 'mas-input', type: 'password', placeholder: status.apiCredentialsSet ? '•••••• (stored)' : '', onInput: (event) => { draft.apiHash = event.target.value; } })),
-        ]),
-        el('div', { class: 'mas-row mas-wrap' }, [
-          agentField(t('agentTgPhone'), el('input', { class: 'mas-input', value: status.phone || '', placeholder: '+98...', onInput: (event) => { draft.phone = event.target.value; } })),
-          agentField(t('agentTgCode'), el('input', { class: 'mas-input', onInput: (event) => { draft.code = event.target.value; } })),
-        ]),
-        el('div', { class: 'mas-row mas-wrap' }, [
-          button(t('agentTgLogin'), async () => {
-            try { await api('/agent/telegram/login', { method: 'POST', body: { phone: draft.phone } }); toast('code sent', 'ok'); } catch (error) { toast(error.message, 'error'); }
-          }),
-          button(t('agentTgLoginFinish'), async () => {
-            try { await api('/agent/telegram/login-finish', { method: 'POST', body: { code: draft.code } }); toast('ok', 'ok'); renderAgentSub('telegram'); } catch (error) { toast(error.message, 'error'); }
-          }, { class: 'mas-btn mas-primary' }),
-        ]),
-      ]) : null,
+      el('p', { class: 'mas-hint', text: t('tgBotHint') }),
+      button('💾 ' + t('agentSave'), () => saveSettings(
+        draft.botToken ? { 'telegram.botToken': draft.botToken } : {}),
+      { class: 'mas-btn mas-primary' }),
+    ]),
+
+    wantsAccount ? el('div', { class: 'mas-box' }, [
+      el('b', { text: '4. ' + channelLabel('account') }),
+      el('p', { class: 'mas-warn', text: t('agentTgAccountWarn') }),
       el('div', { class: 'mas-row mas-wrap' }, [
-        button('💾 ' + t('agentSave'), async () => {
-          const body = { 'telegram.mode': draft.mode };
-          if (draft.botToken) body['telegram.botToken'] = draft.botToken;
-          if (draft.apiId) body['telegram.apiId'] = draft.apiId;
-          if (draft.apiHash) body['telegram.apiHash'] = draft.apiHash;
-          try { await api('/agent/settings', { method: 'POST', body }); toast(t('agentSaved'), 'ok'); renderAgent(); } catch (error) { toast(error.message, 'error'); }
+        agentField('api_id', el('input', {
+          class: 'mas-input',
+          placeholder: status.apiCredentialsSet ? '\u2022\u2022\u2022\u2022\u2022\u2022 (stored)' : '',
+          onInput: (event) => { draft.apiId = event.target.value; },
+        })),
+        agentField('api_hash', el('input', {
+          class: 'mas-input', type: 'password',
+          placeholder: status.apiCredentialsSet ? '\u2022\u2022\u2022\u2022\u2022\u2022 (stored)' : '',
+          onInput: (event) => { draft.apiHash = event.target.value; },
+        })),
+      ]),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        agentField(t('agentTgPhone'), el('input', {
+          class: 'mas-input', value: status.phone || '', placeholder: '+98...',
+          onInput: (event) => { draft.phone = event.target.value; },
+        })),
+        agentField(t('agentTgCode'), el('input', {
+          class: 'mas-input',
+          onInput: (event) => { draft.code = event.target.value; },
+        })),
+      ]),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        button('💾 ' + t('agentSave'), () => saveSettings(Object.assign({},
+          draft.apiId ? { 'telegram.apiId': draft.apiId } : {},
+          draft.apiHash ? { 'telegram.apiHash': draft.apiHash } : {})),
+        { class: 'mas-btn mas-primary' }),
+        button(t('agentTgLogin'), async () => {
+          try {
+            await api('/agent/telegram/login', { method: 'POST', body: { phone: draft.phone } });
+            toast(t('tgCodeSent'), 'ok');
+          } catch (error) { toast(error.message, 'error'); }
+        }),
+        button(t('agentTgLoginFinish'), async () => {
+          try {
+            await api('/agent/telegram/login-finish', { method: 'POST', body: { code: draft.code } });
+            toast('ok', 'ok');
+            renderAgentSub('telegram');
+          } catch (error) { toast(error.message, 'error'); }
         }, { class: 'mas-btn mas-primary' }),
+      ]),
+      el('p', { class: 'mas-hint', text: t('tgAccountHint') }),
+    ]) : el('div', { class: 'mas-box' }, [
+      el('b', { text: '4. ' + channelLabel('account') }),
+      el('p', { class: 'mas-hint', text: t('tgAccountOff') }),
+    ]),
+
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: `5. ${t('agentTgTargets')} (${targets.length})` }),
+      targets.length ? agentTable(['id', 'title', 'type', ''], targets.map((target, index) => [
+        String(target.id), target.title || '', target.type || '',
+        button('🗑', async () => {
+          const next = targets.filter((_, position) => position !== index);
+          try {
+            await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': next } });
+            renderAgentSub('telegram');
+          } catch (error) { toast(error.message, 'error'); }
+        }),
+      ])) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
+      el('div', { class: 'mas-row mas-wrap' }, [
         button('🔎 ' + t('agentTgDiscover'), async () => {
           try {
             state.agentTgFound = (await api('/agent/telegram/targets')).targets || [];
             renderAgentSub('telegram');
           } catch (error) { toast(error.message, 'error'); }
         }),
-        button('✉ ' + t('agentTest'), async () => {
-          try { const result = await api('/agent/telegram/test', { method: 'POST', body: {} }); toast(`sent: ${result.sent}`, 'ok'); } catch (error) { toast(error.message, 'error'); }
-        }),
-        button('🩺 probe', async () => {
-          try { const probe = await api('/agent/telegram/status?probe=1'); toast(probe.error || JSON.stringify(probe.identity || {}), probe.error ? 'error' : 'ok'); } catch (error) { toast(error.message, 'error'); }
-        }),
       ]),
-      el('p', { class: 'mas-hint', text: t('agentTgHint') }),
-      status.error ? el('p', { class: 'mas-warn', text: status.error }) : null,
+      found.length ? agentTable(['id', 'title', 'type', t('agentAdd')], foundRows) : null,
     ]),
+
     el('div', { class: 'mas-box' }, [
-      el('b', { text: `${t('agentTgTargets')} (${targets.length})` }),
-      targets.length ? agentTable(['id', 'title', 'type', ''], targets.map((target, index) => [
-        String(target.id), target.title || '', target.type || '',
-        button('🗑', async () => {
-          const next = targets.filter((_, position) => position !== index);
-          try { await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': next } }); renderAgentSub('telegram'); } catch (error) { toast(error.message, 'error'); }
-        }),
-      ])) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
+      el('b', { text: '6. ' + t('tgTest') }),
+      el('p', { class: 'mas-hint', text: t('tgTestHint') }),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        agentField(t('tgTestTarget'), targetSelect),
+        agentField(t('tgTestChannel'), agentSelect([
+          { value: '', label: t('tgChannelAuto') },
+          { value: 'bot', label: channelLabel('bot') },
+          { value: 'account', label: channelLabel('account') },
+        ], '', (event) => { test.channel = event.target.value; })),
+      ]),
+      agentField(t('tgTestText'), el('input', {
+        class: 'mas-input', value: '', placeholder: t('tgTestTextHint'),
+        onInput: (event) => { test.text = event.target.value; },
+      })),
+      button('\u2709 ' + t('tgTestSend'), async () => {
+        if (!test.target) { toast(t('tgTestNeedTarget'), 'warn'); return; }
+        try {
+          const result = await api('/agent/telegram/test', {
+            method: 'POST',
+            body: {
+              target: Number(test.target) || test.target,
+              channel: test.channel || '',
+              text: test.text || '',
+            },
+          });
+          const used = (result.channels || []).join(', ') || '-';
+          toast(`${t('tgTestSent')} \u00b7 ${used} \u00b7 sent ${result.sent || 0}`
+            + ` \u00b7 failed ${result.failed || 0}`, result.failed ? 'warn' : 'ok');
+          for (const item of (result.errors || []).slice(0, 2)) {
+            toast(String(item).slice(0, 180), 'error');
+          }
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      el('p', { class: 'mas-hint', text: t('agentTgHint') }),
     ]),
-    found.length ? el('div', { class: 'mas-box' }, [
-      el('b', { text: `${t('agentTgDiscover')} (${found.length})` }),
-      agentTable(['id', 'title', 'type', t('agentAdd')], foundRows),
-    ]) : null);
+
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: '7. ' + t('tgSendTitle') }),
+      el('p', { class: 'mas-hint', text: t('tgSendHint') }),
+      agentField(t('tgTestText'), el('input', {
+        class: 'mas-input', value: '', placeholder: t('tgSendTextHint'),
+        onInput: (event) => { send.text = event.target.value; },
+      })),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        agentField(t('tgSendTarget'), agentSelect([
+          { value: '', label: t('tgSendEveryone') },
+        ].concat(targets.map((target) => ({
+          value: String(target.id),
+          label: `${target.title || target.id} (${target.type || '?'})`,
+        }))), '', (event) => { send.target = event.target.value; })),
+        agentField(t('tgTestChannel'), agentSelect([
+          { value: '', label: t('tgChannelAuto') },
+          { value: 'bot', label: channelLabel('bot') },
+          { value: 'account', label: channelLabel('account') },
+        ], '', (event) => { send.channel = event.target.value; })),
+        agentField(t('tgSendPurpose'), agentSelect(purposes.map((purpose) => ({
+          value: purpose,
+          label: t('tgPurpose' + purpose.charAt(0).toUpperCase() + purpose.slice(1)),
+        })), 'manual', (event) => { send.purpose = event.target.value; })),
+      ]),
+      button('📤 ' + t('tgSendButton'), async () => {
+        if (!String(send.text || '').trim()) { toast(t('tgSendNeedText'), 'warn'); return; }
+        const body = { text: send.text, purpose: send.purpose || 'manual' };
+        if (send.target) body.target = Number(send.target) || send.target;
+        if (send.channel) body.channel = send.channel;
+        try {
+          const result = await api('/agent/telegram/send', { method: 'POST', body });
+          const used = (result.channels || []).join(', ') || '-';
+          toast(`${t('tgTestSent')} \u00b7 ${used} \u00b7 sent ${result.sent || 0}`
+            + ` \u00b7 failed ${result.failed || 0}`, result.failed ? 'warn' : 'ok');
+          for (const item of (result.errors || []).slice(0, 2)) {
+            toast(String(item).slice(0, 180), 'error');
+          }
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+    ]));
 }
 
 /* -- data ------------------------------------------------------------ */
@@ -2301,6 +2616,627 @@ async function copyText(text) {
  * Log tab
  * ------------------------------------------------------------------ */
 
+/* ------------------------------------------------------------------ *
+ * Chat tab
+ *
+ * A normal chat page: you write, the model answers. The answer is not coming
+ * from a purchased API key - the agent drives its own browser (chat.deepseek.com
+ * on display :2 by default), which means a turn can take a minute and the pane
+ * has to poll instead of waiting on one request. The provider dropdown lists
+ * whatever chat profiles exist, so another model is a setting, not a rewrite.
+ * ------------------------------------------------------------------ */
+
+const CHAT_POLL_MS = 2000;
+let chatTimer = null;
+/** Last known connection state, so a poll does not re-check the tabs. */
+let lastConnected = null;
+
+function stopChatPolling() {
+  if (chatTimer) { clearInterval(chatTimer); chatTimer = null; }
+}
+
+function startChatPolling() {
+  stopChatPolling();
+  chatTimer = setInterval(() => {
+    const pane = document.getElementById('mas-tab-chat');
+    // A hidden tab should not keep a request loop alive.
+    if (!pane || pane.hidden) { stopChatPolling(); return; }
+    refreshChatList();
+  }, CHAT_POLL_MS);
+}
+
+function chatBubble(message) {
+  const mine = message.role === 'user';
+  const meta = (message.meta || {});
+  const bits = [];
+  if (message.provider) bits.push(message.provider);
+  bits.push(formatTime(message.created_at));
+  if (meta.elapsed) bits.push(formatElapsed(meta.elapsed));
+
+  const body = el('div', { class: 'mas-bubble-body' });
+  if (message.status === 'thinking') {
+    body.appendChild(el('span', { class: 'mas-thinking', text: t('chatThinking') }));
+  } else if (message.status === 'failed') {
+    body.appendChild(el('span', { class: 'mas-error', text: message.error || t('chatFailed') }));
+  } else {
+    body.appendChild(el('pre', { class: 'mas-bubble-text', text: message.body || '' }));
+  }
+
+  const actions = [];
+  if (!mine && message.body) {
+    actions.push(button('📋 ' + t('copy'), () => copyText(message.body)));
+  }
+  if (!mine && meta.flow && (meta.flow.steps || []).length) {
+    actions.push(button(`⤓ ${t('chatApplyFlow')} (${(meta.flow.steps || []).length})`,
+      () => applyChatFlow(message), { class: 'mas-btn mas-primary' }));
+  }
+  return el('div', { class: `mas-bubble ${mine ? 'is-mine' : 'is-ai'}` }, [
+    body,
+    el('div', { class: 'mas-bubble-meta', text: bits.join(' · ') }),
+    actions.length ? el('div', { class: 'mas-row mas-wrap' }, actions) : null,
+  ]);
+}
+
+async function refreshChatList() {
+  const list = document.getElementById('mas-chat-list');
+  if (!list) return;
+  let data;
+  try {
+    data = await api('/agent/chat/messages');
+  } catch (error) {
+    replace(list, el('p', { class: 'mas-hint', text: error.message }));
+    return;
+  }
+  state.chatProviders = data.providers || [];
+  const select = document.getElementById('mas-chat-provider');
+  if (select && state.chatProviders.length) {
+    if (!state.chatProviders.includes(state.chatProvider)) {
+      state.chatProvider = state.chatProviders[0];
+    }
+    replace(select, state.chatProviders.map((name) => el('option',
+      { value: name, selected: name === state.chatProvider }, name)));
+  }
+  const messages = data.messages || [];
+  if (!messages.length) {
+    replace(list, el('p', { class: 'mas-empty', text: t('chatNoHistory') }));
+  } else {
+    replace(list, messages.map(chatBubble));
+  }
+  if ((data.pending || []).length) startChatPolling();
+  else stopChatPolling();
+  list.scrollTop = list.scrollHeight;
+}
+
+async function sendChat() {
+  const box = document.getElementById('mas-chat-input');
+  const text = String((box && box.value) || state.chatDraft || '').trim();
+  if (!text) { toast(t('chatEmpty'), 'warn'); return; }
+  state.chatDraft = '';
+  if (box) box.value = '';
+  try {
+    await api('/agent/chat/send', {
+      method: 'POST',
+      body: { text, provider: state.chatProvider || '', withContext: !!state.chatContext },
+    });
+    toast(t('chatSent'), 'ok');
+    startChatPolling();
+  } catch (error) {
+    // Give the message back: losing what someone typed is the worst failure
+    // a chat pane can have.
+    state.chatDraft = text;
+    if (box) box.value = text;
+    toast(error.message, 'error');
+  }
+  refreshChatList();
+}
+
+async function clearChat() {
+  try {
+    const data = await api('/agent/chat/clear', { method: 'POST', body: {} });
+    toast(`${t('chatCleared')}: ${data.cleared || 0}`, 'ok');
+  } catch (error) { toast(error.message, 'error'); }
+  refreshChatList();
+}
+
+async function applyChatFlow(message) {
+  try {
+    const data = await api('/agent/chat/apply-flow', { method: 'POST', body: { id: message.id } });
+    const saved = data.flow || {};
+    const { flow, errors } = normaliseImportedFlow(saved, state.flow.viewport);
+    if (!flow || !(flow.steps || []).length) {
+      toast((errors || []).join(' | ') || t('chatNoFlow'), 'error');
+      return;
+    }
+    state.flow = flow;
+    persistFlow();
+    renderFlow();
+    selectTab('flow');
+    toast(`${flow.steps.length} ${t('steps')}`, errors && errors.length ? 'warn' : 'ok');
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+function renderChat() {
+  const pane = document.getElementById('mas-tab-chat');
+  if (!pane) return;
+  const provider = el('select', {
+    id: 'mas-chat-provider', class: 'mas-input mas-chat-provider',
+    onChange: (event) => {
+      state.chatProvider = event.target.value;
+      try { localStorage.setItem(LS.provider, state.chatProvider); } catch (_) { /* quota */ }
+    },
+  });
+  const input = el('textarea', {
+    id: 'mas-chat-input', class: 'mas-input mas-area mas-chat-input', rows: '3',
+    value: state.chatDraft, placeholder: t('chatPlaceholder'),
+    onInput: (event) => { state.chatDraft = event.target.value; },
+    onKeydown: (event) => {
+      if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+        event.preventDefault();
+        sendChat();
+      }
+    },
+  });
+
+  replace(pane,
+    el('p', { class: 'mas-hint', text: t('chatHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      el('label', { class: 'mas-field' }, [
+        el('span', { text: t('chatProvider') }), provider,
+      ]),
+      el('label', { class: 'mas-check', title: t('chatContextHint') }, [
+        el('input', {
+          type: 'checkbox', checked: state.chatContext,
+          onChange: (event) => {
+            state.chatContext = event.target.checked;
+            try { localStorage.setItem(LS.context, state.chatContext ? '1' : '0'); } catch (_) { /* quota */ }
+          },
+        }),
+        el('span', { text: t('chatContext') }),
+      ]),
+      button('🧹 ' + t('chatClear'), clearChat),
+      button('↻ ' + t('refresh'), refreshChatList),
+    ]),
+    el('div', { id: 'mas-chat-list', class: 'mas-chat-list' },
+      [el('p', { class: 'mas-empty', text: '…' })]),
+    el('div', { class: 'mas-chat-compose' }, [
+      input,
+      button('➤ ' + t('chatSend'), sendChat,
+        { class: 'mas-btn mas-primary', id: 'mas-chat-send' }),
+    ]),
+    el('details', { class: 'mas-box mas-chat-tools' }, [
+      el('summary', { text: '🧩 ' + t('chatTools') }),
+      el('p', { class: 'mas-hint', text: t('chatToolsHint') }),
+      el('div', { id: 'mas-chat-assistant' }),
+    ]),
+  );
+  // The old assistant pane moved in here instead of staying a second place to
+  // talk to a model: copy the prompt, or let the agent answer directly and
+  // import the JSON it proposes.
+  renderAgentAssistant(document.getElementById('mas-chat-assistant'));
+  refreshChatList();
+  startChatPolling();
+}
+
+/* ------------------------------------------------------------------ *
+ * Library tab: named operations
+ *
+ * An operation is a reusable bundle of steps with a name - "connect to the
+ * lmarena agent", "solve the captcha", "ask DeepSeek something". Opening one
+ * puts its steps into the stages tab, where the full editor and the run button
+ * already live; running one hands it straight to the engine.
+ * ------------------------------------------------------------------ */
+
+function operationSummary(op) {
+  return (op.steps || []).map((step, index) => `${index + 1}. ${labelFor(step)}`).join('\n');
+}
+
+function openOperationInStages(op) {
+  const { flow, errors } = normaliseImportedFlow(
+    { name: op.name, steps: op.steps || [] }, state.flow.viewport);
+  if (!flow || !(flow.steps || []).length) {
+    toast((errors || []).join(' | ') || t('opEmpty'), 'error');
+    return;
+  }
+  state.flow = flow;
+  persistFlow();
+  renderFlow();
+  selectTab('flow');
+  toast(`${t('opOpened')}: ${flow.steps.length} ${t('steps')}`,
+    errors && errors.length ? 'warn' : 'ok');
+}
+
+async function runOperation(op) {
+  try {
+    const data = await api('/agent/operation-run', { method: 'POST', body: { id: op.id } });
+    toast(`${t('opStarted')}: ${(data.flow && data.flow.steps || op.steps || []).length}`, 'ok');
+    refreshStatus();
+    renderOperations();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function resetOperation(op) {
+  try {
+    await api('/agent/operation-reset', { method: 'POST', body: { id: op.id } });
+    toast(t('opResetDone'), 'ok');
+    renderOperations();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function deleteOperation(op) {
+  try {
+    await api(`/agent/operations/${encodeURIComponent(op.id)}`, { method: 'DELETE' });
+    state.deleteArmed = '';
+    toast(`${t('opDeleted')}: ${op.name}`, 'ok');
+    renderOperations();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+function operationCard(op) {
+  const steps = op.steps || [];
+  const tags = (op.tags || []).filter(Boolean);
+  const last = op.last_run_at
+    ? `${t('opLastRun')}: ${agentTime(op.last_run_at)} · ${op.last_status || '-'} · ${op.run_count || 0}×`
+    : t('opNeverRun');
+  return el('div', { class: 'mas-op' + (op.builtin ? ' is-builtin' : '') }, [
+    el('div', { class: 'mas-op-head' }, [
+      el('b', { text: op.name }),
+      op.builtin ? el('span', { class: 'mas-badge', text: t('opBuiltin') }) : null,
+      el('span', { class: 'mas-hint', text: `${steps.length} ${t('steps')}` }),
+    ]),
+    op.description ? el('p', { class: 'mas-op-desc', text: op.description }) : null,
+    tags.length ? el('div', { class: 'mas-hint', text: tags.join(' · ') }) : null,
+    el('div', { class: 'mas-hint', text: last }),
+    el('details', { class: 'mas-op-steps' }, [
+      el('summary', { text: t('opSteps') }),
+      el('pre', { class: 'mas-pre', text: operationSummary(op) || '-' }),
+    ]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('▶ ' + t('opRun'), () => runOperation(op), { class: 'mas-btn mas-primary' }),
+      button('📂 ' + t('opOpen'), () => openOperationInStages(op)),
+      button('✎ ' + t('opEdit'), () => {
+        state.editingOperation = {
+          id: op.id, name: op.name, description: op.description || '',
+          tags: tags.join('، '), builtin: !!op.builtin,
+          steps: steps.map((step) => ({
+            type: step.type,
+            fields: JSON.stringify(Object.fromEntries(Object.entries(step)
+              .filter(([key]) => key !== 'type' && key !== 'id')), null, 0),
+          })),
+        };
+        renderOperations();
+      }),
+      op.builtin ? button('↺ ' + t('opReset'), () => resetOperation(op)) : null,
+      op.builtin ? null : (state.deleteArmed === op.id
+        ? button('⚠ ' + t('opDeleteSure'), () => deleteOperation(op),
+          { class: 'mas-btn mas-danger' })
+        : button('🗑 ' + t('opDelete'), () => {
+          state.deleteArmed = op.id;
+          renderOperations();
+        })),
+    ]),
+  ]);
+}
+
+function operationEditor(draft) {
+  const types = Object.keys(state.stepTypes || {});
+  const stepRows = (draft.steps || []).map((row, index) => {
+    const spec = (state.stepTypes || {})[row.type] || {};
+    const fields = el('input', {
+      class: 'mas-input', value: row.fields || '{}', spellcheck: 'false',
+      placeholder: JSON.stringify(Object.fromEntries(
+        (spec.required || []).map((name) => [name, '']))),
+      onInput: (event) => { row.fields = event.target.value; },
+    });
+    return el('div', { class: 'mas-op-steprow' }, [
+      el('span', { class: 'mas-hint', text: String(index + 1) }),
+      agentSelect(types.length ? types : [row.type], row.type, (event) => {
+        row.type = event.target.value;
+        renderOperations();
+      }),
+      fields,
+      button('🗑', () => { draft.steps.splice(index, 1); renderOperations(); }),
+    ]);
+  });
+
+  return el('div', { class: 'mas-box mas-op-editor' }, [
+    el('b', { text: draft.id ? t('opEdit') : t('opNew') }),
+    agentField(t('opName'), el('input', {
+      class: 'mas-input', value: draft.name || '', placeholder: t('opNameHint'),
+      onInput: (event) => { draft.name = event.target.value; },
+    })),
+    agentField(t('opDescription'), el('input', {
+      class: 'mas-input', value: draft.description || '',
+      onInput: (event) => { draft.description = event.target.value; },
+    })),
+    agentField(t('opTags'), el('input', {
+      class: 'mas-input', value: draft.tags || '', placeholder: t('opTagsHint'),
+      onInput: (event) => { draft.tags = event.target.value; },
+    })),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      el('b', { text: `${t('opSteps')} (${stepRows.length})` }),
+      agentSelect(types, types[0] || 'click', (event) => { draft.pendingType = event.target.value; }),
+      button('＋ ' + t('opAddStep'), () => {
+        draft.steps = draft.steps || [];
+        draft.steps.push({ type: draft.pendingType || types[0] || 'click', fields: '{}' });
+        renderOperations();
+      }),
+    ]),
+    el('div', {}, stepRows),
+    el('p', { class: 'mas-hint', text: t('opFieldsHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('💾 ' + t('opSave'), () => saveOperation(draft), { class: 'mas-btn mas-primary' }),
+      button(t('opCancel'), () => { state.editingOperation = null; renderOperations(); }),
+    ]),
+  ]);
+}
+
+async function saveOperation(draft) {
+  const name = String(draft.name || '').trim();
+  if (!name) { toast(t('opNeedName'), 'warn'); return; }
+  const steps = [];
+  for (const row of (draft.steps || [])) {
+    let fields;
+    try {
+      fields = JSON.parse(row.fields || '{}');
+    } catch (_) {
+      toast(`${t('opBadJson')} (${row.type})`, 'error');
+      return;
+    }
+    steps.push(Object.assign({ type: row.type }, fields));
+  }
+  const body = {
+    name,
+    description: String(draft.description || ''),
+    tags: String(draft.tags || '').split(/[،,]/).map((item) => item.trim()).filter(Boolean),
+    steps,
+  };
+  try {
+    if (draft.id) {
+      await api(`/agent/operations/${encodeURIComponent(draft.id)}`,
+        { method: 'PUT', body });
+    } else {
+      await api('/agent/operations', { method: 'POST', body });
+    }
+    state.editingOperation = null;
+    toast(t('opSaved'), 'ok');
+    renderOperations();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function renderOperations() {
+  const pane = document.getElementById('mas-tab-library');
+  if (!pane) return;
+  replace(pane, el('p', { class: 'mas-empty', text: '…' }));
+  let data;
+  try {
+    data = await api('/agent/operations');
+  } catch (error) {
+    replace(pane, el('p', { class: 'mas-hint', text: error.message }),
+      el('p', { class: 'mas-hint', text: t('opNeedsAgent') }));
+    return;
+  }
+  state.operations = data.operations || [];
+  state.stepTypes = data.stepTypes || {};
+
+  const head = el('div', { class: 'mas-row mas-wrap' }, [
+    button('＋ ' + t('opNew'), () => {
+      state.editingOperation = { id: '', name: '', description: '', tags: '', steps: [] };
+      renderOperations();
+    }, { class: 'mas-btn mas-primary' }),
+    button('↻ ' + t('refresh'), renderOperations),
+    el('span', { class: 'mas-hint', text: `${state.operations.length} ${t('opCount')}` }),
+  ]);
+  const cards = state.operations.map(operationCard);
+  replace(pane,
+    el('p', { class: 'mas-hint', text: t('opHint') }),
+    head,
+    state.editingOperation ? operationEditor(state.editingOperation) : null,
+    el('div', { class: 'mas-ops' }, cards.length ? cards
+      : [el('p', { class: 'mas-empty', text: t('opNone') })]),
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Agent tab: the generated key, and the visible pointer
+ * ------------------------------------------------------------------ */
+
+function codeLine(text) {
+  return el('div', { class: 'mas-row mas-codeline' }, [
+    el('code', { class: 'mas-code', text }),
+    button('📋', () => copyText(text), { class: 'mas-btn mas-mini', title: t('copy') }),
+  ]);
+}
+
+async function renderAgentKey(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let info;
+  try {
+    info = await api('/agent/key');
+  } catch (error) { return agentError(host, error); }
+  if (!state.apiIndex) {
+    try { state.apiIndex = await api('/agent/api-index'); } catch (_) { state.apiIndex = null; }
+  }
+  const index = state.apiIndex || { endpoints: [], keyWays: [] };
+  const keyBox = state.revealedKey
+    ? el('div', { class: 'mas-row mas-wrap' }, [
+      el('input', { class: 'mas-input mas-keyvalue', value: state.revealedKey, readOnly: true }),
+      button('📋 ' + t('keyCopy'), () => copyText(state.revealedKey),
+        { class: 'mas-btn mas-primary' }),
+      button(t('keyHide'), () => { state.revealedKey = ''; renderAgentSub('agentkey'); }),
+    ])
+    : el('div', { class: 'mas-row mas-wrap' }, [
+      el('code', { class: 'mas-code', text: info.prefix || t('keyNotSet') }),
+      button('👁 ' + t('keyShow'), async () => {
+        try {
+          state.revealedKey = (await api('/agent/key/reveal', { method: 'POST', body: {} })).key || '';
+          renderAgentSub('agentkey');
+          toast(t('keyRevealAudited'), 'warn');
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      button('🔄 ' + t('keyRotate'), async () => {
+        try {
+          const data = await api('/agent/key/rotate', { method: 'POST', body: {} });
+          state.revealedKey = data.key || '';
+          toast(t('keyRotated'), 'ok');
+          renderAgentSub('agentkey');
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+    ]);
+
+  const enabled = !!info.enabled;
+  const radios = [true, false].map((value) => el('label', { class: 'mas-check' }, [
+    el('input', {
+      type: 'radio', name: 'mas-key-enabled', checked: value === enabled,
+      onChange: async () => {
+        try {
+          await api('/agent/key/enable', { method: 'POST', body: { enabled: value } });
+          toast(value ? t('keyEnabled') : t('keyDisabled'), value ? 'ok' : 'warn');
+          renderAgentSub('agentkey');
+        } catch (error) { toast(error.message, 'error'); }
+      },
+    }),
+    el('span', { text: value ? t('keyEnabledLabel') : t('keyDisabledLabel') }),
+  ]));
+
+  const endpoints = (index.endpoints || []).map((item) => el('tr', {}, [
+    el('td', {}, el('code', { text: item.method })),
+    el('td', {}, el('div', { class: 'mas-row' }, [
+      el('code', { class: 'mas-code', text: item.path }),
+      button('📋', () => copyText(item.path), { class: 'mas-btn mas-mini', title: t('copy') }),
+    ])),
+    el('td', { class: 'mas-hint', text: state.lang === 'fa' ? item.fa : item.en }),
+  ]));
+
+  replace(host,
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: t('keyTitle') }),
+      el('p', { class: 'mas-hint', text: t('keyHint') }),
+      keyBox,
+      el('div', { class: 'mas-row mas-wrap' }, [
+        el('span', { class: 'mas-hint', text: `${t('keyCreatedAt')}: ${agentTime(info.createdAt)}` }),
+        el('span', { class: 'mas-hint', text: `${t('keyLastUsed')}: ${agentTime(info.lastUsedAt)}` }),
+        el('span', { class: 'mas-hint', text: `${t('keyLength')}: ${info.length || 0}` }),
+      ]),
+      el('div', { class: 'mas-row mas-wrap' }, radios),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        button('⏸ ' + t('keyCut'), async () => {
+          try {
+            await api('/agent/key/enable', { method: 'POST', body: { enabled: false } });
+            toast(t('keyCutDone'), 'warn');
+            renderAgentSub('agentkey');
+          } catch (error) { toast(error.message, 'error'); }
+        }, { class: 'mas-btn mas-danger' }),
+        el('span', { class: 'mas-hint', text: t('keyCutHint') }),
+      ]),
+    ]),
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: t('keyWays') }),
+      el('p', { class: 'mas-hint', text: t('keyWaysHint') }),
+      (index.keyWays || []).map(codeLine),
+      el('p', { class: 'mas-warn', text: t('keyCutNote') }),
+    ]),
+    el('div', { class: 'mas-box' }, [
+      el('div', { class: 'mas-row mas-wrap' }, [
+        el('b', { text: `${t('keyEndpoints')} (${endpoints.length})` }),
+        button('📋 ' + t('keyCopyAll'), () => copyText(apiIndexText(index))),
+      ]),
+      el('p', { class: 'mas-hint', text: t('keyEndpointsHint') }),
+      endpoints.length ? el('table', { class: 'mas-table' }, [
+        el('thead', {}, el('tr', {}, [
+          el('th', { text: t('keyMethod') }), el('th', { text: t('keyPath') }),
+          el('th', { text: t('keyWhat') }),
+        ])),
+        el('tbody', {}, endpoints),
+      ]) : el('p', { class: 'mas-empty', text: t('keyNoEndpoints') }),
+    ]),
+  );
+}
+
+/** The whole endpoint list as one block, ready to paste into another AI. */
+function apiIndexText(index) {
+  const lines = [t('keyEndpoints'), ''];
+  for (const item of (index.endpoints || [])) {
+    lines.push(`${item.method} ${item.path}`);
+    lines.push(`  ${state.lang === 'fa' ? item.fa : item.en}`);
+  }
+  lines.push('', t('keyWays'));
+  for (const way of (index.keyWays || [])) lines.push(`  ${way}`);
+  lines.push('', t('keyCutNote'));
+  return lines.join('\n');
+}
+
+async function renderAgentCursor(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let cursor;
+  try {
+    cursor = (await api('/agent/cursor')).cursor || {};
+  } catch (error) { return agentError(host, error); }
+  const draft = Object.assign({ enabled: true, size: 44, color: '#ffd400',
+    outline: '#1b1b1b', ripple: true }, cursor);
+  const size = el('input', {
+    class: 'mas-input', type: 'number', min: '16', max: '96', value: String(draft.size),
+    onInput: (event) => { draft.size = Number(event.target.value); },
+  });
+  replace(host,
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: t('cursorTitle') }),
+      el('p', { class: 'mas-hint', text: t('cursorHint') }),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        el('label', { class: 'mas-check' }, [
+          el('input', {
+            type: 'checkbox', checked: !!draft.enabled,
+            onChange: (event) => { draft.enabled = event.target.checked; },
+          }),
+          el('span', { text: t('cursorEnabled') }),
+        ]),
+        el('label', { class: 'mas-check' }, [
+          el('input', {
+            type: 'checkbox', checked: !!draft.ripple,
+            onChange: (event) => { draft.ripple = event.target.checked; },
+          }),
+          el('span', { text: t('cursorRipple') }),
+        ]),
+        el('label', { class: 'mas-field' }, [el('span', { text: t('cursorSize') }), size]),
+        el('label', { class: 'mas-field' }, [
+          el('span', { text: t('cursorColor') }),
+          el('input', {
+            class: 'mas-input mas-color', type: 'color', value: draft.color,
+            onInput: (event) => { draft.color = event.target.value; },
+          }),
+        ]),
+        el('label', { class: 'mas-field' }, [
+          el('span', { text: t('cursorOutline') }),
+          el('input', {
+            class: 'mas-input mas-color', type: 'color', value: draft.outline,
+            onInput: (event) => { draft.outline = event.target.value; },
+          }),
+        ]),
+      ]),
+      el('div', { class: 'mas-cursor-preview' }, [
+        el('span', {
+          class: 'mas-cursor-dot',
+          style: `width:${draft.size / 2}px;height:${draft.size / 2}px;`
+            + `background:${draft.color};border:2px solid ${draft.outline}`,
+        }),
+        el('span', { class: 'mas-hint', text: t('cursorPreview') }),
+      ]),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        button('💾 ' + t('cursorSave'), async () => {
+          try {
+            const data = await api('/agent/cursor', { method: 'POST', body: draft });
+            toast(data.cursor && data.cursor.applied === false
+              ? t('cursorSavedNoBrowser') : t('cursorSaved'), 'ok');
+            renderAgentSub('cursor');
+          } catch (error) { toast(error.message, 'error'); }
+        }, { class: 'mas-btn mas-primary' }),
+        button('🖱 ' + t('cursorMove'), () => manualControl(
+          { action: 'move', x: 480, y: 320 }, t('cursorMoved'))),
+      ]),
+      el('p', { class: 'mas-hint', text: t('cursorMoveHint') }),
+    ]),
+  );
+}
+
 function renderLog() {
   const pane = document.getElementById('mas-tab-log');
   const entries = (state.status.entries || []).slice(-120);
@@ -2347,7 +3283,8 @@ function start() {
     }
   }
   setPanelOpen(standalone || localStorage.getItem(LS.panel) === '1');
-  selectTab('flow');
+  selectTab(initialTab());
+  refreshAgentTabs();
   renderStatus();
   refreshStatus();
   setInterval(refreshStatus, 900);

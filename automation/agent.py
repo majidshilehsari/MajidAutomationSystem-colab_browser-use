@@ -24,6 +24,7 @@ Design decisions worth knowing before changing anything:
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import sqlite3
@@ -35,11 +36,13 @@ from automation import schema
 from automation.agent_store import AgentStore, SCRIPT_APPROVED
 from automation.ai_browser import AiBrowser, AiBrowserError
 from automation.captcha import CaptchaError, CaptchaSolver
-from automation.llm import LlmClient, LlmError, extract_json
+from automation.llm import (LlmClient, LlmError, PROVIDER_BROWSER,
+                            extract_json)
+from automation.operations import OperationError, OperationLibrary
 from automation.scheduler import Scheduler, SchedulerBusy, next_run
 from automation.scripts import ScriptError, ScriptRunner
-from automation.telegram_client import (MODE_ACCOUNT, MODE_BOT, MODE_OFF, MODES,
-                                        Notifier, TelegramError)
+from automation.telegram_client import (CHANNELS, MODE_ACCOUNT, MODE_BOT, MODE_OFF,
+                                        MODES, Notifier, PURPOSES, TelegramError)
 
 
 # Settings the sidebar may write. Anything not listed here is rejected, so a
@@ -72,6 +75,17 @@ PLAIN_SETTINGS = {
     "scripts.passToken": bool,
     "scripts.timeout": float,
     "public.base": str,
+    # The visible pointer: a big yellow cursor and a ripple on every click.
+    "cursor.enabled": bool,
+    "cursor.size": int,
+    "cursor.color": str,
+    "cursor.outline": str,
+    "cursor.ripple": bool,
+    # Which transport each kind of message uses; "" follows the global mode.
+    "telegram.channel.handoff": str,
+    "telegram.channel.captcha": str,
+    "telegram.channel.jobs": str,
+    "telegram.channel.manual": str,
 }
 
 SECRET_SETTINGS = {
@@ -83,6 +97,174 @@ _READ_ONLY_SQL = re.compile(r"^\s*(select|with)\b", re.IGNORECASE)
 _FORBIDDEN_SQL = re.compile(
     r"\b(insert|update|delete|drop|alter|create|attach|pragma|vacuum|replace)\b",
     re.IGNORECASE)
+
+#: What the agent key opens, in the order an outsider should read it: the
+#: reference first, then the state, then the things that act. The sidebar turns
+#: this into a copyable list, so nobody has to guess a path - and a 404 stops
+#: being a puzzle.
+# 3, 6 or 8 hex digits after the hash: what a CSS colour, and an <input
+# type="color">, can actually produce. Length alone would let "#gggggg" through
+# and the pointer would silently stay the browser default.
+_HEX_COLOR_RE = re.compile(
+    r"^#(?:[0-9a-fA-F]{3}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$")
+
+API_INDEX = [
+    ("GET", "/agent", "📇 نقشهٔ کامل: وضعیت ایجنت، تنظیمات ماسک‌شده، شمارش‌ها و "
+                      "همین فهرست مسیرها.",
+     "The full map: agent status, masked settings, counts and this index."),
+    ("GET", "/agent/chat/messages", "💬 تاریخچهٔ گفت‌وگو (تب چت) با وضعیت هر پیام.",
+     "Chat history with each message's status."),
+    ("POST", "/agent/chat/send", "💬 فرستادن پیام به چت؛ جواب در پس‌زمینه می‌آید و "
+                                 "با polling خوانده می‌شود.",
+     "Send a chat message; the answer arrives in the background."),
+    ("GET", "/agent/operations", "📚 کتابخانهٔ عملیات: هر عملیات و مراحلش.",
+     "The operations library: every operation and its steps."),
+    ("POST", "/agent/operations", "📚 ساخت یا ویرایش یک عملیات (مراحل با schema "
+                                  "اعتبارسنجی می‌شوند).",
+     "Create or edit an operation; steps are schema-validated."),
+    ("POST", "/agent/operation-run", "📚 اجرای یک عملیات، همین حالا.",
+     "Run an operation right now."),
+    ("GET", "/status", "🖥 وضعیت اجرای فعلی اتوماسیون (قدم چندم از چند، منتظر "
+                       "انسان یا نه).",
+     "Current automation run state."),
+    ("GET", "/flows", "🧩 فهرست جریان‌های ذخیره‌شده.", "Saved flows."),
+    ("PUT", "/flows/<name>", "🧩 ذخیرهٔ یک جریان (با اعتبارسنجی کامل schema).",
+     "Save a flow, fully validated."),
+    ("POST", "/run", "▶ شروع یک اجرا از روی جریان داده‌شده.",
+     "Start a run from the supplied flow."),
+    ("POST", "/control", "🎮 pause / resume / stop / confirm و کلیک دستی.",
+     "pause / resume / stop / confirm and manual clicks."),
+    ("POST", "/detect", "🔍 شناسایی صفحهٔ فعال: عنوان، URL، عناصر با مختصات "
+                        "دسکتاپ و اسکرین‌شات عمومی.",
+     "Detect the active page: title, URL, elements with desktop coordinates."),
+    ("GET", "/pages", "🖼 صفحه‌های شناسایی‌شدهٔ قبلی.", "Previously detected pages."),
+    ("GET", "/shots", "📷 همهٔ اسکرین‌شات‌ها با نقش و لینک عمومی.",
+     "Every screenshot, with its role and public link."),
+    ("GET", "/texts", "📄 متن‌های استخراج‌شده از صفحه‌ها.", "Extracted page texts."),
+    ("GET", "/agent/key", "🔑 وضعیت کلید ایجنت (فعال/قطع، زمان ساخت) بدون خودِ کلید.",
+     "Agent key status (on/off, created at) without the key itself."),
+    ("POST", "/agent/key/enable", "⏸ قطع یا وصل کردن دسترسی ایجنت، آنی و بدون deploy.",
+     "Cut or restore agent access, instantly, no redeploy."),
+    ("POST", "/agent/settings", "⚙️ تغییر تنظیمات.", "Change settings."),
+    ("GET", "/agent/jobs", "⏰ وظایف زمان‌بندی‌شده و آخرین نتیجهٔ هر کدام.",
+     "Scheduled jobs and each one's last result."),
+    ("POST", "/agent/jobs", "⏰ ساخت وظیفهٔ تازه (at / every / cron).",
+     "Create a job (at / every / cron)."),
+    ("POST", "/agent/job-run", "⏰ اجرای فوری یک وظیفه (در پس‌زمینه).",
+     "Run a job now, in the background."),
+    ("GET", "/agent/scripts", "📜 اسکریپت‌های ایجنت و وضعیت تأیید هر کدام.",
+     "The agent's scripts and each approval state."),
+    ("POST", "/agent/script-decision", "✅ تأیید یا رد یک اسکریپت؛ بدون تأیید اجرا "
+                                       "نمی‌شود.",
+     "Approve or reject a script; unapproved code never runs."),
+    ("POST", "/agent/script-run", "📜 اجرای یک اسکریپت **تأییدشده**.",
+     "Run an approved script."),
+    ("POST", "/agent/captcha/config", "🧩 تغییر تنظیمات زنجیرهٔ حل کپچا.",
+     "Change the captcha chain settings."),
+    ("GET", "/agent/captcha/config", "🧩 تنظیمات زنجیرهٔ حل کپچا و وضعیت افزونه.",
+     "Captcha chain settings and extension status."),
+    ("POST", "/agent/captcha/solve", "🧩 اسکرین‌شات + اجرای زنجیرهٔ حل؛ خروجی یک "
+                                     "پیشنهاد است.",
+     "Screenshot + run the solve chain; the outcome is a proposal."),
+    ("POST", "/agent/captcha/execute", "🧩 اجرای اقداماتی که تأیید کرده‌اید.",
+     "Perform actions you approved."),
+    ("GET", "/agent/telegram/status", "🤖 وضعیت ربات و حساب: چه چیزی تنظیم شده، "
+                                      "جلسه هست یا نه.",
+     "Bot and account status: what is configured, whether a session exists."),
+    ("GET", "/agent/telegram/targets", "🤖 کشف گفتگوها (شخص/گروه) از getUpdates.",
+     "Discover chats (person/group) from getUpdates."),
+    ("POST", "/agent/telegram/test", "🤖 پیام آزمایشی — باید یک target داشته باشد.",
+     "A test message - it must name a target."),
+    ("POST", "/agent/telegram/send", "🤖 فرستادن پیام دلخواه به یک target با کانال "
+                                     "دلخواه (bot/account).",
+     "Send any message to a target over a chosen channel."),
+    ("GET", "/agent/ai/status", "🧠 مرورگر ایجنت: در دسترس است، روی چه صفحه‌ای.",
+     "The agent browser: reachable, on which page."),
+    ("POST", "/agent/ai/open", "🧠 باز کردن سایت چت در مرورگر ایجنت.",
+     "Open the chat site in the agent browser."),
+    ("GET", "/agent/ai/shot", "🧠 اسکرین‌شات نمایش ایجنت (برای لاگین دستی).",
+     "A screenshot of the agent display, for the one-time login."),
+    ("GET", "/agent/notes", "🗒 یادداشت‌ها و پاسخ‌های ثبت‌شده.", "Notes and saved answers."),
+    ("GET", "/agent/audit", "🧾 لاگ audit: چه کسی، چه چیزی، کی.",
+     "The audit log: who did what, when."),
+    ("POST", "/agent/query", "🗄 کوئری SQL **فقط‌خواندنی** روی دیتابیس ایجنت.",
+     "A read-only SQL query against the agent database."),
+    ("GET", "/agent/api-index", "📇 همین فهرست مسیرها، به‌صورت JSON با آدرس کامل.",
+     "This very index, as JSON with absolute URLs."),
+    ("POST", "/agent/chat", "💬 پرسش مستقیم از ایجنت با زمینهٔ اتوماسیون؛ جواب "
+                            "همزمان برمی‌گردد (برخلاف chat/send).",
+     "Ask the agent directly with automation context; answers synchronously."),
+    ("POST", "/agent/chat/apply-flow", "💬 ذخیرهٔ جریانی که مدل داخل پاسخ چت "
+                                       "پیشنهاد داده است.",
+     "Save a flow the model proposed inside a chat answer."),
+    ("POST", "/agent/chat/clear", "💬 پاک کردن تاریخچهٔ گفت‌وگو.",
+     "Clear the conversation history."),
+    ("POST", "/agent/key/reveal", "🔑 نمایش خودِ کلید — این کار در audit ثبت می‌شود.",
+     "Reveal the key itself; this is written to the audit log."),
+    ("POST", "/agent/key/rotate", "🔑 ساخت کلید تازه؛ کلید قبلی همان لحظه از کار "
+                                  "می‌افتد.",
+     "Generate a new key; the old one dies at that moment."),
+    ("POST", "/agent/kill-switch", "⏹ کلید قطع اضطراری: تا خاموش شدنش هیچ اجرا، "
+                                   "اسکریپت یا عملیاتی شروع نمی‌شود.",
+     "The emergency kill switch: nothing runs while it is on."),
+    ("GET", "/agent/cursor", "🖱 تنظیمات نشانگر: اندازه، رنگ، لبه و موج کلیک.",
+     "Pointer settings: size, colour, outline and the click ripple."),
+    ("POST", "/agent/cursor", "🖱 تغییر نشانگر و اعمال فوری‌اش روی مرورگر.",
+     "Change the pointer and apply it to the browser immediately."),
+    ("GET", "/agent/captcha/history", "🧩 تاریخچهٔ تلاش‌های کپچا و نتیجهٔ هر کدام.",
+     "The captcha attempts and what each one concluded."),
+    ("PUT", "/agent/jobs/<id>", "⏰ ویرایش یک وظیفهٔ زمان‌بندی‌شده.",
+     "Edit a scheduled job."),
+    ("DELETE", "/agent/jobs/<id>", "⏰ حذف یک وظیفهٔ زمان‌بندی‌شده.",
+     "Delete a scheduled job."),
+    ("POST", "/agent/notes", "🗒 ثبت یک یادداشت یا پاسخ مدل.",
+     "Store a note or a model answer."),
+    ("DELETE", "/agent/notes/<id>", "🗒 حذف یک یادداشت.", "Delete a note."),
+    ("POST", "/agent/scripts", "📜 ثبت یک اسکریپت تازه (وضعیتش pending می‌ماند).",
+     "Store a new script; it starts out pending."),
+    ("PUT", "/agent/scripts/<id>", "📜 ویرایش اسکریپت؛ تأیید قبلی باطل می‌شود.",
+     "Edit a script; any earlier approval is voided."),
+    ("DELETE", "/agent/scripts/<id>", "📜 حذف یک اسکریپت.", "Delete a script."),
+    ("POST", "/agent/script-kill", "📜 کشتن اسکریپت در حال اجرا، همین لحظه.",
+     "Kill the running script right now."),
+    ("PUT", "/agent/operations/<id>", "📚 ویرایش یک عملیات موجود.",
+     "Edit an existing operation."),
+    ("DELETE", "/agent/operations/<id>", "📚 حذف یک عملیات (عملیات‌های آماده با "
+                                         "restart برمی‌گردند).",
+     "Delete an operation; built-ins come back on restart."),
+    ("POST", "/agent/operation-reset", "📚 برگرداندن یک عملیات آماده به نسخهٔ "
+                                       "کارخانه.",
+     "Reset a built-in operation to its factory version."),
+    ("POST", "/agent/telegram/login", "🤖 شروع لاگین اکانت شخصی: ارسال کد به شماره.",
+     "Start the personal-account login: send the code to the phone."),
+    ("POST", "/agent/telegram/login-finish", "🤖 پایان لاگین با کد دریافتی؛ جلسه "
+                                             "روی /data ذخیره می‌شود.",
+     "Finish the login with the code; the session is stored on /data."),
+    ("GET", "/info", "ℹ️ آیا توکن لازم است، اندازهٔ صفحه، و اینکه موتور آزاد است.",
+     "Whether a token is needed, the viewport, and whether the engine is idle."),
+    ("GET", "/guide", "📖 راهنمای پرامپت‌نویسی برای مدل (متن ساده).",
+     "The prompt-writing guide, as plain text."),
+    ("POST", "/prompt", "📖 ساخت پرامپت آماده برای یک مدل بیرونی، با لینک عمومی "
+                        "اسکرین‌شات.",
+     "Build a prompt for an outside model, public screenshot link included."),
+    ("GET", "/report", "🧾 گزارش اجرای آخر به‌صورت متن.", "The last run report as text."),
+    ("GET", "/runs", "🧾 فهرست اجراهای گذشته.", "Past runs."),
+    ("GET", "/runs/<id>/log", "🧾 لاگ کامل یک اجرا.", "The full log of one run."),
+    ("POST", "/screenshot", "📷 اسکرین‌شات دستی از دسکتاپ.", "A manual desktop screenshot."),
+    ("POST", "/texts", "📄 ثبت دستی یک متن استخراج‌شده.", "Store an extracted text by hand."),
+    ("GET", "/artifact", "📦 خواندن یک فایل داخلی (اسکرین‌شات) با مسیر نسبی.",
+     "Read one internal file (a screenshot) by relative path."),
+    ("GET", "/pages/<id>", "🖼 جزئیات یک صفحهٔ شناسایی‌شده با عناصرش.",
+     "One detected page, elements included."),
+    ("GET", "/flows/<name>", "🧩 خواندن یک جریان ذخیره‌شده.", "Read one saved flow."),
+    ("DELETE", "/flows/<name>", "🧩 حذف یک جریان ذخیره‌شده.", "Delete one saved flow."),
+    ("DELETE", "/shots/<id>", "📷 حذف یک اسکرین‌شات.", "Delete one screenshot."),
+    ("DELETE", "/texts/<id>", "📄 حذف یک متن ثبت‌شده.", "Delete one stored text."),
+    ("GET", "/public/shot/<name>", "🌐 لینک عمومی یک اسکرین‌شات؛ بدون توکن باز "
+                                   "می‌شود تا بتوانی در تلگرام یا به مدل دیگری بدهی.",
+     "The public link to one screenshot; opens without a token, so it can be "
+     "pasted into Telegram or handed to another model."),
+]
 
 
 class AgentError(Exception):
@@ -117,12 +299,21 @@ class AgentHub:
         # Held for the length of one manual "run now", so two operators
         # cannot start two runs against the same single mouse.
         self._job_lock = threading.Lock()
+        self._chat_threads: List[threading.Thread] = []
 
         self.store = store if store is not None else AgentStore(data_dir, clock=clock)
         if public_base:
             self.store.set_setting("public.base", public_base, actor="startup")
         self.public_base = str(self.store.get_setting("public.base", public_base)
                                or public_base or "")
+        # The operations library seeds its built-ins on first start and
+        # never overwrites a row the operator edited afterwards.
+        self.library = OperationLibrary(self.store)
+        self.library.ensure_builtins()
+        # The agent key exists from the first start, so an operator who reads
+        # the guide finds a key waiting instead of an empty pane. Generating is
+        # idempotent: an existing key is returned untouched.
+        self.store.agent_key(actor="startup")
 
         if ai_browser is None and cdp is not None:
             ai_browser = AiBrowser(cdp, port=ai_port, display=ai_display,
@@ -182,10 +373,16 @@ class AgentHub:
                           "lastTick": self.scheduler.last_tick,
                           "jobs": len(self.store.list_jobs())},
             "killSwitch": self.store.kill_switch_engaged(),
+            "key": self.agent_key_info(),
+            "cursor": self.cursor_info(),
+            "chat": {"pending": len(self.store.pending_chats()),
+                     "messages": len(self.store.list_chat(limit=1000)),
+                     "providers": self.chat_providers()},
             "counts": {"jobs": len(self.store.list_jobs()),
                        "scripts": len(self.store.list_scripts()),
                        "pendingScripts": len(self.scripts.pending()),
-                       "notes": len(self.store.list_notes(limit=1000))},
+                       "notes": len(self.store.list_notes(limit=1000)),
+                       "operations": len(self.store.list_operations())},
         }
 
     def save_settings(self, data: Dict[str, Any], actor: str = "operator") -> Dict[str, Any]:
@@ -212,6 +409,10 @@ class AgentHub:
                 value = str(value)
             if key == "telegram.mode" and value not in MODES:
                 raise AgentError("telegram.mode must be one of: %s" % ", ".join(MODES))
+            if key.startswith("telegram.channel.") and value not in (
+                    "", "bot", "account", "both"):
+                raise AgentError("%s must be one of: (empty), bot, account, both"
+                                 % key)
             if key == "ai.provider" and value not in ("ai-browser", "http-api"):
                 raise AgentError("ai.provider must be ai-browser or http-api")
             self.store.set_setting(key, value, actor=actor)
@@ -291,6 +492,327 @@ class AgentHub:
             out["flowValid"] = not errors
         return out
 
+    # -- the chat tab ----------------------------------------------------
+    def chat_providers(self) -> List[str]:
+        """The names the chat dropdown offers: browser profiles today, more
+        models later without touching the UI.
+
+        Tolerates an llm object that predates `chat_names` - the tests swap in
+        a fake, and a stale deployment should offer one provider rather than
+        fail the whole overview with a 500.
+        """
+        names = getattr(self.llm, "chat_names", None)
+        if callable(names):
+            try:
+                return [str(name) for name in names()]
+            except Exception:
+                pass
+        single = getattr(self.llm, "chat_provider", None)
+        return [str(single())] if callable(single) else []
+
+    def chat_messages(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Oldest first, the way a conversation reads."""
+        return list(reversed(self.store.list_chat(limit)))
+
+    def chat_pending(self) -> List[Dict[str, Any]]:
+        return self.store.pending_chats()
+
+    def chat_send(self, text: str, provider: str = "", with_context: bool = False,
+                  actor: str = "operator") -> Dict[str, Any]:
+        """Start one turn of the conversation.
+
+        The model can take minutes (a web chat is being driven, not an API),
+        and this is reached over HTTP, so the answer is not the response: the
+        assistant row is created as `thinking` and a worker fills it in, while
+        the pane polls `/agent/chat/messages`. A refresh mid-answer therefore
+        loses nothing.
+        """
+        self._guard()
+        if not str(text).strip():
+            raise AgentError("a message is required")
+        name = str(provider or self.llm.chat_provider())
+        user = self.store.add_chat("user", str(text), provider=name, actor=actor)
+        assistant = self.store.add_chat("assistant", "", provider=name,
+                                        status="thinking", actor=actor)
+        thread = threading.Thread(
+            target=self._chat_worker,
+            args=(user["id"], assistant["id"], str(text), name,
+                  bool(with_context), actor),
+            name="chat-turn-%s" % assistant["id"], daemon=True)
+        self._chat_threads = [item for item in self._chat_threads if item.is_alive()]
+        self._chat_threads.append(thread)
+        thread.start()
+        return {"queued": True, "messages": [user, assistant],
+                "providers": self.chat_providers()}
+
+    def _chat_prompt(self, user_id: str, text: str, with_context: bool) -> str:
+        """History + the new message, as an ordinary conversation the model
+        can continue. Deliberately plain: this is a chat page, not a tool."""
+        lines = ["تو دستیار گفت‌وگوی این سامانهٔ اتوماسیون مرورگر هستی. روان، "
+                 "کوتاه و به زبان کاربر جواب بده. اگر کاربر جریان اتوماسیون "
+                 "خواست، همان JSON جریان را با کلید steps برگردان."]
+        if with_context:
+            lines.append("\n--- context فعلی اتوماسیون (فقط خواندنی) ---")
+            lines.append(self._chat_context())
+        lines.append("\n--- گفت‌وگو ---")
+        for message in self.chat_messages(16):
+            if message["id"] == user_id:
+                break
+            if message["status"] != "done" or not message["body"]:
+                continue
+            who = "کاربر" if message["role"] == "user" else "دستیار"
+            lines.append("%s: %s" % (who, message["body"][:1500]))
+        lines.append("کاربر: %s" % text)
+        return "\n".join(lines)
+
+    def _chat_context(self) -> str:
+        parts = []
+        if self.engine is not None:
+            status = self.engine.status()
+            parts.append("اجرای فعلی: %s" % (status.get("status") or "idle"))
+        if self.flows is not None:
+            names = [flow.get("name") for flow in self.flows.list()]
+            parts.append("جریان‌های ذخیره‌شده: %s" % (", ".join(names) or "-"))
+        operations = self.store.list_operations()
+        parts.append("عملیات کتابخانه: %s"
+                     % (", ".join(op.get("name", "") for op in operations) or "-"))
+        if self.engine is not None:
+            try:
+                page = self.engine.page_text(1500)
+            except Exception:  # noqa: BLE001 - context is best effort
+                page = ""
+            if page:
+                parts.append("متن صفحهٔ فعال:\n%s" % page)
+        return "\n".join(parts)
+
+    def _chat_worker(self, user_id: str, assistant_id: str, text: str,
+                     provider: str, with_context: bool, actor: str) -> None:
+        try:
+            prompt = self._chat_prompt(user_id, text, with_context)
+            # `chat_name` only means something to the browser provider; an HTTP
+            # provider ignores it, so there is one code path here instead of a
+            # branch that has to be kept in step with LlmClient.
+            reply = self.llm.complete(
+                prompt,
+                timeout=float(self.store.get_setting("ai.timeout", 240)),
+                chat_name=provider or None)
+            body = str(reply.get("text") or "").strip()
+            meta: Dict[str, Any] = {"source": reply.get("source") or {},
+                                    "elapsed": reply.get("elapsed"),
+                                    "provider": reply.get("provider")}
+            parsed = extract_json(body)
+            if isinstance(parsed, dict) and isinstance(parsed.get("steps"), list):
+                flow, errors = schema.validate_flow(parsed)
+                meta["flow"] = flow if not errors else parsed
+                meta["flowErrors"] = errors
+            self.store.update_chat(assistant_id, body=body or "(پاسخ خالی)",
+                                   status="done", meta=meta)
+            self.store.audit(actor, "chat.answer",
+                             "%d chars via %s" % (len(body), provider))
+        except Exception as exc:  # noqa: BLE001 - the pane shows this, not a 500
+            self.store.update_chat(assistant_id, status="failed",
+                                   error=str(exc)[:500])
+            self.store.audit(actor, "chat.failed", str(exc)[:300])
+
+    def chat_apply_flow(self, message_id: str, actor: str = "operator") -> Dict[str, Any]:
+        """Save a flow the model proposed inside a chat answer, under a name
+        the operator chooses in the pane."""
+        message = self.store.get_chat(message_id)
+        if message is None:
+            raise AgentError("no chat message with id %s" % message_id, 404)
+        flow = (message.get("meta") or {}).get("flow")
+        if not isinstance(flow, dict) or not flow.get("steps"):
+            raise AgentError("that message holds no usable flow", 409)
+        normalized, errors = schema.validate_flow(flow)
+        if errors:
+            raise AgentError("the proposed flow is invalid: %s" % "; ".join(errors))
+        name = str(flow.get("name") or "از چت %s" % message_id[-4:])
+        if self.flows is None:
+            raise AgentError("no flow store is attached")
+        return self.flows.save(name, normalized)
+
+    def chat_clear(self, actor: str = "operator") -> Dict[str, Any]:
+        return self.store.clear_chat(actor)
+
+    # -- the agent's own API key ------------------------------------------
+    def agent_key_info(self) -> Dict[str, Any]:
+        """Status only. The key itself needs an explicit reveal, which is
+        audited, so a glance at the pane leaves no trace in a shoulder-surfed
+        screenshot."""
+        if not self.store.get_secret(self.store.AGENT_KEY, ""):
+            self.store.agent_key(actor="startup")
+        return self.store.agent_key_info()
+
+    def agent_key_reveal(self, actor: str = "operator") -> Dict[str, Any]:
+        self.store.audit(actor, "agentKey.revealed",
+                         "the key was shown in the sidebar")
+        return {"key": self.store.agent_key(actor=actor)}
+
+    def agent_key_rotate(self, actor: str = "operator") -> Dict[str, Any]:
+        return {"key": self.store.rotate_agent_key(actor=actor),
+                "info": self.store.agent_key_info()}
+
+    def agent_key_set_enabled(self, enabled: bool,
+                              actor: str = "operator") -> Dict[str, Any]:
+        return {"enabled": self.store.set_agent_key_enabled(bool(enabled),
+                                                            actor=actor),
+                "info": self.store.agent_key_info()}
+
+    def check_agent_access(self, candidate: str) -> bool:
+        """Does this candidate key open the API? Disabled means no, whatever
+        the value: cutting access has to win over a leaked key."""
+        if not self.store.agent_key_enabled():
+            return False
+        if not self.store.check_agent_key(candidate):
+            return False
+        self.store.touch_agent_key()
+        return True
+
+    # -- the operations library --------------------------------------------
+    def operation_list(self) -> List[Dict[str, Any]]:
+        self.library.ensure_builtins()
+        return self.library.list()
+
+    def operation_save(self, data: Dict[str, Any], operation_id: Optional[str] = None,
+                       actor: str = "operator") -> Dict[str, Any]:
+        try:
+            return self.library.save(data, operation_id, actor=actor)
+        except OperationError as exc:
+            raise AgentError(str(exc), getattr(exc, "status", 400))
+
+    def operation_delete(self, operation_id: str,
+                         actor: str = "operator") -> Dict[str, Any]:
+        try:
+            return self.library.delete(operation_id, actor=actor)
+        except OperationError as exc:
+            raise AgentError(str(exc), getattr(exc, "status", 400))
+
+    def operation_reset(self, operation_id: str,
+                        actor: str = "operator") -> Dict[str, Any]:
+        try:
+            return self.library.reset_builtin(operation_id, actor=actor)
+        except OperationError as exc:
+            raise AgentError(str(exc), getattr(exc, "status", 400))
+
+    def operation_run(self, operation_id: str,
+                      actor: str = "operator") -> Dict[str, Any]:
+        """Start an operation's steps as a run, right now."""
+        self._guard()
+        operation = self.library.get(operation_id)
+        if self.engine is None:
+            raise AgentError("no automation engine is attached", 409)
+        if self.engine.busy():
+            raise AgentError("the desktop is busy with another run", 409)
+        try:
+            flow = self.library.as_flow(operation)
+        except OperationError as exc:
+            raise AgentError(str(exc), getattr(exc, "status", 409))
+        self.engine.start(flow)
+        self.store.record_operation_run(operation_id, "started")
+        self.store.audit(actor, "operation.run", operation_id)
+        return {"status": "started", "name": operation.get("name"),
+                "steps": len(operation.get("steps") or [])}
+
+    # -- Telegram: sending on purpose --------------------------------------
+    def telegram_send(self, text: str, target: Optional[Any] = None,
+                      channel: Optional[str] = None, purpose: str = "manual",
+                      actor: str = "operator") -> Dict[str, Any]:
+        """Send a message now, to one target or to all of them.
+
+        The agent gets this too, which is what "the agent can decide" means in
+        practice: it can tell you something without waiting for a handoff.
+        """
+        if not str(text).strip():
+            raise AgentError("the message is empty")
+        if purpose not in PURPOSES:
+            raise AgentError("purpose must be one of: %s" % ", ".join(PURPOSES))
+        if channel not in (None, "") and channel not in CHANNELS:
+            raise AgentError("channel must be bot or account")
+        targets = None
+        if target not in (None, ""):
+            wanted = target
+            try:
+                wanted = int(target)
+            except (TypeError, ValueError):
+                pass
+            targets = [item for item in self.notifier.targets()
+                       if item.get("id") == wanted]
+            if not targets:
+                raise AgentError("target %s is not in your saved targets" % target, 404)
+        result = self.notifier.send(str(text), targets=targets, purpose=purpose,
+                                    channel=channel or None)
+        if not result.get("sent") and not result.get("failed"):
+            raise AgentError(str(result.get("reason") or "nothing was sent"), 400)
+        self.store.audit(actor, "telegram.send",
+                         "%d char(s), channels=%s" % (len(str(text)),
+                                                      ",".join(result.get("channels")
+                                                                 or [])))
+        return result
+
+    # -- the pointer and the click ripple -----------------------------------
+    def cursor_info(self) -> Dict[str, Any]:
+        return {
+            "enabled": bool(self.store.get_setting("cursor.enabled", True)),
+            "size": int(self.store.get_setting("cursor.size", 44) or 44),
+            "color": str(self.store.get_setting("cursor.color", "#ffd400")),
+            "outline": str(self.store.get_setting("cursor.outline", "#1b1b1b")),
+            "ripple": bool(self.store.get_setting("cursor.ripple", True)),
+        }
+
+    def cursor_set(self, data: Dict[str, Any],
+                   actor: str = "operator") -> Dict[str, Any]:
+        from .cursor import MAX_SIZE, MIN_SIZE
+        allowed = {"enabled": bool, "size": int, "color": str, "outline": str,
+                   "ripple": bool}
+        for key in data:
+            if key not in allowed:
+                raise AgentError("unknown cursor setting: %s" % key)
+        for key, cast in allowed.items():
+            if key in data:
+                value = cast(data[key])
+                if key == "size" and not MIN_SIZE <= int(value) <= MAX_SIZE:
+                    raise AgentError("cursor size must be %d..%d" % (MIN_SIZE, MAX_SIZE))
+                if key in ("color", "outline"):
+                    text = str(value)
+                    if not _HEX_COLOR_RE.match(text):
+                        raise AgentError("%s must be a hex colour like #ffd400" % key)
+                self.store.set_setting("cursor.%s" % key, value, actor=actor)
+        self.store.audit(actor, "cursor.updated", json.dumps(self.cursor_info()))
+        self.cursor_apply()
+        return self.cursor_info()
+
+    def cursor_apply(self) -> Dict[str, Any]:
+        """Hand the saved settings to the running browser.
+
+        Returns what the effect layer now reports; a missing CDP or a closed
+        page is not an error here, because the settings are still saved and
+        the next run picks them up.
+        """
+        backend = self.engine.backend if self.engine is not None else None
+        effect = getattr(backend, "cursor_fx", None)
+        if effect is None:
+            return {"applied": False, "reason": "no cursor effect is attached"}
+        try:
+            report = effect.configure(self.cursor_config_for_backend())
+        except Exception as exc:  # noqa: BLE001 - cosmetic, never fatal
+            return {"applied": False, "reason": str(exc)[:200]}
+        return {"applied": True, "report": report or {}}
+
+    def cursor_config_for_backend(self) -> Dict[str, Any]:
+        info = self.cursor_info()
+        return {"enabled": info["enabled"], "size": info["size"],
+                "color": info["color"], "outline": info["outline"],
+                "ripple": info["ripple"]}
+
+    # -- the route list the sidebar shows ------------------------------------
+    def api_index(self) -> List[Dict[str, Any]]:
+        """Every route the agent key opens, with the base URL filled in, so
+        the operator can hand the whole thing to another AI by copy-paste."""
+        base = self.public_base.rstrip("/") if self.public_base else ""
+        prefix = "%s/automation/api" % base if base else "/automation/api"
+        return [{"method": method, "path": "%s%s" % (prefix, path),
+                 "fa": fa, "en": en} for method, path, fa, en in API_INDEX]
+
     # -- Telegram -------------------------------------------------------
     def telegram_status(self, probe: bool = False) -> Dict[str, Any]:
         """Local configuration only, unless `probe` asks for a round trip.
@@ -302,6 +824,11 @@ class AgentHub:
         mode = self.notifier.mode()
         info: Dict[str, Any] = {"mode": mode, "targets": self.notifier.targets(),
                                 "configured": self.notifier.configured(),
+                                "channels": self.notifier.channel_status(),
+                                "routing": {name: str(self.store.get_setting(
+                                    "telegram.channel.%s" % name, ""))
+                                    for name in PURPOSES},
+                                "purposes": list(PURPOSES),
                                 "accountAuthorized": None, "error": "",
                                 "botTokenSet": bool(self.store.get_secret("telegram.botToken", "")),
                                 "apiCredentialsSet": bool(self.store.get_secret("telegram.apiId", "")),
@@ -677,13 +1204,53 @@ class AgentHub:
         except AiBrowserError as exc:
             return {"available": False, "error": str(exc)}
 
-    def ai_open(self) -> Dict[str, Any]:
+    def ai_open(self, provider: Optional[str] = None,
+                url: Optional[str] = None) -> Dict[str, Any]:
+        """Open a chat site in the agent browser.
+
+        `provider` picks a stored profile; `url` overrides it entirely, so
+        an operation can open any site without touching the settings.
+        """
         if self.ai_browser is None:
             raise AgentError("this deployment has no agent browser")
+        name = provider or self.llm.chat_provider()
+        if url and not provider:
+            name = self.llm.chat_provider()
         try:
-            return self.ai_browser.open_provider(self.llm.chat_provider())
+            return self.ai_browser.open_provider(name, url=url or None)
         except AiBrowserError as exc:
             raise AgentError(str(exc), 502)
+
+    def ai_ask(self, prompt: str, provider: Optional[str] = None,
+               timeout: Optional[float] = None,
+               fresh_chat: Optional[bool] = None) -> Dict[str, Any]:
+        """One question to the agent browser, answer included.
+
+        This is the step-level twin of `ask`: no automation context, no
+        JSON insistence - just the prompt, in, and the chat answer, out.
+        """
+        self._guard()
+        if not str(prompt).strip():
+            raise AgentError("a prompt is required")
+        if self.ai_browser is None:
+            raise AgentError("this deployment has no agent browser", 502)
+        name = provider or self.llm.chat_provider()
+        try:
+            kwargs: Dict[str, Any] = {}
+            if timeout:
+                kwargs["timeout"] = float(timeout)
+            if fresh_chat is not None:
+                kwargs["fresh_chat"] = bool(fresh_chat)
+            result = self.ai_browser.ask(str(prompt), name=name, **kwargs)
+        except AiBrowserError as exc:
+            raise AgentError(str(exc), 502)
+        self.store.audit("agent", "ai.ask",
+                         "%d chars to %s" % (len(str(prompt)), name))
+        return {"text": str(result.get("text") or ""), "provider": name,
+                "source": {"url": result.get("url", ""),
+                           "title": result.get("title", "")},
+                "elapsed": result.get("elapsed"),
+                "timedOut": bool(result.get("timedOut"))}
 
     def ai_screenshot(self) -> str:
         """PNG bytes of the agent's own display, so a one-time login is possible."""

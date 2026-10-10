@@ -37,6 +37,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from automation import cdp, schema  # noqa: E402
 from automation.agent import AgentHub  # noqa: E402
+from automation.cursor import CursorFx  # noqa: E402
 from automation.archive import shot_archive, text_archive  # noqa: E402
 from automation.api import API_PREFIX, AutomationApi, FlowStore  # noqa: E402
 from automation.detect import Detector  # noqa: E402
@@ -300,9 +301,17 @@ def build_api(args: argparse.Namespace) -> AutomationApi:
             public_base=getattr(args, "public_base", "") or "",
             ai_port=int(getattr(args, "ai_cdp_port", 9223) or 9223),
             ai_display=str(getattr(args, "ai_display", ":2") or ":2"))
+    # The visible pointer: a big yellow cursor plus a ripple on every click.
+    # It reads its own settings from the agent store when there is one, and
+    # quietly does nothing when CDP is not answering.
+    cursor_fx = CursorFx(cdp, args.cdp_port,
+                         config=(agent.cursor_config_for_backend()
+                                 if agent is not None else None))
+    backend.cursor_fx = cursor_fx
     engine = AutomationEngine(backend, args.data_dir, cdp=cdp, cdp_port=args.cdp_port,
                               shots=shots, texts=texts,
-                              notifier=agent.notifier if agent is not None else None)
+                              notifier=agent.notifier if agent is not None else None,
+                              agent=agent, cursor_fx=cursor_fx)
     if agent is not None:
         agent.engine = engine
     detector = Detector(backend, args.data_dir, viewport=dict(schema.DEFAULT_VIEWPORT),

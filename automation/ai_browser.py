@@ -212,9 +212,10 @@ class AiBrowser:
             return {}
 
     # -- navigation -----------------------------------------------------
-    def open_provider(self, name: str = "deepseek") -> Dict[str, Any]:
+    def open_provider(self, name: str = "deepseek",
+                        url: Optional[str] = None) -> Dict[str, Any]:
         profile = self.profile(name)
-        url = profile.get("url") or ""
+        url = url or profile.get("url") or ""
         if not url:
             raise AiBrowserError("provider %r has no url configured" % name)
         if self.runner is not None:

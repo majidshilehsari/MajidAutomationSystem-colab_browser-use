@@ -207,6 +207,7 @@ class AutomationApi:
             ("GET", "/agent/telegram/status", self.route_agent_telegram_status),
             ("GET", "/agent/telegram/targets", self.route_agent_telegram_targets),
             ("POST", "/agent/telegram/test", self.route_agent_telegram_test),
+            ("POST", "/agent/telegram/send", self.route_agent_telegram_send),
             ("POST", "/agent/telegram/login", self.route_agent_telegram_login),
             ("POST", "/agent/telegram/login-finish", self.route_agent_telegram_login_finish),
             ("GET", "/agent/captcha/config", self.route_agent_captcha_config_get),
@@ -217,6 +218,28 @@ class AutomationApi:
             ("GET", "/agent/ai/status", self.route_agent_ai_status),
             ("POST", "/agent/ai/open", self.route_agent_ai_open),
             ("GET", "/agent/ai/shot", self.route_agent_ai_shot),
+            # the chat tab
+            ("GET", "/agent/chat/messages", self.route_agent_chat_messages),
+            ("POST", "/agent/chat/send", self.route_agent_chat_send),
+            ("POST", "/agent/chat/clear", self.route_agent_chat_clear),
+            ("POST", "/agent/chat/apply-flow", self.route_agent_chat_apply_flow),
+            # the generated agent key
+            ("GET", "/agent/key", self.route_agent_key_info),
+            ("POST", "/agent/key/reveal", self.route_agent_key_reveal),
+            ("POST", "/agent/key/rotate", self.route_agent_key_rotate),
+            ("POST", "/agent/key/enable", self.route_agent_key_enable),
+            # the operations library
+            ("GET", "/agent/operations", self.route_agent_operations_list),
+            ("POST", "/agent/operations", self.route_agent_operations_create),
+            ("PUT", "/agent/operations/*", self.route_agent_operations_update),
+            ("DELETE", "/agent/operations/*", self.route_agent_operations_delete),
+            ("POST", "/agent/operation-run", self.route_agent_operation_run),
+            ("POST", "/agent/operation-reset", self.route_agent_operation_reset),
+            # the pointer and the click ripple
+            ("GET", "/agent/cursor", self.route_agent_cursor_get),
+            ("POST", "/agent/cursor", self.route_agent_cursor_set),
+            # the copy-paste route list
+            ("GET", "/agent/api-index", self.route_agent_api_index),
         ]
 
     # -- helpers --------------------------------------------------------
@@ -226,11 +249,44 @@ class AutomationApi:
         # unguessable.
         return bool(self.token) and path != "/info" and not path.startswith("/public/")
 
-    def authorized(self, path: str, headers: Dict[str, str]) -> bool:
+    def authenticate(self, path: str, headers: Dict[str, str],
+                     query: Optional[Dict[str, List[str]]] = None) -> str:
+        """Who is asking: "public", "operator", "agent", "cut" or "denied".
+
+        Two keys open this API. The platform token (`AUTOMATION_TOKEN`) is the
+        operator's and always wins, so cutting the agent can never lock the
+        human out of their own sidebar. The agent key is the one the sidebar
+        generates, accepts it as `Authorization: Bearer`, as `x-agent-key`, or
+        as `?k=` for clients that cannot set headers - and when access is cut,
+        or the kill switch is on, it answers 403 instead of silently working.
+        """
         if not self.requires_auth(path):
-            return True
+            return "public"
         supplied = headers.get("x-automation-token", "")
-        return secrets.compare_digest(supplied, self.token)
+        if supplied and secrets.compare_digest(supplied, self.token):
+            return "operator"
+        candidate = ""
+        auth = headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            candidate = auth[len("bearer "):].strip()
+        if not candidate:
+            candidate = headers.get("x-agent-key", "")
+        if not candidate and query:
+            candidate = (query.get("k") or [""])[0]
+        if not candidate or self.agent is None:
+            return "denied"
+        if not self.agent.store.agent_key_enabled():
+            return "cut"
+        if self.agent.store.kill_switch_engaged():
+            return "cut"
+        if not self.agent.check_agent_access(candidate):
+            return "denied"
+        return "agent"
+
+    def authorized(self, path: str, headers: Dict[str, str],
+                   query: Optional[Dict[str, List[str]]] = None) -> bool:
+        return self.authenticate(path, headers, query) in ("public", "operator",
+                                                           "agent")
 
     def handle(self, method: str, path: str, *, query: Optional[Dict[str, List[str]]] = None,
                body: bytes = b"", headers: Optional[Dict[str, str]] = None) -> Response:
@@ -239,7 +295,12 @@ class AutomationApi:
         headers = headers or {}
         method = method.upper()
 
-        if not self.authorized(path, headers):
+        verdict = self.authenticate(path, headers, query)
+        if verdict == "cut":
+            return error_response(
+                403, "agent access is cut: the key is disabled or the kill switch "
+                     "is on. The operator's own token still works.")
+        if verdict == "denied":
             return error_response(401, "missing or wrong X-Automation-Token header")
 
         for route_method, pattern, handler in self.routes:
@@ -332,7 +393,57 @@ class AutomationApi:
         if action == "confirm":
             approve = bool(payload.get("approve", False))
             return json_response(200, {"run": self.engine.confirm(approve)})
-        raise ApiError(400, "action must be one of pause, resume, stop, confirm")
+        return self._manual_primitive(action, payload)
+
+    def _manual_primitive(self, action: str,
+                          payload: Dict[str, Any]) -> Response:
+        """One primitive, right now, without building a flow.
+
+        This is what makes the pages tab's "click it" button real: a click on
+        an element's desktop coordinates. Refused while a run owns the mouse,
+        because two drivers on one pointer is how runs get corrupted.
+        """
+        backend = self.engine.backend if self.engine is not None else None
+        if backend is None:
+            raise ApiError(409, "no control backend is attached")
+        if self.engine is not None and self.engine.busy():
+            raise ApiError(409, "a run owns the mouse right now")
+        try:
+            if action == "click":
+                rc, out, err = backend.click(int(payload.get("x")),
+                                             int(payload.get("y")),
+                                             str(payload.get("button") or "left"),
+                                             int(payload.get("clicks") or 1))
+            elif action == "double_click":
+                rc, out, err = backend.click(int(payload.get("x")),
+                                             int(payload.get("y")), "left", 2)
+            elif action == "move":
+                rc, out, err = backend.move(int(payload.get("x")),
+                                            int(payload.get("y")))
+            elif action == "type":
+                rc, out, err = backend.type_text(str(payload.get("text") or ""))
+            elif action == "paste":
+                rc, out, err = backend.paste(str(payload.get("text") or ""))
+            elif action == "key":
+                keys = payload.get("keys")
+                if not isinstance(keys, list) or not keys:
+                    raise ApiError(400, "'keys' must be a non-empty list")
+                rc, out, err = backend.key(keys)
+            elif action == "goto_url":
+                rc, out, err = backend.goto_url(str(payload.get("url") or ""))
+            elif action == "screenshot":
+                rc, out, err = backend.screenshot(
+                    str(payload.get("name") or "manual-%d.png" % int(time.time())))
+            else:
+                raise ApiError(400, "action must be one of pause, resume, stop, "
+                                    "confirm, click, double_click, move, type, "
+                                    "paste, key, goto_url, screenshot")
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, "bad coordinates or text: %s" % exc)
+        if rc != 0:
+            return json_response(502, {"ok": False, "rc": rc,
+                                       "error": (err or out)[:400]})
+        return json_response(200, {"ok": True, "rc": rc, "stdout": (out or "")[:400]})
 
     def route_flows_list(self, **_: Any) -> Response:
         return json_response(200, {"flows": self.store.list()})
@@ -662,7 +773,32 @@ class AutomationApi:
 
     def route_agent_telegram_test(self, *, body: bytes = b"", **_: Any) -> Response:
         payload = self.read_json(body)
-        return json_response(200, self.agent.telegram_test(str(payload.get("text") or "")))
+        text = str(payload.get("text") or "")
+        target = payload.get("target")
+        channel = str(payload.get("channel") or "") or None
+        if target in (None, ""):
+            raise ApiError(400, "a test message needs a target: pick who should "
+                                "receive it")
+        return json_response(200, self.agent.telegram_send(
+            text or "پیام آزمایشی از سامانهٔ اتوماسیون ✔",
+            target=target, channel=channel, purpose="manual"))
+
+    def route_agent_telegram_send(self, *, body: bytes = b"", **_: Any) -> Response:
+        """A message the agent decided to send, to a target it names.
+
+        Same validation as the test route, plus a `purpose`, so a message can
+        be routed over the channel that purpose is configured to use.
+        """
+        payload = self.read_json(body)
+        text = str(payload.get("text") or "")
+        if not text.strip():
+            raise ApiError(400, "missing 'text'")
+        return json_response(200, self.agent.telegram_send(
+            text,
+            target=payload.get("target"),
+            channel=str(payload.get("channel") or "") or None,
+            purpose=str(payload.get("purpose") or "manual"),
+            actor=str(payload.get("actor") or "agent")))
 
     def route_agent_telegram_login(self, *, body: bytes = b"", **_: Any) -> Response:
         payload = self.read_json(body)
@@ -717,6 +853,99 @@ class AutomationApi:
         with open(path, "rb") as handle:
             data = handle.read()
         return 200, {"Content-Type": "image/png", "Cache-Control": "no-store"}, data
+
+    # -- the chat tab ------------------------------------------------------
+    def route_agent_chat_messages(self, query: Dict[str, List[str]],
+                                  **_: Any) -> Response:
+        limit = int((query.get("limit") or ["200"])[0])
+        return json_response(200, {
+            "messages": self.agent.chat_messages(limit),
+            "pending": self.agent.chat_pending(),
+            "providers": self.agent.chat_providers(),
+        })
+
+    def route_agent_chat_send(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.chat_send(
+            str(payload.get("text") or ""),
+            provider=str(payload.get("provider") or ""),
+            with_context=bool(payload.get("withContext"))))
+
+    def route_agent_chat_clear(self, **_: Any) -> Response:
+        return json_response(200, self.agent.chat_clear())
+
+    def route_agent_chat_apply_flow(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        message_id = str(payload.get("id") or "")
+        if not message_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, {"flow": self.agent.chat_apply_flow(message_id)})
+
+    # -- the generated agent key --------------------------------------------
+    def route_agent_key_info(self, **_: Any) -> Response:
+        return json_response(200, self.agent.agent_key_info())
+
+    def route_agent_key_reveal(self, **_: Any) -> Response:
+        return json_response(200, self.agent.agent_key_reveal())
+
+    def route_agent_key_rotate(self, **_: Any) -> Response:
+        return json_response(200, self.agent.agent_key_rotate())
+
+    def route_agent_key_enable(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        if "enabled" not in payload:
+            raise ApiError(400, "missing 'enabled'")
+        return json_response(200,
+                             self.agent.agent_key_set_enabled(bool(payload["enabled"])))
+
+    # -- the operations library ----------------------------------------------
+    def route_agent_operations_list(self, **_: Any) -> Response:
+        return json_response(200, {"operations": self.agent.operation_list(),
+                                   "stepTypes": schema.step_catalog()})
+
+    def route_agent_operations_create(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(201, {"operation":
+                                   self.agent.operation_save(self.read_json(body))})
+
+    def route_agent_operations_update(self, *, body: bytes = b"",
+                                      params: Dict[str, str], **_: Any) -> Response:
+        return json_response(200, {"operation": self.agent.operation_save(
+            self.read_json(body), operation_id=params["*"])})
+
+    def route_agent_operations_delete(self, *, params: Dict[str, str],
+                                      **_: Any) -> Response:
+        return json_response(200, self.agent.operation_delete(params["*"]))
+
+    def route_agent_operation_run(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        operation_id = str(payload.get("id") or "")
+        if not operation_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, self.agent.operation_run(operation_id))
+
+    def route_agent_operation_reset(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        operation_id = str(payload.get("id") or "")
+        if not operation_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, {"operation":
+                                   self.agent.operation_reset(operation_id)})
+
+    # -- the pointer and the click ripple -------------------------------------
+    def route_agent_cursor_get(self, **_: Any) -> Response:
+        return json_response(200, {"cursor": self.agent.cursor_info()})
+
+    def route_agent_cursor_set(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(200, {"cursor":
+                                   self.agent.cursor_set(self.read_json(body))})
+
+    def route_agent_api_index(self, **_: Any) -> Response:
+        return json_response(200, {"endpoints": self.agent.api_index(),
+                                   "keyWays": [
+            "Authorization: Bearer <key>",
+            "x-agent-key: <key>",
+            "?k=<key>",
+        ]})
 
 
 class ApiError(Exception):

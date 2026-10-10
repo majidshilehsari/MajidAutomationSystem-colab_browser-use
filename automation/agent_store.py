@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import os
+import secrets
 import sqlite3
 import threading
 import time
@@ -91,9 +92,38 @@ CREATE TABLE IF NOT EXISTS audit (
     detail TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS chat (
+    id         TEXT PRIMARY KEY,
+    role       TEXT NOT NULL,
+    body       TEXT NOT NULL DEFAULT '',
+    provider   TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'done',
+    error      TEXT NOT NULL DEFAULT '',
+    meta       TEXT NOT NULL DEFAULT '{}',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS operations (
+    id          TEXT PRIMARY KEY,
+    name        TEXT NOT NULL,
+    description TEXT NOT NULL DEFAULT '',
+    kind        TEXT NOT NULL DEFAULT 'steps',
+    builtin     TEXT NOT NULL DEFAULT '',
+    tags        TEXT NOT NULL DEFAULT '[]',
+    steps       TEXT NOT NULL DEFAULT '[]',
+    created_at  REAL NOT NULL,
+    updated_at  REAL NOT NULL,
+    last_run_at REAL,
+    last_status TEXT,
+    run_count   INTEGER NOT NULL DEFAULT 0
+);
+
 CREATE INDEX IF NOT EXISTS idx_audit_at ON audit (at);
 CREATE INDEX IF NOT EXISTS idx_jobs_next ON jobs (enabled, next_run_at);
 CREATE INDEX IF NOT EXISTS idx_scripts_status ON scripts (status);
+CREATE INDEX IF NOT EXISTS idx_chat_created ON chat (created_at);
+CREATE INDEX IF NOT EXISTS idx_ops_name ON operations (name);
 """
 
 # Job schedule kinds. "at" fires once at a unix timestamp, "every" fires on an
@@ -431,6 +461,230 @@ class AgentStore:
         return bool(removed)
 
     # -- kill switch ----------------------------------------------------
+    # -- the chat tab -----------------------------------------------------
+    def add_chat(self, role: str, body: str = "", provider: str = "",
+                 status: str = "done", error: str = "",
+                 meta: Optional[Dict[str, Any]] = None,
+                 actor: str = "operator") -> Dict[str, Any]:
+        """One turn of the conversation.
+
+        ``thinking`` means a worker owes this message a reply; the UI polls for
+        those, so refreshing the page never loses a message that is still being
+        answered.
+        """
+        chat_id = "msg-%s" % uuid.uuid4().hex[:12]
+        now = self._clock()
+        self._execute(
+            "INSERT INTO chat (id, role, body, provider, status, error, meta,"
+            " created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (chat_id, str(role), str(body), str(provider), str(status),
+             str(error), json.dumps(meta or {}, ensure_ascii=False), now, now))
+        return self.get_chat(chat_id) or {}
+
+    def get_chat(self, chat_id: str) -> Optional[Dict[str, Any]]:
+        rows = self._query("SELECT * FROM chat WHERE id = ?", (chat_id,))
+        return self._decode_chat(rows[0]) if rows else None
+
+    @staticmethod
+    def _decode_chat(row: Dict[str, Any]) -> Dict[str, Any]:
+        item = dict(row)
+        try:
+            item["meta"] = json.loads(item.get("meta") or "{}")
+        except ValueError:
+            item["meta"] = {}
+        return item
+
+    def update_chat(self, chat_id: str, body: Optional[str] = None,
+                    status: Optional[str] = None, error: Optional[str] = None,
+                    meta: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
+        row = self.get_chat(chat_id)
+        if row is None:
+            return None
+        fields, args = [], []
+        if body is not None:
+            fields.append("body = ?")
+            args.append(str(body))
+        if status is not None:
+            fields.append("status = ?")
+            args.append(str(status))
+        if error is not None:
+            fields.append("error = ?")
+            args.append(str(error))
+        if meta is not None:
+            fields.append("meta = ?")
+            args.append(json.dumps(meta, ensure_ascii=False))
+        if not fields:
+            return row
+        fields.append("updated_at = ?")
+        args.append(self._clock())
+        args.append(chat_id)
+        self._execute("UPDATE chat SET %s WHERE id = ?" % ", ".join(fields), args)
+        return self.get_chat(chat_id)
+
+    def pending_chats(self) -> List[Dict[str, Any]]:
+        """Messages a worker still owes an answer to; a restart can find them."""
+        return [self._decode_chat(row) for row in self._query(
+            "SELECT * FROM chat WHERE status IN ('thinking', 'queued')"
+            " ORDER BY created_at")]
+
+    def list_chat(self, limit: int = 200) -> List[Dict[str, Any]]:
+        """Newest first; the chat pane reverses it to read top-down."""
+        rows = self._query("SELECT * FROM chat ORDER BY created_at DESC LIMIT ?",
+                           (int(limit),))
+        return [self._decode_chat(row) for row in rows]
+
+    def clear_chat(self, actor: str = "operator") -> Dict[str, Any]:
+        rows = self._query("SELECT COUNT(*) AS n FROM chat")
+        count = int((rows[0] or {}).get("n") or 0)
+        self._execute("DELETE FROM chat")
+        self.audit(actor, "chat.cleared", "%d message(s)" % count)
+        return {"cleared": count}
+
+    # -- the operations library -------------------------------------------
+    def list_operations(self) -> List[Dict[str, Any]]:
+        return [self._decode_operation(row) for row in self._query(
+            "SELECT * FROM operations ORDER BY builtin DESC, name")]
+
+    def get_operation(self, operation_id: str) -> Optional[Dict[str, Any]]:
+        rows = self._query("SELECT * FROM operations WHERE id = ?", (operation_id,))
+        return self._decode_operation(rows[0]) if rows else None
+
+    @staticmethod
+    def _decode_operation(row: Dict[str, Any]) -> Dict[str, Any]:
+        item = dict(row)
+        for key in ("steps", "tags"):
+            try:
+                parsed = json.loads(item.get(key) or "[]")
+                item[key] = parsed if isinstance(parsed, list) else []
+            except ValueError:
+                item[key] = []
+        # `builtin` is the flag the UI renders as a badge; `builtinKey`
+        # is the factory name reset_builtin looks up.
+        item["builtinKey"] = str(item.get("builtin") or "")
+        item["builtin"] = bool(item.get("builtin"))
+        return item
+
+    def create_operation(self, data: Dict[str, Any],
+                         operation_id: Optional[str] = None,
+                         actor: str = "operator") -> Dict[str, Any]:
+        now = self._clock()
+        if not operation_id:
+            operation_id = "op-%s" % uuid.uuid4().hex[:10]
+        self._execute(
+            "INSERT INTO operations (id, name, description, kind, builtin, tags,"
+            " steps, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            (operation_id, str(data.get("name") or "عملیات"),
+             str(data.get("description") or ""), str(data.get("kind") or "steps"),
+             str(data.get("builtin") or ""),
+             json.dumps(data.get("tags") or [], ensure_ascii=False),
+             json.dumps(data.get("steps") or [], ensure_ascii=False), now, now))
+        self.audit(actor, "operation.created", operation_id)
+        return self.get_operation(operation_id) or {}
+
+    def update_operation(self, operation_id: str, data: Dict[str, Any],
+                         actor: str = "operator") -> Optional[Dict[str, Any]]:
+        row = self.get_operation(operation_id)
+        if row is None:
+            return None
+        fields, args = [], []
+        for key in ("name", "description", "kind"):
+            if key in data:
+                fields.append("%s = ?" % key)
+                args.append(str(data[key]))
+        for key in ("tags", "steps"):
+            if key in data:
+                fields.append("%s = ?" % key)
+                args.append(json.dumps(data[key], ensure_ascii=False))
+        if fields:
+            fields.append("updated_at = ?")
+            args.append(self._clock())
+            args.append(operation_id)
+            self._execute("UPDATE operations SET %s WHERE id = ?"
+                          % ", ".join(fields), args)
+            self.audit(actor, "operation.updated", operation_id)
+        return self.get_operation(operation_id)
+
+    def delete_operation(self, operation_id: str, actor: str = "operator") -> bool:
+        if self._execute("DELETE FROM operations WHERE id = ?",
+                         (operation_id,)) <= 0:
+            return False
+        self.audit(actor, "operation.deleted", operation_id)
+        return True
+
+    def record_operation_run(self, operation_id: str, status: str) -> None:
+        self._execute(
+            "UPDATE operations SET last_run_at = ?, last_status = ?,"
+            " run_count = run_count + 1 WHERE id = ?",
+            (self._clock(), str(status), operation_id))
+
+    # -- the agent's own API key -------------------------------------------
+    # The key itself is a secret (0600 file, masked in listings) while its
+    # *state* lives in ordinary settings, so the sidebar can show "enabled
+    # since …" and "used …" without the settings dump leaking the value.
+    AGENT_KEY = "agentKey"
+
+    def agent_key(self, actor: str = "operator") -> str:
+        """The key, generated on first use."""
+        existing = self.get_secret(self.AGENT_KEY, "")
+        if existing:
+            return existing
+        key = secrets.token_urlsafe(32)
+        self.set_secret(self.AGENT_KEY, key)
+        self.set_setting(self.AGENT_KEY + ".createdAt", self._clock(), actor=actor)
+        self.set_setting(self.AGENT_KEY + ".enabled", True, actor=actor)
+        self.audit(actor, "agentKey.created", "a fresh agent API key was generated")
+        return key
+
+    def rotate_agent_key(self, actor: str = "operator") -> str:
+        """A new key; the old one stops working at this exact moment."""
+        key = secrets.token_urlsafe(32)
+        self.set_secret(self.AGENT_KEY, key)
+        self.set_setting(self.AGENT_KEY + ".createdAt", self._clock(), actor=actor)
+        self.set_setting(self.AGENT_KEY + ".lastUsedAt", 0.0, actor=actor)
+        self.audit(actor, "agentKey.rotated", "the previous key stopped working now")
+        return key
+
+    def agent_key_enabled(self) -> bool:
+        return bool(self.get_setting(self.AGENT_KEY + ".enabled", True))
+
+    def set_agent_key_enabled(self, enabled: bool,
+                              actor: str = "operator") -> bool:
+        value = bool(enabled)
+        self.set_setting(self.AGENT_KEY + ".enabled", value, actor=actor)
+        self.audit(actor, "agentKey.%s" % ("enabled" if value else "disabled"),
+                   "agent API access is %s" % ("on" if value else "off"))
+        return value
+
+    def agent_key_info(self) -> Dict[str, Any]:
+        key = self.get_secret(self.AGENT_KEY, "")
+        return {
+            "set": bool(key),
+            "enabled": self.agent_key_enabled(),
+            "createdAt": float(self.get_setting(
+                self.AGENT_KEY + ".createdAt", 0.0) or 0.0),
+            "lastUsedAt": float(self.get_setting(
+                self.AGENT_KEY + ".lastUsedAt", 0.0) or 0.0),
+            "length": len(key),
+            "prefix": (key[:4] + "…" + key[-4:]) if len(key) > 12 else "",
+        }
+
+    def check_agent_key(self, candidate: str) -> bool:
+        """Constant-time compare. An empty candidate or a missing key is just
+        "no"; the API decides whether that is a 401 or a 403."""
+        key = self.get_secret(self.AGENT_KEY, "")
+        if not key or not candidate:
+            return False
+        return secrets.compare_digest(candidate, key)
+
+    def touch_agent_key(self) -> None:
+        """Record a use, at most once a minute: this is a cosmetic timestamp
+        and must not cost a database write on every request."""
+        now = self._clock()
+        last = float(self.get_setting(self.AGENT_KEY + ".lastUsedAt", 0.0) or 0.0)
+        if now - last < 60:
+            return
+        self.set_setting(self.AGENT_KEY + ".lastUsedAt", now, actor="agent")
+
     def kill_switch_engaged(self) -> bool:
         """True when the operator has stopped the agent from acting at all."""
         return bool(self.get_setting("killSwitch", False))

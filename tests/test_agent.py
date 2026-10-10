@@ -33,9 +33,10 @@ if REPO_ROOT not in sys.path:
     sys.path.insert(0, REPO_ROOT)
 
 from automation import schema  # noqa: E402
-from automation.agent import AgentError, AgentHub  # noqa: E402
+from automation.agent import API_INDEX, AgentError, AgentHub  # noqa: E402
 from automation.agent_store import AgentStore  # noqa: E402
-from automation.ai_browser import AiBrowser, AiBrowserError  # noqa: E402
+from automation.ai_browser import (AiBrowser, AiBrowserError,  # noqa: E402
+                                   DEFAULT_PROVIDERS)
 from automation.api import AutomationApi, FlowStore  # noqa: E402
 from automation.captcha import CaptchaSolver  # noqa: E402
 from automation.engine import AutomationEngine  # noqa: E402
@@ -76,6 +77,12 @@ class FakeBackend:
     def click(self, x, y, button="left", clicks=1):
         return self._record("click", x, y, button, clicks)
 
+    def move(self, x, y):
+        return self._record("move", x, y)
+
+    def paste(self, text):
+        return self._record("paste", text)
+
     def type_text(self, text, delay_ms=15):
         return self._record("type", text)
 
@@ -100,9 +107,10 @@ class FakeLlm:
         self.provider = provider
         self.calls = []
 
-    def complete(self, prompt, system="", images=None, want_json=False, timeout=None):
+    def complete(self, prompt, system="", images=None, want_json=False, timeout=None,
+                 chat_name=None):
         self.calls.append({"prompt": prompt, "system": system, "images": images,
-                           "want_json": want_json})
+                           "want_json": want_json, "chat_name": chat_name})
         return {"text": self.reply, "provider": self.provider, "elapsed": 0.2,
                 "source": {"url": "https://chat.example/"}}
 
@@ -111,6 +119,9 @@ class FakeLlm:
 
     def chat_provider(self):
         return "deepseek"
+
+    def chat_names(self):
+        return ["deepseek", "generic"]
 
 
 EMPTY_PAGE = {"count": 0, "texts": [], "url": "https://chat.example/", "title": "chat"}
@@ -1775,3 +1786,746 @@ class ServerWiringTest(TempDirCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: the operations library, the agent key, the chat tab, both Telegram
+# channels, the visible pointer, and the manual primitives behind them.
+# ---------------------------------------------------------------------------
+class FakeEngine:
+    """An engine that records instead of driving a display."""
+
+    def __init__(self, busy=False, page="Start game\nBattle Arena"):
+        self.busy_flag = busy
+        self.started = []
+        self.page = page
+        self.backend = FakeBackend()
+
+    def busy(self):
+        return self.busy_flag
+
+    def start(self, flow, **kwargs):
+        self.started.append(flow)
+        return {"runId": "run-1", "status": "running"}
+
+    def status(self):
+        return {"status": "busy" if self.busy_flag else "idle", "runId": "run-1"}
+
+    def page_text(self, limit=2000):
+        return self.page[:limit]
+
+
+class FakeCursorFx:
+    def __init__(self):
+        self.configs = []
+        self.installed = 0
+
+    def configure(self, config=None):
+        self.configs.append(dict(config or {}))
+        self.installed += 1
+        return {"ok": True, "size": (config or {}).get("size")}
+
+
+class HubCase(TempDirCase):
+    """A hub with fakes for everything that would touch a display or a socket."""
+
+    def build(self, llm=None, engine=None, flows=None):
+        backend = FakeBackend()
+        flows = flows if flows is not None else FlowStore(self.tmp)
+        hub = AgentHub(self.tmp, engine=None, flows=flows, backend=backend,
+                       token=TOKEN, public_base=PUBLIC_BASE, clock=self.clock)
+        hub.llm = llm if llm is not None else FakeLlm("سلام")
+        hub.captcha.llm = hub.llm
+        hub.engine = engine if engine is not None else FakeEngine()
+        self.addCleanup(hub.store.close)
+        return hub, backend, flows
+
+    def api_for(self, hub, backend, flows, busy=False):
+        engine = AutomationEngine(backend, self.tmp, notifier=hub.notifier)
+        if busy:
+            engine.busy = lambda: True
+        return AutomationApi(engine, flows, None, data_dir=self.tmp, token=TOKEN,
+                             agent=hub)
+
+    def call(self, api, method, path, body=None, headers=None, query=None):
+        raw = json.dumps(body).encode("utf-8") if body is not None else b""
+        status, _, data = api.handle(
+            method, path, body=raw, query=query or {},
+            headers={"x-automation-token": TOKEN} if headers is None else headers)
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except ValueError:
+            payload = data[:200]
+        return status, payload
+
+    def join_chat(self, hub, timeout=5.0):
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            if not [row for row in hub.store.list_chat(50)
+                    if row["status"] == "thinking"]:
+                return True
+            for thread in list(hub._chat_threads):
+                thread.join(0.05)
+        return False
+
+
+class OperationsLibraryTest(HubCase):
+    def test_the_factory_operations_are_seeded_once_and_survive_a_restart(self):
+        hub, _, _ = self.build()
+        first = hub.operation_list()
+        ids = [row["id"] for row in first]
+        self.assertEqual(len(ids), len(set(ids)), "a built-in was seeded twice")
+        self.assertEqual(len(first), 5)
+        names = " ".join(row["name"] for row in first)
+        for needle in ("lmarena", "کپچا", "دیپ‌سیک"):
+            self.assertIn(needle, names)
+        hub.store.close()
+
+        # A second hub on the same directory is what a restart looks like.
+        again = AgentHub(self.tmp, engine=None, flows=None, backend=None,
+                         token=TOKEN, clock=self.clock)
+        self.addCleanup(again.store.close)
+        self.assertEqual([row["id"] for row in again.operation_list()], ids)
+
+    def test_every_factory_operation_is_a_valid_flow(self):
+        hub, _, _ = self.build()
+        for operation in hub.operation_list():
+            with self.subTest(operation=operation["id"]):
+                flow = hub.library.as_flow(operation)
+                _, errors = schema.validate_flow(flow)
+                self.assertEqual(errors, [])
+                self.assertTrue(flow["steps"])
+
+    def test_the_deepseek_operation_opens_the_site_and_then_asks(self):
+        hub, _, _ = self.build()
+        by_key = {row["builtinKey"]: row for row in hub.operation_list()}
+        opened = [step["type"] for step in by_key["deepseek-open"]["steps"]]
+        asked = [step["type"] for step in by_key["deepseek-ask"]["steps"]]
+        self.assertIn("agent_open", opened)
+        self.assertIn("agent_ask", asked)
+        provider = [step.get("provider") for step in by_key["deepseek-open"]["steps"]
+                    if step["type"] == "agent_open"][0]
+        self.assertEqual(provider, "deepseek")
+        self.assertIn("chat.deepseek.com", DEFAULT_PROVIDERS[provider]["url"],
+                      "the profile is what carries the address")
+
+    def test_an_operation_can_be_created_edited_and_deleted(self):
+        hub, _, _ = self.build()
+        created = hub.operation_save({"name": "ورود به سایت",
+                                      "description": "دو گام",
+                                      "tags": ["login", "web"],
+                                      "steps": [{"type": "goto_url", "url": "https://x.test/"},
+                                                {"type": "wait", "ms": 500}]})
+        self.assertTrue(created["id"])
+        self.assertFalse(created["builtin"])
+        self.assertEqual(len(created["steps"]), 2)
+
+        edited = hub.operation_save({"name": "ورود به سایت (ویرایش)",
+                                     "steps": [{"type": "wait", "ms": 10}]},
+                                    operation_id=created["id"])
+        self.assertEqual(edited["id"], created["id"])
+        self.assertEqual(len(edited["steps"]), 1)
+        self.assertEqual(len(hub.operation_list()), 6)
+
+        self.assertEqual(hub.operation_delete(created["id"])["deleted"], created["id"])
+        with self.assertRaises(AgentError) as caught:
+            hub.operation_delete(created["id"])
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_an_invalid_step_list_is_refused_before_it_is_stored(self):
+        hub, _, _ = self.build()
+        for bad, why in (([], "empty"), ([{"type": "nope"}], "unknown type"),
+                         ([{"type": "click"}], "click without coordinates"),
+                         ("not a list", "not a list")):
+            with self.subTest(why=why):
+                with self.assertRaises(AgentError) as caught:
+                    hub.operation_save({"name": "bad", "steps": bad})
+                self.assertEqual(caught.exception.status, 400)
+        self.assertEqual(len(hub.operation_list()), 5, "a refused operation was stored")
+
+    def test_a_builtin_can_be_reset_after_an_edit(self):
+        hub, _, _ = self.build()
+        target = [row for row in hub.operation_list() if row["builtinKey"] == "captcha"][0]
+        hub.operation_save({"name": "کپچای من", "steps": [{"type": "wait", "ms": 5}]},
+                           operation_id=target["id"])
+        edited = hub.library.get(target["id"])
+        self.assertEqual(edited["name"], "کپچای من")
+
+        restored = hub.operation_reset(target["id"])
+        self.assertEqual(restored["id"], target["id"])
+        self.assertNotEqual(restored["name"], "کپچای من")
+        self.assertEqual([step["type"] for step in restored["steps"]],
+                         [step["type"] for step in target["steps"]])
+        with self.assertRaises(AgentError):
+            hub.operation_reset("op-does-not-exist")
+
+    def test_running_an_operation_starts_its_flow_and_is_recorded(self):
+        engine = FakeEngine()
+        hub, _, _ = self.build(engine=engine)
+        target = hub.operation_list()[0]
+        result = hub.operation_run(target["id"])
+        self.assertEqual(result["status"], "started")
+        self.assertEqual(len(engine.started), 1)
+        self.assertEqual(engine.started[0]["name"], target["name"])
+        self.assertEqual(engine.started[0]["steps"][0]["type"],
+                         target["steps"][0]["type"])
+        stored = hub.library.get(target["id"])
+        self.assertEqual(stored["run_count"], 1)
+        self.assertEqual(stored["last_status"], "started")
+
+    def test_a_busy_desktop_refuses_an_operation_run(self):
+        hub, _, _ = self.build(engine=FakeEngine(busy=True))
+        with self.assertRaises(AgentError) as caught:
+            hub.operation_run(hub.operation_list()[0]["id"])
+        self.assertEqual(caught.exception.status, 409)
+
+    def test_the_kill_switch_stops_the_library_too(self):
+        hub, _, _ = self.build()
+        hub.set_kill_switch(True)
+        with self.assertRaises(AgentError) as caught:
+            hub.operation_run(hub.operation_list()[0]["id"])
+        self.assertEqual(caught.exception.status, 409)
+
+
+class AgentKeyTest(HubCase):
+    def test_a_key_is_generated_once_and_never_leaks_into_the_overview(self):
+        hub, _, _ = self.build()
+        info = hub.agent_key_info()
+        self.assertTrue(info["set"])
+        self.assertTrue(info["enabled"])
+        self.assertEqual(info["length"], 43)
+        self.assertIn("…", info["prefix"])
+        self.assertEqual(hub.agent_key_info()["createdAt"], info["createdAt"])
+
+        secret = hub.store.get_secret(hub.store.AGENT_KEY)
+        blob = json.dumps(hub.overview(), ensure_ascii=False)
+        self.assertNotIn(secret, blob)
+        self.assertNotIn(secret, json.dumps(hub.agent_key_info()))
+        # It is not in the database either, only in the 0600 secrets file.
+        with sqlite3.connect(hub.store.db_path) as db:
+            dump = json.dumps(db.execute("SELECT key, value FROM settings").fetchall(),
+                              ensure_ascii=False)
+        self.assertNotIn(secret, dump)
+        with open(hub.store.secrets_path, encoding="utf-8") as handle:
+            self.assertIn(secret, handle.read(), "the key lives in the secrets file")
+
+    def test_revealing_the_key_is_audited(self):
+        hub, _, _ = self.build()
+        secret = hub.store.get_secret(hub.store.AGENT_KEY)
+        self.assertEqual(hub.agent_key_reveal()["key"], secret)
+        actions = [row["action"] for row in hub.store.list_audit(limit=50)]
+        self.assertIn("agentKey.revealed", actions)
+
+    def test_rotating_invalidates_the_old_key(self):
+        hub, _, _ = self.build()
+        old = hub.store.get_secret(hub.store.AGENT_KEY)
+        new = hub.agent_key_rotate()["key"]
+        self.assertNotEqual(old, new)
+        self.assertFalse(hub.check_agent_access(old))
+        self.assertTrue(hub.check_agent_access(new))
+
+    def test_disabling_cuts_every_route_but_not_the_platform_token(self):
+        hub, _, _ = self.build()
+        key = hub.store.get_secret(hub.store.AGENT_KEY)
+        self.assertTrue(hub.check_agent_access(key))
+        self.assertFalse(hub.agent_key_set_enabled(False)["enabled"])
+        self.assertFalse(hub.check_agent_access(key),
+                         "a disabled key must not work even with the right value")
+        self.assertTrue(hub.agent_key_set_enabled(True)["enabled"])
+        self.assertTrue(hub.check_agent_access(key))
+
+    def test_a_wrong_key_is_simply_wrong(self):
+        hub, _, _ = self.build()
+        self.assertFalse(hub.check_agent_access(""))
+        self.assertFalse(hub.check_agent_access("mas_not_the_key"))
+
+    def test_the_api_accepts_the_key_in_three_places(self):
+        hub, backend, flows = self.build()
+        engine = AutomationEngine(backend, self.tmp, notifier=hub.notifier)
+        api = AutomationApi(engine, flows, None, data_dir=self.tmp, token=TOKEN,
+                            agent=hub)
+        key = hub.store.get_secret(hub.store.AGENT_KEY)
+        for headers in ({"authorization": "Bearer " + key}, {"x-agent-key": key}):
+            with self.subTest(headers=list(headers)):
+                self.assertEqual(api.authenticate("/agent", headers, {}), "agent")
+                self.assertEqual(self.call(api, "GET", "/agent", headers=headers)[0], 200)
+        self.assertEqual(api.authenticate("/agent", {}, {"k": [key]}), "agent")
+        self.assertEqual(self.call(api, "GET", "/agent", query={"k": [key]})[0], 200)
+        # And the key is remembered as used.
+        self.assertTrue(hub.agent_key_info()["lastUsedAt"])
+
+    def test_a_cut_key_answers_403_while_the_platform_token_still_works(self):
+        hub, backend, flows = self.build()
+        engine = AutomationEngine(backend, self.tmp, notifier=hub.notifier)
+        api = AutomationApi(engine, flows, None, data_dir=self.tmp, token=TOKEN,
+                            agent=hub)
+        key = hub.store.get_secret(hub.store.AGENT_KEY)
+        hub.agent_key_set_enabled(False)
+        status, payload = self.call(api, "GET", "/agent", headers={"x-agent-key": key})
+        self.assertEqual(status, 403)
+        self.assertIn("error", payload)
+        self.assertEqual(self.call(api, "GET", "/agent")[0], 200,
+                         "the operator's own token must keep working")
+
+    def test_the_kill_switch_cuts_the_key_too(self):
+        hub, backend, flows = self.build()
+        engine = AutomationEngine(backend, self.tmp, notifier=hub.notifier)
+        api = AutomationApi(engine, flows, None, data_dir=self.tmp, token=TOKEN,
+                            agent=hub)
+        key = hub.store.get_secret(hub.store.AGENT_KEY)
+        hub.set_kill_switch(True)
+        self.assertEqual(api.authenticate("/agent", {"x-agent-key": key}, {}), "cut")
+        self.assertEqual(self.call(api, "GET", "/agent",
+                                   headers={"x-agent-key": key})[0], 403)
+
+    def test_an_unknown_key_is_a_401_not_a_403(self):
+        hub, backend, flows = self.build()
+        engine = AutomationEngine(backend, self.tmp, notifier=hub.notifier)
+        api = AutomationApi(engine, flows, None, data_dir=self.tmp, token=TOKEN,
+                            agent=hub)
+        status, payload = self.call(api, "GET", "/agent",
+                                    headers={"x-agent-key": "nope"})
+        self.assertEqual(status, 401)
+        self.assertIn("error", payload)
+
+    def test_the_index_documents_exactly_the_routes_the_server_has(self):
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        routes = {(method, path) for method, path, _ in api.routes}
+        indexed = {(method, re.sub(r"<[^>]+>", "*", path))
+                   for method, path, _, _ in API_INDEX}
+        self.assertEqual(sorted(routes - indexed), [],
+                         "routes an agent may call but the index never mentions")
+        self.assertEqual(sorted(indexed - routes), [],
+                         "documented routes that do not exist")
+
+    def test_the_endpoint_index_is_absolute_and_covers_the_agent_surface(self):
+        hub, _, _ = self.build()
+        endpoints = hub.api_index()
+        self.assertGreaterEqual(len(endpoints), 30)
+        for item in endpoints:
+            with self.subTest(path=item["path"]):
+                self.assertTrue(item["path"].startswith(PUBLIC_BASE + "/automation/api/"),
+                                item["path"])
+                self.assertIn(item["method"], ("GET", "POST", "PUT", "DELETE"))
+                self.assertTrue(item["fa"] and item["en"])
+        paths = [item["path"] for item in endpoints]
+        for needle in ("/agent/key", "/agent/chat/send", "/agent/operations",
+                       "/agent/cursor", "/run", "/detect"):
+            self.assertTrue(any(path.endswith(needle) for path in paths), needle)
+
+
+class ChatTabTest(HubCase):
+    def test_a_turn_is_queued_and_answered_in_the_background(self):
+        llm = FakeLlm("سلام! چطور می‌توانم کمک کنم؟")
+        hub, _, _ = self.build(llm=llm)
+        result = hub.chat_send("سلام", provider="deepseek")
+        self.assertTrue(result["queued"])
+        self.assertEqual([row["role"] for row in result["messages"]],
+                         ["user", "assistant"])
+        self.assertEqual(result["messages"][1]["status"], "thinking")
+        self.assertIn("deepseek", result["providers"])
+
+        self.assertTrue(self.join_chat(hub), "the answer never arrived")
+        rows = hub.chat_messages()
+        self.assertEqual([row["role"] for row in rows], ["user", "assistant"],
+                         "a conversation reads oldest first")
+        self.assertEqual(rows[1]["status"], "done")
+        self.assertIn("چطور", rows[1]["body"])
+        self.assertEqual(llm.calls[0]["chat_name"], "deepseek")
+        self.assertIn("سلام", llm.calls[0]["prompt"])
+
+    def test_the_history_is_handed_back_on_the_next_turn(self):
+        llm = FakeLlm("جواب اول")
+        hub, _, _ = self.build(llm=llm)
+        hub.chat_send("پرسش اول")
+        self.join_chat(hub)
+        hub.chat_send("پرسش دوم")
+        self.join_chat(hub)
+        self.assertIn("پرسش اول", llm.calls[1]["prompt"])
+        self.assertIn("جواب اول", llm.calls[1]["prompt"])
+
+    def test_an_empty_message_is_refused(self):
+        hub, _, _ = self.build()
+        with self.assertRaises(AgentError):
+            hub.chat_send("   ")
+
+    def test_the_automation_context_is_read_only_and_optional(self):
+        llm = FakeLlm("باشه")
+        engine = FakeEngine(page="Start game")
+        hub, _, flows = self.build(llm=llm, engine=engine)
+        flows.save("Arena", {"name": "Arena", "steps": [{"type": "wait", "ms": 5}]})
+        hub.chat_send("چی روی صفحه است؟", with_context=True)
+        self.join_chat(hub)
+        prompt = llm.calls[0]["prompt"]
+        self.assertIn("Arena", prompt)
+        self.assertIn("Start game", prompt)
+        self.assertIn("عملیات کتابخانه", prompt)
+
+        llm.calls.clear()
+        hub.chat_send("بدون زمینه", with_context=False)
+        self.join_chat(hub)
+        self.assertNotIn("Start game", llm.calls[0]["prompt"])
+
+    def test_a_flow_inside_an_answer_can_be_applied(self):
+        reply = ("حتماً.\n```json\n{\"name\": \"پیشنهاد مدل\", \"steps\": "
+                 "[{\"type\": \"goto_url\", \"url\": \"https://x.test/\"},"
+                 "{\"type\": \"wait\", \"ms\": 300}]}\n```")
+        hub, _, flows = self.build(llm=FakeLlm(reply))
+        hub.chat_send("یک جریان بساز")
+        self.join_chat(hub)
+        answer = hub.chat_messages()[-1]
+        self.assertIn("flow", answer["meta"])
+
+        saved = hub.chat_apply_flow(answer["id"])
+        self.assertEqual(saved["name"], "پیشنهاد مدل")
+        self.assertEqual(len(saved["steps"]), 2)
+        self.assertIsNotNone(flows.get("پیشنهاد مدل"))
+
+    def test_applying_an_answer_without_a_flow_is_a_409(self):
+        hub, _, _ = self.build(llm=FakeLlm("فقط یک جملهٔ معمولی."))
+        hub.chat_send("سلام")
+        self.join_chat(hub)
+        answer = hub.chat_messages()[-1]
+        with self.assertRaises(AgentError) as caught:
+            hub.chat_apply_flow(answer["id"])
+        self.assertEqual(caught.exception.status, 409)
+        with self.assertRaises(AgentError) as caught:
+            hub.chat_apply_flow("chat-nope")
+        self.assertEqual(caught.exception.status, 404)
+
+    def test_a_broken_model_is_reported_in_the_pane_not_as_a_500(self):
+        class Broken(FakeLlm):
+            def complete(self, *args, **kwargs):
+                raise LlmError("the chat page never answered")
+
+        hub, _, _ = self.build(llm=Broken("x"))
+        hub.chat_send("سلام")
+        self.assertTrue(self.join_chat(hub))
+        row = hub.chat_messages()[-1]
+        self.assertEqual(row["status"], "failed")
+        self.assertIn("never answered", row["error"])
+
+    def test_clearing_the_conversation_empties_it(self):
+        hub, _, _ = self.build()
+        hub.chat_send("سلام")
+        self.join_chat(hub)
+        self.assertTrue(hub.chat_messages())
+        result = hub.chat_clear()
+        self.assertGreaterEqual(result["cleared"], 2)
+        self.assertEqual(hub.chat_messages(), [])
+
+
+class TelegramChannelsTest(HubCase):
+    def test_both_channels_can_be_on_at_once(self):
+        hub, _, _ = self.build()
+        hub.save_settings({"telegram.mode": "both"})
+        self.assertEqual(hub.notifier.channels("handoff"), ["bot", "account"])
+        self.assertEqual(hub.telegram_status()["mode"], "both")
+
+    def test_each_kind_of_message_can_pick_its_own_channel(self):
+        hub, _, _ = self.build()
+        hub.save_settings({"telegram.mode": "both",
+                           "telegram.channel.handoff": "account",
+                           "telegram.channel.captcha": "bot"})
+        self.assertEqual(hub.notifier.channels("handoff"), ["account"])
+        self.assertEqual(hub.notifier.channels("captcha"), ["bot"])
+        self.assertEqual(hub.notifier.channels("jobs"), ["bot", "account"],
+                         "an unrouted purpose follows the global mode")
+        status = hub.telegram_status()
+        self.assertEqual(status["routing"]["handoff"], "account")
+        self.assertEqual(status["routing"]["jobs"], "")
+
+    def test_an_unknown_routing_value_is_refused(self):
+        hub, _, _ = self.build()
+        with self.assertRaises(AgentError):
+            hub.save_settings({"telegram.channel.jobs": "carrier-pigeon"})
+
+    def test_off_still_means_off(self):
+        hub, _, _ = self.build()
+        hub.save_settings({"telegram.mode": "off", "telegram.channel.jobs": "bot"})
+        self.assertEqual(hub.notifier.channels("jobs"), [])
+
+    def test_the_channel_status_says_what_each_side_needs(self):
+        hub, _, _ = self.build()
+        status = hub.telegram_status()["channels"]
+        self.assertIn("BotFather", status["bot"]["needs"])
+        self.assertIn("my.telegram.org", status["account"]["needs"])
+        self.assertFalse(status["bot"]["configured"])
+        self.assertFalse(status["account"]["sessionExists"])
+        hub.save_settings({"telegram.botToken": "12345:abc"})
+        self.assertTrue(hub.telegram_status()["channels"]["bot"]["configured"])
+
+    def test_sending_names_a_target_and_a_channel(self):
+        hub, _, _ = self.build()
+        hub.save_settings({"telegram.mode": "bot",
+                           "telegram.targets": [{"id": -100123, "title": "گروه من",
+                                                 "type": "supergroup"},
+                                                {"id": 42, "title": "من",
+                                                 "type": "private"}]})
+        sent = []
+        hub.notifier.send = lambda text, targets=None, purpose="manual", channel=None: (
+            sent.append({"text": text, "targets": targets, "purpose": purpose,
+                         "channel": channel})
+            or {"sent": 1, "failed": 0, "channels": [channel or "bot"]})
+
+        hub.telegram_send("سلام", target=-100123, channel="account", purpose="manual")
+        self.assertEqual(sent[0]["targets"], [{"id": -100123, "title": "گروه من",
+                                               "type": "supergroup"}])
+        self.assertEqual(sent[0]["channel"], "account")
+
+        hub.telegram_send("به همه")
+        self.assertIsNone(sent[1]["targets"], "no target means every saved target")
+
+        with self.assertRaises(AgentError) as caught:
+            hub.telegram_send("سلام", target=999)
+        self.assertEqual(caught.exception.status, 404)
+        with self.assertRaises(AgentError):
+            hub.telegram_send("")
+        with self.assertRaises(AgentError):
+            hub.telegram_send("سلام", channel="pigeon")
+        with self.assertRaises(AgentError):
+            hub.telegram_send("سلام", purpose="nonsense")
+
+    def test_a_captcha_escalation_is_routed_as_a_captcha_message(self):
+        hub, _, _ = self.build()
+        seen = []
+        hub.notifier.notify_handoff = lambda payload: seen.append(payload)
+        hub.captcha.escalate({"kind": "image_select", "shot": "a.png",
+                              "summary": "سه تصویر"})
+        self.assertEqual(seen[0]["purpose"], "captcha")
+
+
+class CursorTest(HubCase):
+    def test_the_defaults_are_a_big_yellow_pointer_with_a_ripple(self):
+        hub, _, _ = self.build()
+        info = hub.cursor_info()
+        self.assertTrue(info["enabled"])
+        self.assertEqual(info["size"], 44)
+        self.assertEqual(info["color"], "#ffd400")
+        self.assertTrue(info["ripple"])
+
+    def test_the_size_and_the_colours_are_validated(self):
+        hub, _, _ = self.build()
+        saved = hub.cursor_set({"size": 64, "color": "#ff0000", "ripple": False})
+        self.assertEqual(saved["size"], 64)
+        self.assertFalse(saved["ripple"])
+        for bad in ({"size": 4}, {"size": 400}, {"color": "yellow"},
+                    {"outline": "#gggggg"}, {"nonsense": 1}):
+            with self.subTest(bad=bad):
+                with self.assertRaises(AgentError):
+                    hub.cursor_set(bad)
+
+    def test_saving_pushes_the_settings_into_the_live_browser(self):
+        hub, _, _ = self.build()
+        effect = FakeCursorFx()
+        hub.engine.backend.cursor_fx = effect
+        hub.cursor_set({"size": 72, "color": "#00ff00"})
+        self.assertEqual(effect.installed, 1)
+        self.assertEqual(effect.configs[0]["size"], 72)
+        self.assertEqual(effect.configs[0]["color"], "#00ff00")
+
+    def test_a_missing_browser_is_not_an_error(self):
+        hub, _, _ = self.build()
+        result = hub.cursor_apply()
+        self.assertFalse(result["applied"])
+        self.assertIn("reason", result)
+
+    def test_the_settings_are_plain_and_persisted(self):
+        hub, _, _ = self.build()
+        hub.save_settings({"cursor.size": 50, "cursor.enabled": False})
+        self.assertEqual(hub.store.get_setting("cursor.size"), 50)
+        self.assertIs(hub.store.get_setting("cursor.enabled"), False)
+        self.assertFalse(hub.cursor_info()["enabled"])
+
+
+class ManualControlTest(HubCase):
+    def test_a_click_reaches_the_pointer(self):
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        status, payload = self.call(api, "POST", "/control",
+                                    {"action": "click", "x": 512, "y": 384})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["ok"])
+        self.assertIn(("click", 512, 384, "left", 1), backend.calls)
+
+    def test_the_other_primitives_are_available_too(self):
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        for body, expected in (
+                ({"action": "double_click", "x": 10, "y": 20},
+                 ("click", 10, 20, "left", 2)),
+                ({"action": "move", "x": 1, "y": 2}, ("move", 1, 2)),
+                ({"action": "type", "text": "سلام"}, ("type", "سلام")),
+                ({"action": "key", "keys": ["ctrl", "a"]}, ("key", ("ctrl", "a"))),
+                ({"action": "goto_url", "url": "https://x.test/"},
+                 ("goto_url", "https://x.test/"))):
+            with self.subTest(action=body["action"]):
+                status, _ = self.call(api, "POST", "/control", body)
+                self.assertEqual(status, 200)
+                self.assertIn(expected, backend.calls)
+
+    def test_a_run_that_owns_the_mouse_refuses_a_manual_click(self):
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows, busy=True)
+        status, _ = self.call(api, "POST", "/control",
+                              {"action": "click", "x": 1, "y": 1})
+        self.assertEqual(status, 409)
+        self.assertEqual(backend.calls, [], "a refused click must not move anything")
+
+    def test_bad_input_is_a_400_and_a_failed_click_is_a_502(self):
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        for body in ({"action": "fly"}, {"action": "click", "x": "soon", "y": 1},
+                     {"action": "key", "keys": []}):
+            with self.subTest(body=body):
+                status, _ = self.call(api, "POST", "/control", body)
+                self.assertEqual(status, 400)
+
+        backend.click = lambda *args, **kwargs: (1, "", "xdotool: no display")
+        status, payload = self.call(api, "POST", "/control",
+                                    {"action": "click", "x": 1, "y": 1})
+        self.assertEqual(status, 502)
+        self.assertIn("xdotool", payload["error"])
+
+    def test_the_pause_resume_vocabulary_still_works(self):
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        for action in ("pause", "resume", "stop"):
+            with self.subTest(action=action):
+                status, _ = self.call(api, "POST", "/control", {"action": action})
+                self.assertIn(status, (200, 409))
+
+
+class TelegramTestRouteTest(HubCase):
+    def test_a_test_message_needs_a_target(self):
+        hub, backend, flows = self.build()
+        engine = AutomationEngine(backend, self.tmp, notifier=hub.notifier)
+        api = AutomationApi(engine, flows, None, data_dir=self.tmp, token=TOKEN,
+                            agent=hub)
+        hub.save_settings({"telegram.mode": "bot",
+                           "telegram.targets": [{"id": 42, "title": "من",
+                                                 "type": "private"}]})
+        status, payload = self.call(api, "POST", "/agent/telegram/test", {})
+        self.assertEqual(status, 400)
+        self.assertIn("target", payload["error"])
+
+        sent = []
+        hub.notifier.send = lambda text, targets=None, purpose="manual", channel=None: (
+            sent.append({"targets": targets, "purpose": purpose, "channel": channel})
+            or {"sent": 1, "failed": 0, "channels": ["bot"]})
+        status, payload = self.call(api, "POST", "/agent/telegram/test",
+                                    {"target": 42, "text": "سلام", "channel": "bot"})
+        self.assertEqual(status, 200)
+        self.assertEqual(sent[0]["purpose"], "manual")
+        self.assertEqual(sent[0]["channel"], "bot")
+        self.assertEqual(payload["sent"], 1)
+
+
+class StepCatalogTest(unittest.TestCase):
+    def test_every_step_type_the_server_accepts_is_documented(self):
+        catalog = schema.step_catalog()
+        self.assertEqual(set(catalog), set(schema.STEP_TYPES))
+        for kind, entry in catalog.items():
+            with self.subTest(kind=kind):
+                self.assertEqual(entry["required"],
+                                 list(schema.STEP_TYPES[kind]["required"]))
+                self.assertTrue(entry["fa"], "a Persian line is the point of the catalog")
+                self.assertTrue(entry["en"])
+                self.assertIn("id", entry["common"])
+
+    def test_the_agent_steps_are_part_of_the_same_catalog(self):
+        catalog = schema.step_catalog()
+        for kind in ("agent_open", "agent_ask", "captcha_solve"):
+            self.assertIn(kind, catalog)
+        self.assertEqual(catalog["agent_ask"]["required"], ["prompt"])
+
+
+class EngineCursorTest(TempDirCase):
+    """The pointer effect is decoration: it must run, and must never break a run.
+
+    These use the real ControlBackend with `control()` stubbed, because the
+    ripple and the reinstall live in the backend's own primitives - a fake
+    backend would prove nothing.
+    """
+
+    class Recorder:
+        def __init__(self, fail=False):
+            self.calls = []
+            self.fail = fail
+
+        def click_effect(self, x, y):
+            self.calls.append(("ripple", x, y))
+            if self.fail:
+                raise RuntimeError("CDP went away")
+
+        def install(self):
+            self.calls.append(("install",))
+            if self.fail:
+                raise RuntimeError("CDP went away")
+
+    def backend(self, effect=None, rc=0):
+        from automation.engine import ControlBackend
+        backend = ControlBackend("/nonexistent/browser_control.sh")
+        backend.commands = []
+        backend.control = lambda args, timeout=None: (
+            backend.commands.append(tuple(args)) or (rc, "", "" if rc == 0 else "failed"))
+        backend.cursor_fx = effect
+        return backend
+
+    def test_a_click_draws_the_ripple_before_the_click(self):
+        effect = self.Recorder()
+        backend = self.backend(effect)
+        AutomationEngine(backend, self.tmp)
+        rc, _, _ = backend.click(120, 240)
+        self.assertEqual(rc, 0)
+        self.assertEqual(effect.calls, [("ripple", 120, 240)])
+        self.assertEqual(backend.commands, [("click", 120, 240, "left")])
+
+    def test_a_double_click_ripples_once_at_the_same_point(self):
+        effect = self.Recorder()
+        backend = self.backend(effect)
+        AutomationEngine(backend, self.tmp)
+        backend.click(10, 20, "left", 2)
+        self.assertEqual(effect.calls, [("ripple", 10, 20)])
+        self.assertEqual(backend.commands, [("doubleclick", 10, 20)])
+
+    def test_navigating_puts_the_pointer_back(self):
+        effect = self.Recorder()
+        backend = self.backend(effect)
+        AutomationEngine(backend, self.tmp)
+        backend.goto_url("https://lmarena.ai/")
+        self.assertEqual(effect.calls, [("install",)])
+
+    def test_a_failed_navigation_does_not_reinstall(self):
+        effect = self.Recorder()
+        backend = self.backend(effect, rc=1)
+        AutomationEngine(backend, self.tmp)
+        rc, _, _ = backend.goto_url("https://lmarena.ai/")
+        self.assertEqual(rc, 1)
+        self.assertEqual(effect.calls, [])
+
+    def test_a_broken_effect_cannot_break_a_click(self):
+        effect = self.Recorder(fail=True)
+        backend = self.backend(effect)
+        AutomationEngine(backend, self.tmp)
+        rc, _, _ = backend.click(10, 20)
+        self.assertEqual(rc, 0, "a cosmetic failure must not fail the step")
+        rc, _, _ = backend.goto_url("https://x.test/")
+        self.assertEqual(rc, 0)
+
+    def test_the_engine_hands_its_effect_to_a_backend_without_one(self):
+        effect = self.Recorder()
+        backend = self.backend(None)
+        engine = AutomationEngine(backend, self.tmp, cursor_fx=effect)
+        self.assertIs(backend.cursor_fx, effect)
+        backend.click(1, 2)
+        self.assertEqual(effect.calls, [("ripple", 1, 2)])
+
+    def test_page_text_is_a_read_only_window_for_the_chat(self):
+        engine = AutomationEngine(self.backend(None), self.tmp)
+        engine._page_text = lambda: (0, "Battle Arena\nStart game\n" + "x" * 500, "")
+        self.assertEqual(len(engine.page_text(20)), 20)
+        self.assertIn("Battle Arena", engine.page_text())
+        engine._page_text = lambda: (1, "", "cdp refused")
+        self.assertEqual(engine.page_text(), "")

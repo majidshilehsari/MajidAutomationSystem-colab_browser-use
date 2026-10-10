@@ -342,6 +342,9 @@ class CaptchaSolver:
         sent: Dict[str, Any] = {"sent": 0, "failed": 0, "reason": "notifier detached"}
         if self.notifier is not None and self.config()["notifyOnEscalation"]:
             try:
+                # Purpose "captcha" so the operator can route captcha
+                # handoffs through a different channel than other pauses.
+                payload["purpose"] = "captcha"
                 self.notifier.notify_handoff(payload)
                 sent = {"queued": True}
             except Exception as exc:  # noqa: BLE001 - escalation must not explode

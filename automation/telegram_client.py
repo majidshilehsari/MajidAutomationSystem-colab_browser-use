@@ -38,7 +38,13 @@ TIMEOUT = 20.0
 MODE_OFF = "off"
 MODE_BOT = "bot"
 MODE_ACCOUNT = "account"
-MODES = (MODE_OFF, MODE_BOT, MODE_ACCOUNT)
+MODE_BOTH = "both"
+MODES = (MODE_OFF, MODE_BOT, MODE_ACCOUNT, MODE_BOTH)
+
+#: The two transports a message can travel on.
+CHANNELS = (MODE_BOT, MODE_ACCOUNT)
+#: Notification kinds an operator can route to a different transport.
+PURPOSES = ("handoff", "captcha", "jobs", "manual")
 
 DEFAULT_HANDOFF_TEMPLATE = (
     "🛑 نیاز به تأیید انسانی\n"
@@ -329,8 +335,50 @@ class Notifier:
         value = self.store.get_setting("telegram.targets", [])
         return value if isinstance(value, list) else []
 
+    def channels(self, purpose: Optional[str] = None) -> List[str]:
+        """Which transports a message of this kind travels on.
+
+        The global mode decides by default; a per-purpose override
+        (`telegram.channel.handoff` and friends) may narrow or widen it, so
+        for example captcha handoffs can go through the personal account
+        while job results stay on the bot. `both` means every configured
+        transport gets the message, which is the operator's spare wheel.
+        """
+        mode = self.mode()
+        if mode == MODE_OFF:
+            return []
+        if purpose:
+            override = str(self.store.get_setting(
+                "telegram.channel.%s" % purpose, "") or "")
+            if override in CHANNELS or override == MODE_BOTH:
+                mode = override
+        if mode == MODE_BOTH:
+            return list(CHANNELS)
+        return [mode] if mode in CHANNELS else []
+
+    def channel_status(self) -> Dict[str, Any]:
+        """What each transport needs and whether it has it, no network."""
+        session = self.store.get_setting(
+            "telegram.sessionPath",
+            os.path.join(self.store.data_dir, "automation", "telegram.session"))
+        return {
+            MODE_BOT: {
+                "configured": bool(self.store.get_secret("telegram.botToken", "")),
+                "needs": "توکن ربات از @BotFather",
+            },
+            MODE_ACCOUNT: {
+                "configured": bool(self.store.get_secret("telegram.apiId", ""))
+                              and bool(self.store.get_secret("telegram.apiHash", "")),
+                "sessionPath": session,
+                "sessionExists": bool(session) and os.path.exists(session),
+                "needs": "apiId و apiHash از my.telegram.org و یک بار لاگین",
+            },
+        }
+
     def transport(self, mode: Optional[str] = None) -> Any:
         chosen = mode or self.mode()
+        if chosen == MODE_BOTH:
+            chosen = MODE_BOT
         if chosen == MODE_BOT:
             return TelegramBot(self.store.get_secret("telegram.botToken", ""))
         if chosen == MODE_ACCOUNT:
@@ -402,40 +450,56 @@ class Notifier:
 
     # -- delivery -------------------------------------------------------
     def _deliver(self, text: str, photo_path: str = "",
-                 targets: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
+                 targets: Optional[List[Dict[str, Any]]] = None,
+                 purpose: Optional[str] = None,
+                 channel: Optional[str] = None) -> Dict[str, Any]:
         chosen = targets if targets is not None else self.targets()
         if not chosen:
             return {"sent": 0, "failed": 0, "reason": "no telegram targets configured"}
-        try:
-            client = self.transport()
-        except TelegramError as exc:
-            return {"sent": 0, "failed": len(chosen), "reason": str(exc)}
+        channels = [channel] if channel in CHANNELS else self.channels(purpose)
+        if not channels:
+            return {"sent": 0, "failed": 0, "reason": "notifications are off"}
         sent = 0
         errors: List[str] = []
-        for target in chosen:
-            chat_id = target.get("id")
-            if chat_id is None:
-                continue
+        used: List[str] = []
+        for name in channels:
             try:
-                if photo_path:
-                    client.send_photo(chat_id, photo_path, text)
-                else:
-                    client.send_text(chat_id, text)
-                sent += 1
+                client = self.transport(name)
             except TelegramError as exc:
-                errors.append("%s: %s" % (target.get("title") or chat_id, exc))
-        result = {"sent": sent, "failed": len(errors), "reason": "; ".join(errors)}
+                errors.append("%s: %s" % (name, exc))
+                continue
+            used.append(name)
+            for target in chosen:
+                chat_id = target.get("id")
+                if chat_id is None:
+                    continue
+                try:
+                    if photo_path:
+                        client.send_photo(chat_id, photo_path, text)
+                    else:
+                        client.send_text(chat_id, text)
+                    sent += 1
+                except TelegramError as exc:
+                    errors.append("%s/%s: %s"
+                                % (name, target.get("title") or chat_id, exc))
+        result = {"sent": sent, "failed": len(errors),
+                  "channels": used, "reason": "; ".join(errors)}
         self.store.audit("telegram", "notify.sent" if sent else "notify.failed",
-                         "targets=%d sent=%d %s" % (len(chosen), sent,
-                                                    result["reason"][:200]))
+                         "channels=%s targets=%d sent=%d %s"
+                         % (",".join(used) or "-", len(chosen), sent,
+                            result["reason"][:200]))
         return result
 
     def send(self, text: str, photo_path: str = "",
-             targets: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
-        """Deliver now, in the calling thread. Used by the test endpoint."""
+             targets: Optional[List[Dict[str, Any]]] = None,
+             purpose: Optional[str] = None,
+             channel: Optional[str] = None) -> Dict[str, Any]:
+        """Deliver now, in the calling thread. Used by the test endpoint and
+        by the agent, which may pick the channel itself."""
         if self.mode() == MODE_OFF:
             return {"sent": 0, "failed": 0, "reason": "notifications are off"}
-        return self._deliver(text, photo_path, targets)
+        return self._deliver(text, photo_path, targets, purpose=purpose,
+                             channel=channel)
 
     def notify_handoff(self, payload: Dict[str, Any]) -> None:
         """Called by the engine when a run stops for a human.
@@ -453,7 +517,8 @@ class Notifier:
 
         def worker() -> None:
             try:
-                self._deliver(text, photo)
+                self._deliver(text, photo, purpose=str(payload.get("purpose")
+                                                           or "handoff"))
             except Exception as exc:  # noqa: BLE001 - last resort, never raise
                 self.store.audit("telegram", "notify.exception", str(exc)[:200])
 
@@ -475,7 +540,7 @@ class Notifier:
 
         def worker() -> None:
             try:
-                self._deliver(text)
+                self._deliver(text, purpose="jobs")
             except Exception as exc:  # noqa: BLE001 - never raise into a scheduler
                 self.store.audit("telegram", "notify.exception", str(exc)[:200])
 

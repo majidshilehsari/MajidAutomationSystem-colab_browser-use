@@ -120,8 +120,23 @@ class LlmClient:
         return info
 
     # -- asking ---------------------------------------------------------
+    def chat_names(self) -> List[str]:
+        """The choices the chat tab offers.
+
+        In browser mode these are the provider profiles (deepseek today,
+        anything added to `ai.providers` tomorrow); in HTTP mode there is
+        one entry, the configured model.
+        """
+        if self.provider() == PROVIDER_HTTP:
+            model = str(self.store.get_setting("ai.model", "") or "http-api")
+            return [model]
+        if self.ai_browser is not None:
+            return list(self.ai_browser.providers.keys())
+        return [self.chat_provider()]
+
     def complete(self, prompt: str, system: str = "", images: Optional[List[str]] = None,
-                 want_json: bool = False, timeout: Optional[float] = None) -> Dict[str, Any]:
+                 want_json: bool = False, timeout: Optional[float] = None,
+                 chat_name: Optional[str] = None) -> Dict[str, Any]:
         text = prompt if not want_json else prompt + JSON_SUFFIX
         if system:
             text = "%s\n\n%s" % (system, text)
@@ -129,13 +144,15 @@ class LlmClient:
         if provider == PROVIDER_HTTP:
             return self._complete_http(text, images or [], want_json,
                                        timeout or DEFAULT_TIMEOUT)
-        return self._complete_browser(text, images or [], timeout or DEFAULT_TIMEOUT)
+        return self._complete_browser(text, images or [], timeout or DEFAULT_TIMEOUT,
+                                      chat_name)
 
     def _complete_browser(self, text: str, images: List[str],
-                          timeout: float) -> Dict[str, Any]:
+                          timeout: float,
+                          chat_name: Optional[str] = None) -> Dict[str, Any]:
         if self.ai_browser is None:
             raise LlmError("the agent browser is not available in this deployment")
-        name = self.chat_provider()
+        name = chat_name or self.chat_provider()
         started = self._clock()
         image_path = images[0] if images else ""
         # A public URL travels with the prompt as well: a chat site that can
