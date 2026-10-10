@@ -36,6 +36,7 @@ from typing import Any, Dict, Optional, Tuple, Type
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from automation import cdp, schema  # noqa: E402
+from automation.agent import AgentHub  # noqa: E402
 from automation.archive import shot_archive, text_archive  # noqa: E402
 from automation.api import API_PREFIX, AutomationApi, FlowStore  # noqa: E402
 from automation.detect import Detector  # noqa: E402
@@ -287,16 +288,31 @@ def build_api(args: argparse.Namespace) -> AutomationApi:
     # ctrl+a happens to select.
     shots = shot_archive(args.data_dir)
     texts = text_archive(args.data_dir)
+    flows = FlowStore(args.data_dir)
+    # The coworker agent is built before the engine so the engine can be handed
+    # the same notifier instance: a run that stops for a human then tells
+    # Telegram, without the engine knowing anything about Telegram.
+    agent = None
+    if not getattr(args, "no_agent", False):
+        agent = AgentHub(
+            args.data_dir, engine=None, flows=flows, backend=backend, cdp=cdp,
+            token=token,
+            public_base=getattr(args, "public_base", "") or "",
+            ai_port=int(getattr(args, "ai_cdp_port", 9223) or 9223),
+            ai_display=str(getattr(args, "ai_display", ":2") or ":2"))
     engine = AutomationEngine(backend, args.data_dir, cdp=cdp, cdp_port=args.cdp_port,
-                              shots=shots, texts=texts)
+                              shots=shots, texts=texts,
+                              notifier=agent.notifier if agent is not None else None)
+    if agent is not None:
+        agent.engine = engine
     detector = Detector(backend, args.data_dir, viewport=dict(schema.DEFAULT_VIEWPORT),
                         cdp_port=args.cdp_port)
     guide_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_guide.md")
     return AutomationApi(
-        engine, FlowStore(args.data_dir), detector,
+        engine, flows, detector,
         data_dir=args.data_dir, token=token, control_script=args.control_script,
         viewport=dict(schema.DEFAULT_VIEWPORT), guide_path=guide_path,
-        shots=shots, texts=texts)
+        shots=shots, texts=texts, agent=agent)
 
 
 def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
@@ -318,6 +334,16 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--cdp-port", type=int, default=9222)
     parser.add_argument("--token", default="")
     parser.add_argument("--token-file", default="")
+    parser.add_argument("--no-agent", action="store_true",
+                        help="do not build the coworker agent (no scheduler thread, "
+                             "no /agent routes)")
+    parser.add_argument("--public-base", default="",
+                        help="public HTTPS origin used in links the agent sends out; "
+                             "defaults to the platform's BUILTIN_DOMAIN when set")
+    parser.add_argument("--ai-cdp-port", type=int, default=9223,
+                        help="debugging port of the agent's own browser")
+    parser.add_argument("--ai-display", default=":2",
+                        help="X display the agent's own browser runs on")
     parser.add_argument("--prepare-only", action="store_true",
                         help="build the web root and exit (no server)")
     parser.add_argument("--no-prepare", action="store_true")
@@ -331,6 +357,10 @@ def main(argv: Optional[list] = None) -> int:
     args.web_root = os.path.abspath(args.web_root)
     args.data_dir = os.path.abspath(args.data_dir)
     args.control_script = os.path.abspath(args.control_script)
+    # Hostim injects the app's built-in domain; links the agent sends out
+    # (Telegram handoffs, screenshots) need it to be absolute.
+    if not args.public_base and os.environ.get("BUILTIN_DOMAIN"):
+        args.public_base = "https://%s" % os.environ["BUILTIN_DOMAIN"].strip("/")
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -352,6 +382,13 @@ def main(argv: Optional[list] = None) -> int:
     if not api.token:
         LOG.warning("no automation token was supplied: the API is open to anyone "
                     "who can reach this port. Set AUTOMATION_TOKEN.")
+    if api.agent is not None:
+        # Fills in any schedule that has no next-run time yet (a restart, or a
+        # job created while the server was down) and starts the one thread that
+        # fires jobs. Serial by design: the desktop has one mouse.
+        api.agent.start()
+        LOG.info("coworker agent ready (%d job(s) scheduled)",
+                 len(api.agent.jobs()))
 
     web_root = os.path.abspath(args.web_root)
     proxy = proxy_class(
@@ -374,6 +411,11 @@ def main(argv: Optional[list] = None) -> int:
 
     def shutdown(*_: Any) -> None:
         LOG.info("shutting down")
+        if api.agent is not None:
+            try:
+                api.agent.stop()
+            except Exception as exc:  # noqa: BLE001 - shutdown must always finish
+                LOG.warning("agent shutdown failed: %s", exc)
         server.stop()
 
     signal.signal(signal.SIGTERM, shutdown)

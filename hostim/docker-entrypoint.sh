@@ -49,6 +49,19 @@ XKB_OPTIONS=${XKB_OPTIONS:-grp:alt_shift_toggle}
 # A fresh Xvfb session starts with NumLock off, so the keypad sends arrows
 # instead of digits. "on" (default) enables it; anything else leaves it alone.
 NUMLOCK=${NUMLOCK:-on}
+# The coworker agent's own browser. It runs on a SECOND display and a SECOND
+# Chrome profile so it can never fight the automation for the one mouse and
+# keyboard on :1, and so `wmctrl -a "Google Chrome"` cannot pick the wrong
+# window: both browsers would carry that title. Set AI_BROWSER=0 to skip it
+# entirely (the agent still works with an HTTP API key instead).
+AI_BROWSER=${AI_BROWSER:-1}
+AI_DISPLAY=${AI_DISPLAY:-:2}
+AI_SCREEN_SIZE=${AI_SCREEN:-1366x768x24}
+AI_CDP_PORT=${AI_CDP_PORT:-9223}
+AI_START_URL=${AI_START_URL:-https://chat.deepseek.com/}
+# Absolute HTTPS origin used in the links the agent sends out (Telegram
+# handoffs). Empty means "derive it from Hostim's BUILTIN_DOMAIN".
+PUBLIC_BASE=${PUBLIC_BASE:-}
 NOVNC_DIR=${NOVNC_DIR:-/usr/share/novnc}
 CHECK_INTERVAL=${CHECK_INTERVAL:-15}
 STARTUP_TIMEOUT=${STARTUP_TIMEOUT:-120}
@@ -62,6 +75,7 @@ WEB_ROOT=${WEB_ROOT:-/tmp/automation-www}
 
 LOG_DIR="$DATA_DIR/logs"
 PROFILE_DIR="$DATA_DIR/chrome-profile"
+AI_PROFILE_DIR="$DATA_DIR/ai-profile"
 AUTOMATION_DIR="$DATA_DIR/automation"
 SECRETS_FILE="$DATA_DIR/secrets.env"
 VNC_PASS_FILE="$DATA_DIR/vnc.pass"
@@ -132,8 +146,8 @@ check_prerequisites() {
 }
 
 prepare_directories() {
-  mkdir -p "$LOG_DIR" "$PROFILE_DIR" "$AUTOMATION_DIR" "$WEB_ROOT"
-  chmod 700 "$LOG_DIR" "$PROFILE_DIR" 2>/dev/null || true
+  mkdir -p "$LOG_DIR" "$PROFILE_DIR" "$AUTOMATION_DIR" "$WEB_ROOT" "$AI_PROFILE_DIR"
+  chmod 700 "$LOG_DIR" "$PROFILE_DIR" "$AI_PROFILE_DIR" 2>/dev/null || true
   rm -f "$LOG_DIR"/*.log 2>/dev/null || true
 }
 
@@ -321,6 +335,56 @@ configure_keyboard() {
   fi
 }
 
+start_ai_browser() {
+  # The coworker agent's own browser: a second Xvfb plus a second Chrome, on
+  # their own display, profile and debugging port. It is how the agent can ask a
+  # chat website something without an API key - and keeping it off :1 is what
+  # stops it from stealing focus from the automation.
+  if [[ "$AI_BROWSER" != "1" ]]; then
+    log "AI_BROWSER=$AI_BROWSER: the agent browser stays off (the agent can still use an HTTP API key)"
+    return 0
+  fi
+
+  local _attempt
+  if [[ ! -S "/tmp/.X11-unix/X${AI_DISPLAY#:}" ]]; then
+    spawn ai-xvfb "$LOG_DIR/ai-xvfb.log" \
+      Xvfb "$AI_DISPLAY" -screen 0 "$AI_SCREEN_SIZE" -ac -noreset
+    for _attempt in $(seq 1 30); do
+      [[ -S "/tmp/.X11-unix/X${AI_DISPLAY#:}" ]] && break
+      sleep 0.2
+    done
+  fi
+  if [[ ! -S "/tmp/.X11-unix/X${AI_DISPLAY#:}" ]]; then
+    # Never fatal: the automation on :1 is the product, this is an optional aid.
+    log "WARN: the agent display $AI_DISPLAY did not start (see $LOG_DIR/ai-xvfb.log); the agent browser stays off"
+    return 0
+  fi
+
+  if ! alive ai-chrome; then
+    spawn ai-chrome "$LOG_DIR/ai-chrome.log" \
+      env DISPLAY="$AI_DISPLAY" HOME="${HOME:-/home/automation}" google-chrome \
+        --no-sandbox \
+        --disable-dev-shm-usage \
+        --use-gl=swiftshader \
+        --enable-unsafe-swiftshader \
+        --no-first-run \
+        --no-default-browser-check \
+        --remote-debugging-port="$AI_CDP_PORT" \
+        --user-data-dir="$AI_PROFILE_DIR" \
+        --window-size=1366,768 \
+        "$AI_START_URL"
+  fi
+  for _attempt in $(seq 1 40); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/$AI_CDP_PORT") 2>/dev/null; then
+      break
+    fi
+    sleep 0.25
+  done
+  log "agent browser on $AI_DISPLAY (CDP on 127.0.0.1:$AI_CDP_PORT, profile $AI_PROFILE_DIR)"
+  log "         it is NOT in the noVNC view; log in to the chat site once from"
+  log "         the sidebar: ایجنت همکار → کلیدها → «تصویر نمایش ایجنت»"
+}
+
 start_chrome() {
   # Same flags as the Colab launcher: software WebGL, no first-run dialogs, and
   # --disable-dev-shm-usage, which matters even more here because a Kubernetes
@@ -373,6 +437,10 @@ start_server() {
   # from AUTOMATION_TOKEN (already exported above), and a command-line argument
   # would be world-readable through /proc/<pid>/cmdline for the whole life of
   # the process. The Colab launcher does pass --token; this track does not.
+  local extra=(--ai-cdp-port "$AI_CDP_PORT" --ai-display "$AI_DISPLAY")
+  if [[ -n "$PUBLIC_BASE" ]]; then
+    extra+=(--public-base "$PUBLIC_BASE")
+  fi
   spawn automation - \
     python3 "$SERVER_SCRIPT" \
       --listen-host 0.0.0.0 --listen-port "$PORT" \
@@ -380,7 +448,7 @@ start_server() {
       --web-root "$WEB_ROOT" --novnc-dir "$NOVNC_DIR" \
       --data-dir "$AUTOMATION_DIR" \
       --control-script "$CONTROL_SCRIPT" \
-      --display "$DISPLAY_ID" --cdp-port "$CDP_PORT"
+      --display "$DISPLAY_ID" --cdp-port "$CDP_PORT" "${extra[@]}"
   log "automation server starting on 0.0.0.0:$PORT"
 }
 
@@ -488,6 +556,13 @@ supervise() {
       log "Chrome is gone; relaunching it"
       start_chrome
     fi
+
+    # Not part of `core`: the agent's browser is an aid, so losing it must cost
+    # a relaunch and never the whole container.
+    if [[ "$AI_BROWSER" == "1" ]] && ! alive ai-chrome; then
+      log "the agent browser is gone; relaunching it"
+      start_ai_browser
+    fi
   done
 }
 
@@ -516,6 +591,10 @@ main() {
   if ! wait_for_http "/vnc.html" 40; then
     log "WARNING: /vnc.html is not being served; noVNC will not load"
   fi
+
+  # After the product is healthy, not before: the agent's browser is an aid, and
+  # its startup must never delay or endanger the main path.
+  start_ai_browser
 
   report_listeners
   announce

@@ -950,3 +950,104 @@ body.mas-standalone #mas-root .mas-shots {
 
 body.mas-standalone #mas-root .mas-shot-thumb { flex: 0 0 180px; }
 body.mas-standalone #mas-root .mas-text pre { max-height: 420px; }
+
+/* ------------------------------------------------------------------ *
+ * Coworker agent tab
+ * ------------------------------------------------------------------ */
+
+/* The agent pane holds a sub-tab bar plus one sub-pane at a time. Each
+   sub-pane is a stack of boxes, so a failure in one section cannot blank the
+   rest of the tab. */
+.mas-agent-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mas-box {
+  border: 1px solid var(--mas-line);
+  border-radius: 6px;
+  padding: 8px;
+  background: rgba(255, 255, 255, 0.02);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mas-box > b {
+  color: var(--mas-text);
+  font-size: 12px;
+}
+
+/* Code and SQL get a monospace face and no spellcheck squiggles: the agent
+   writes both, and a red underline under valid Python is pure noise. */
+.mas-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.mas-warn {
+  margin: 0;
+  padding: 6px 8px;
+  border-left: 3px solid var(--mas-warn);
+  background: rgba(224, 166, 60, 0.1);
+  color: var(--mas-text);
+  font-size: 11px;
+  line-height: 1.5;
+  border-radius: 0 4px 4px 0;
+}
+
+.mas-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.mas-table th {
+  text-align: start;
+  color: var(--mas-dim);
+  font-weight: 600;
+  border-bottom: 1px solid var(--mas-line);
+  padding: 3px 4px;
+  white-space: nowrap;
+}
+
+.mas-table td {
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  padding: 3px 4px;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+/* The agent's own display, shown so a one-time login to a chat site is
+   possible without exposing that display over VNC. */
+.mas-shot-full {
+  width: 100%;
+  border: 1px solid var(--mas-line);
+  border-radius: 4px;
+}
+
+.mas-query-result {
+  overflow-x: auto;
+}
+
+.mas-pre {
+  max-height: 240px;
+}
+
+/* Right-to-left: the operator's language is Persian, and a form laid out
+   left-to-right reads backwards. The panel itself stays LTR because noVNC and
+   the rest of the sidebar are, so only the agent's own boxes opt in. */
+.mas-agent-sub .mas-box {
+  direction: rtl;
+}
+
+.mas-agent-sub .mas-code,
+.mas-agent-sub .mas-pre,
+.mas-agent-sub .mas-table {
+  direction: ltr;
+  text-align: start;
+}

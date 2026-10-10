@@ -26,6 +26,7 @@ const VALID_TOKEN = 'tok123';
 function fakeApi(requests, posts = [], statusPayload = null) {
   return async (url, options = {}) => {
     const path = String(url);
+    const clean = path.split('?')[0];
     requests.push(path);
     if ((options.method || 'GET').toUpperCase() === 'POST') {
       posts.push({ url: path, body: options.body });
@@ -39,6 +40,59 @@ function fakeApi(requests, posts = [], statusPayload = null) {
     if (token !== VALID_TOKEN) {
       return { ok: false, status: 401,
                text: async () => '{"error":"missing or wrong X-Automation-Token header"}' };
+    }
+    if (clean.endsWith('/agent')) {
+      return json({
+        settings: {}, llm: { provider: 'ai-browser', chatProvider: 'deepseek',
+                             configured: true, browser: { available: false } },
+        telegram: { mode: 'bot', targets: [] },
+        captcha: { enabled: true, strategies: ['vision', 'human'], autoClick: false,
+                   maxAttempts: 3, minConfidence: 0.6, extension: 'none' },
+        captchaExtension: { name: 'none', free: true },
+        scripts: { languages: ['bash', 'python3'], strippedEnv: ['AUTOMATION_TOKEN'],
+                   passToken: false, running: null },
+        scheduler: { alive: true, jobs: 1 }, killSwitch: false,
+        counts: { jobs: 1, scripts: 2, pendingScripts: 1, notes: 3 },
+      });
+    }
+    if (clean.endsWith('/agent/jobs')) {
+      return json({ jobs: [{ id: 'job-1', name: '\u0635\u0628\u062d', kind: 'cron',
+        schedule: '30 7 * * *', target: 'Arena', enabled: true,
+        payload: { action: 'flow' }, next_run_at: 1760000000,
+        last_status: 'done', last_run_at: 1759990000, run_count: 0 }] });
+    }
+    if (clean.endsWith('/agent/scripts')) {
+      return json({ scripts: [{ id: 'scr-1', name: '\u06af\u0632\u0627\u0631\u0634',
+        language: 'python3', status: 'pending', run_count: 0, last_exit: null,
+        code: 'print(1)', timeout: 60 }],
+        config: { languages: ['bash', 'python3'],
+                  strippedEnv: ['AUTOMATION_TOKEN', 'VNC_PASSWORD'],
+                  passToken: false, running: null } });
+    }
+    if (clean.endsWith('/agent/captcha/config')) {
+      return json({ config: { enabled: true, strategies: ['vision', 'human'],
+        autoClick: false, maxAttempts: 3, minConfidence: 0.6, extension: 'none',
+        notifyOnEscalation: true }, extension: { name: 'none', free: true } });
+    }
+    if (clean.endsWith('/agent/captcha/history')) {
+      return json({ history: [{ at: 1760000000, event: 'vision', kind: 'image_select',
+        confidence: 0.9, summary: '\u0633\u0647 \u062a\u0635\u0648\u06cc\u0631' }] });
+    }
+    if (clean.endsWith('/agent/telegram/status')) {
+      return json({ mode: 'bot', targets: [{ id: -100123,
+        title: '\u06af\u0631\u0648\u0647 \u0645\u0646', type: 'supergroup' }],
+        configured: true, botTokenSet: true, apiCredentialsSet: false, error: '' });
+    }
+    if (clean.endsWith('/agent/telegram/targets')) {
+      return json({ targets: [{ id: -100999, title: 'Found group', type: 'supergroup' }] });
+    }
+    if (clean.endsWith('/agent/notes')) {
+      return json({ notes: [{ id: 'note-1', kind: 'note',
+        body: '\u06cc\u0627\u062f\u062f\u0627\u0634\u062a', created_at: 1760000000 }] });
+    }
+    if (clean.endsWith('/agent/audit')) {
+      return json({ audit: [{ at: 1760000000, actor: 'operator',
+        action: 'setting.stored', detail: 'telegram.mode' }] });
     }
     if (path.endsWith('/status')) {
       return json(statusPayload || { runId: null, status: 'idle', entries: [], history: [] });
@@ -304,16 +358,16 @@ test('tabs swap panes and only one is visible', async () => {
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const tabs = Array.from(page.doc.querySelectorAll('.mas-tab'));
     assert.deepEqual(tabs.map((n) => n.dataset.tab),
-      ['flow', 'record', 'pages', 'shots', 'texts', 'ai', 'log']);
+      ['flow', 'record', 'pages', 'shots', 'texts', 'agent', 'log']);
 
-    tabs[5].dispatchEvent(new page.window.Event('click'));  // AI tab
-    assert.equal(page.display('#mas-tab-ai'), 'block');
+    tabs[5].dispatchEvent(new page.window.Event('click'));  // coworker agent
+    assert.equal(page.display('#mas-tab-agent'), 'block');
     assert.equal(page.display('#mas-tab-flow'), 'none');
-    assert.ok(page.doc.querySelector('#mas-tab-ai textarea'), 'the import box is missing');
+    assert.ok(page.doc.querySelector('#mas-tab-agent textarea'), 'the import box is missing');
 
     tabs[3].dispatchEvent(new page.window.Event('click'));  // screenshots
     assert.equal(page.display('#mas-tab-shots'), 'block');
-    assert.equal(page.display('#mas-tab-ai'), 'none');
+    assert.equal(page.display('#mas-tab-agent'), 'none');
 
     tabs[4].dispatchEvent(new page.window.Event('click'));  // extracted texts
     assert.equal(page.display('#mas-tab-texts'), 'block');
@@ -535,7 +589,7 @@ test('a hand written label survives editing the step', async () => {
   }
 });
 
-test('the AI tab sends the user request and an absolute origin', async () => {
+test('the agent assistant sends the user request and an absolute origin', async () => {
   const page = await mount();
   try {
     const input = page.doc.getElementById('mas-token-input');
@@ -544,8 +598,8 @@ test('the AI tab sends the user request and an absolute origin', async () => {
     await page.wait(60);
 
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[5];
-    aiTab.dispatchEvent(new page.window.Event('click'));
+    const agentTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[5];
+    agentTab.dispatchEvent(new page.window.Event('click'));
     await page.wait(10);
 
     const box = page.doc.getElementById('mas-ai-request');
@@ -555,11 +609,11 @@ test('the AI tab sends the user request and an absolute origin', async () => {
 
     // Switching tabs and back must not lose what the human typed.
     page.doc.querySelectorAll('.mas-tab')[0].dispatchEvent(new page.window.Event('click'));
-    aiTab.dispatchEvent(new page.window.Event('click'));
+    agentTab.dispatchEvent(new page.window.Event('click'));
     await page.wait(10);
     assert.equal(page.doc.getElementById('mas-ai-request').value, 'روی اولین نتیجه کلیک کن');
 
-    const build = Array.from(page.doc.querySelectorAll('#mas-tab-ai button'))
+    const build = Array.from(page.doc.querySelectorAll('#mas-tab-agent button'))
       .find((b) => b.textContent.includes('🧩'));
     build.dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
@@ -751,8 +805,8 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[5];
-    aiTab.dispatchEvent(new page.window.Event('click'));
+    const agentTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[5];
+    agentTab.dispatchEvent(new page.window.Event('click'));
     await page.wait(10);
 
     const reply = page.doc.getElementById('mas-ai-reply');
@@ -762,7 +816,7 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
       + '### ۳) سؤال و نکته\nکدام نتیجه را کلیک کنم؟';
     reply.dispatchEvent(new page.window.Event('input'));
 
-    const build = Array.from(page.doc.querySelectorAll('#mas-tab-ai button'))
+    const build = Array.from(page.doc.querySelectorAll('#mas-tab-agent button'))
       .find((b) => b.textContent.includes('🧩'));
     build.dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
@@ -773,11 +827,11 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
       'the previous answer was not sent back');
 
     // Importing shows the model's prose, not just its code.
-    const importBtn = Array.from(page.doc.querySelectorAll('#mas-tab-ai button'))
+    const importBtn = Array.from(page.doc.querySelectorAll('#mas-tab-agent button'))
       .find((b) => b.textContent.includes('وارد کردن'));
     importBtn.dispatchEvent(new page.window.Event('click'));
     await page.wait(40);
-    aiTab.dispatchEvent(new page.window.Event('click'));
+    agentTab.dispatchEvent(new page.window.Event('click'));
     await page.wait(10);
     const notes = page.doc.querySelector('.mas-ai-notes');
     assert.ok(notes, 'the AI notes box did not appear');
@@ -885,6 +939,166 @@ test('record layer stays hidden until recording starts', async () => {
   const page = await mount();
   try {
     assert.equal(page.display('#mas-record-layer'), 'none');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The coworker agent tab
+ * ------------------------------------------------------------------ */
+
+const AGENT_SUB_LABELS = ['دستیار', 'وظایف', 'کپچا', 'تلگرام', 'اسکریپت', 'داده‌ها', 'کلیدها'];
+
+/** Open the panel, authenticate, switch to the agent tab and one sub-pane. */
+async function openAgentSub(page, label) {
+  const input = page.doc.getElementById('mas-token-input');
+  input.value = VALID_TOKEN;
+  page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+  await page.wait(60);
+  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+  Array.from(page.doc.querySelectorAll('.mas-tab'))[5]
+    .dispatchEvent(new page.window.Event('click'));
+  const ready = await page.until(
+    () => page.doc.querySelectorAll('#mas-tab-agent [data-sub]').length === 7);
+  assert.ok(ready, 'the agent sub-tabs never rendered');
+  if (!label) return;
+  const sub = Array.from(page.doc.querySelectorAll('#mas-tab-agent [data-sub]'))
+    .find((node) => node.textContent.trim() === label);
+  assert.ok(sub, `sub-tab ${label} is missing`);
+  sub.dispatchEvent(new page.window.Event('click'));
+  await page.until(() => page.doc.querySelector('#mas-agent-sub .mas-box') !== null);
+}
+
+function paneText(page) {
+  const pane = page.doc.getElementById('mas-agent-sub');
+  return pane ? pane.textContent : '';
+}
+
+function findButton(page, needle) {
+  return Array.from(page.doc.querySelectorAll('#mas-tab-agent button'))
+    .find((node) => node.textContent.includes(needle));
+}
+
+test('the agent tab replaces the AI tab and keeps the assistant workflow', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page);
+    const labels = Array.from(page.doc.querySelectorAll('#mas-tab-agent [data-sub]'))
+      .map((node) => node.textContent.trim());
+    assert.deepEqual(labels, AGENT_SUB_LABELS);
+    // The old copy-prompt/import workflow must survive the rename untouched.
+    assert.ok(page.doc.getElementById('mas-ai-request'), 'the request box is gone');
+    assert.ok(page.doc.getElementById('mas-ai-reply'), 'the import box is gone');
+    assert.ok(findButton(page, '🧩'), 'the copy-prompt button is gone');
+    assert.ok(findButton(page, '🤖'), 'the ask-the-agent-directly button is missing');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the kill switch posts to the API', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page);
+    // The status bar is filled by a second request, so wait for it rather than
+    // racing the render.
+    assert.ok(await page.until(() => findButton(page, 'کلید قطع') !== undefined),
+      'the kill switch button is missing');
+    const kill = findButton(page, 'کلید قطع');
+    kill.dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/kill-switch')));
+    const sent = page.posts.find((post) => post.url.endsWith('/agent/kill-switch'));
+    assert.deepEqual(JSON.parse(sent.body), { on: true });
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the jobs pane lists a schedule and can fire it by hand', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'وظایف');
+    assert.ok(await page.until(() => paneText(page).includes('صبح')),
+      'the saved job never appeared');
+    assert.ok(paneText(page).includes('cron: 30 7 * * *'), 'the schedule is not shown');
+    findButton(page, 'همین حالا').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/job-run')));
+    const sent = page.posts.find((post) => post.url.endsWith('/agent/job-run'));
+    assert.deepEqual(JSON.parse(sent.body), { id: 'job-1' });
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('a pending script shows the approval gate and approving posts it', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'اسکریپت');
+    assert.ok(await page.until(() => paneText(page).includes('pending')),
+      'the script status never appeared');
+    // The gate is explained in the UI, not only enforced on the server.
+    assert.ok(paneText(page).includes('تا تأیید شما اجرا نمی‌شود'),
+      'the approval gate is not explained');
+    findButton(page, 'تأیید').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/script-decision')));
+    const sent = page.posts.find((post) => post.url.endsWith('/agent/script-decision'));
+    assert.deepEqual(JSON.parse(sent.body), { id: 'scr-1', approve: true });
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the telegram pane shows the saved target and can discover chats', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'تلگرام');
+    assert.ok(await page.until(() => paneText(page).includes('گروه من')),
+      'the configured target never appeared');
+    findButton(page, 'پیدا کردن چت‌ها').dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => paneText(page).includes('Found group')),
+      'the discovered chat never appeared');
+    assert.ok(page.requests.some((url) => url.endsWith('/agent/telegram/targets')));
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the captcha pane says plainly what vision cannot solve', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'کپچا');
+    assert.ok(await page.until(() => paneText(page).includes('کلیک خودکار')),
+      'the captcha settings never rendered');
+    // The honest limitation has to be readable in the UI, not only in the docs.
+    assert.ok(paneText(page).includes('کپچاهای رفتاری'),
+      'the behavioural-captcha limitation is not stated');
+    const auto = Array.from(page.doc.querySelectorAll('#mas-agent-sub input[type=checkbox]'))
+      .find((node) => node.parentElement.textContent.includes('کلیک خودکار'));
+    assert.ok(auto, 'the automatic-click switch is missing');
+    assert.equal(auto.checked, false, 'automatic clicking must default to off');
+    findButton(page, 'تحلیل کپچای فعلی').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/captcha/solve')));
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the data pane offers a read-only query and shows the audit trail', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'داده‌ها');
+    assert.ok(await page.until(() => paneText(page).includes('یادداشت')),
+      'the notes never appeared');
+    assert.ok(paneText(page).includes('setting.stored'), 'the audit trail is not shown');
+    const sql = page.doc.querySelector('#mas-agent-sub textarea');
+    assert.ok(sql, 'the SQL box is missing');
+    sql.value = 'SELECT id, name FROM jobs';
+    sql.dispatchEvent(new page.window.Event('input'));
+    findButton(page, 'اجرا').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/query')));
+    const sent = page.posts.find((post) => post.url.endsWith('/agent/query'));
+    assert.deepEqual(JSON.parse(sent.body), { sql: 'SELECT id, name FROM jobs' });
   } finally {
     await page.cleanup();
   }

@@ -153,7 +153,7 @@ function buildPanel() {
     title: t('title'), onClick: () => setPanelOpen(true),
   }, '◀');
 
-  const tabs = ['flow', 'record', 'pages', 'shots', 'texts', 'ai', 'log']
+  const tabs = ['flow', 'record', 'pages', 'shots', 'texts', 'agent', 'log']
     .map((name) => el('button', {
     class: 'mas-tab', dataset: { tab: name }, type: 'button',
     text: t('tab' + name[0].toUpperCase() + name.slice(1)),
@@ -197,7 +197,7 @@ function buildPanel() {
       el('section', { id: 'mas-tab-pages', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-shots', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-texts', class: 'mas-tabpane', hidden: true }),
-      el('section', { id: 'mas-tab-ai', class: 'mas-tabpane', hidden: true }),
+      el('section', { id: 'mas-tab-agent', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-log', class: 'mas-tabpane', hidden: true }),
     ]),
     el('div', { class: 'mas-foot' }, [
@@ -285,7 +285,7 @@ function selectTab(name) {
   if (name === 'shots') renderShots();
   if (name === 'texts') renderTexts();
   if (name === 'log') renderLog();
-  if (name === 'ai') renderAi();
+  if (name === 'agent') renderAgent();
   if (name === 'flow') renderFlow();
   if (name === 'record') renderRecord();
 }
@@ -1524,8 +1524,9 @@ async function renderTexts() {
  * AI tab
  * ------------------------------------------------------------------ */
 
-function renderAi() {
-  const pane = document.getElementById('mas-tab-ai');
+function renderAgentAssistant(host) {
+  const pane = host || document.getElementById('mas-agent-sub');
+  if (!pane) return;
   // The model's whole answer. Kept so the next prompt can hand it back, which
   // is what turns one shot into a conversation.
   const importBox = el('textarea', {
@@ -1563,6 +1564,7 @@ function renderAi() {
     el('div', { class: 'mas-row mas-wrap' }, [
       button('📄 ' + t('copyGuide'), () => copyFrom('/guide')),
       button('🧩 ' + t('copyPrompt'), buildPrompt, { class: 'mas-btn mas-primary' }),
+      button('🤖 ' + t('agentChatDirect'), askAgentDirectly, { class: 'mas-btn mas-primary' }),
       button('⤓ JSON', () => copyText(JSON.stringify({ name: state.flow.name, steps: promptSteps(state.flow) }, null, 2))),
     ]),
     el('div', { class: 'mas-row' }, [
@@ -1572,10 +1574,10 @@ function renderAi() {
         // its summary and questions are the point of the exchange.
         state.aiNotes = aiNotesFrom(raw);
         const parsed = extractJson(raw);
-        if (!parsed) { renderAi(); toast('JSON?', 'error'); return; }
+        if (!parsed) { renderAgentAssistant(); toast('JSON?', 'error'); return; }
         const { flow, errors } = normaliseImportedFlow(parsed, state.flow.viewport);
         if (!flow || !flow.steps.length) {
-          renderAi();
+          renderAgentAssistant();
           toast(errors.join(' | '), 'error');
           return;
         }
@@ -1587,6 +1589,21 @@ function renderAi() {
       }, { class: 'mas-btn mas-primary' }),
     ]),
     importBox,
+    state.agentFlowProposal
+      ? el('div', { class: 'mas-box' }, [
+        el('b', { text: `🧩 ${(state.agentFlowProposal.steps || []).length} steps` }),
+        el('div', { class: 'mas-row mas-wrap' }, [
+          button(t('importBtn'), () => {
+            state.flow = state.agentFlowProposal;
+            state.agentFlowProposal = null;
+            persistFlow();
+            renderFlow();
+            selectTab('flow');
+          }, { class: 'mas-btn mas-primary' }),
+          button('✕', () => { state.agentFlowProposal = null; renderAgentAssistant(); }),
+        ]),
+      ])
+      : null,
     state.aiNotes
       ? el('div', { class: 'mas-ai-notes' }, [
         el('b', { text: '💬 ' + t('aiNotes') }),
@@ -1638,13 +1655,642 @@ async function buildPrompt() {
   }
 }
 
+/* ------------------------------------------------------------------ *
+ * Coworker agent tab
+ *
+ * One tab, seven sub-panes, because "the AI section" had grown into seven
+ * unrelated jobs: talking to a model, scheduling, captcha strategy, Telegram,
+ * the script gate, the data, and the keys. Each sub-pane owns its own API calls
+ * so a failure in one cannot blank the others.
+ * ------------------------------------------------------------------ */
+
+const AGENT_SUBS = ['assistant', 'jobs', 'captcha', 'telegram', 'scripts', 'data', 'keys'];
+
+const AGENT_RENDERERS = {
+  assistant: renderAgentAssistant,
+  jobs: renderAgentJobs,
+  captcha: renderAgentCaptcha,
+  telegram: renderAgentTelegram,
+  scripts: renderAgentScripts,
+  data: renderAgentData,
+  keys: renderAgentKeys,
+};
+
+function agentSubLabel(name) {
+  return t('agentSub' + name.charAt(0).toUpperCase() + name.slice(1));
+}
+
+function agentField(labelText, node) {
+  return el('label', { class: 'mas-field mas-wide' }, [
+    el('span', { text: labelText }), node,
+  ]);
+}
+
+function agentSelect(options, value, onChange) {
+  return el('select', { class: 'mas-input', onChange }, options.map((option) => {
+    const item = typeof option === 'string' ? { value: option, label: option } : option;
+    return el('option', { value: item.value, selected: String(item.value) === String(value) },
+      item.label);
+  }));
+}
+
+function agentTime(value) {
+  if (!value) return '-';
+  try { return formatDateTime(value); } catch (_) { return String(value); }
+}
+
+function agentCounts(overview) {
+  const counts = overview.counts || {};
+  const pending = counts.pendingScripts || 0;
+  return [
+    `${counts.jobs || 0} ${t('agentSubJobs')}`,
+    `${counts.scripts || 0} ${t('agentSubScripts')}`,
+    pending ? `⚠ ${pending} ${t('agentScriptStatus')}: pending` : '',
+    (overview.llm || {}).provider || '',
+  ].filter(Boolean).join(' · ');
+}
+
+function agentTable(columns, rows) {
+  return el('table', { class: 'mas-table' }, [
+    el('thead', {}, el('tr', {}, columns.map((name) => el('th', { text: name })))),
+    el('tbody', {}, rows.map((cells) => el('tr', {}, cells.map((cell) => el('td', {},
+      typeof cell === 'string' || typeof cell === 'number' ? [String(cell)] : [cell]))))),
+  ]);
+}
+
+async function agentError(host, error) {
+  replace(host, el('p', { class: 'mas-empty', text: error.message || String(error) }));
+}
+
+async function renderAgent() {
+  const pane = document.getElementById('mas-tab-agent');
+  if (!pane) return;
+  const active = state.agentSub || 'assistant';
+  // The status bar is filled in separately, on purpose: the assistant sub-pane
+  // is the copy-prompt/import workflow and must keep working even when this
+  // deployment has no agent attached at all (--no-agent, or an unreachable API).
+  replace(pane,
+    el('div', { class: 'mas-row mas-wrap' }, AGENT_SUBS.map((name) => button(
+      agentSubLabel(name), () => selectAgentSub(name),
+      { class: 'mas-btn' + (name === active ? ' mas-primary' : ''), dataset: { sub: name } }))),
+    el('div', { id: 'mas-agent-bar', class: 'mas-row mas-wrap' },
+      [el('span', { class: 'mas-hint', text: '\u2026' })]),
+    el('div', { id: 'mas-agent-sub', class: 'mas-agent-sub' }),
+  );
+  renderAgentSub(active);
+  refreshAgentBar();
+}
+
+async function refreshAgentBar() {
+  const bar = document.getElementById('mas-agent-bar');
+  if (!bar) return;
+  let overview;
+  try {
+    overview = await api('/agent');
+  } catch (error) {
+    state.agent = null;
+    // A 404 means no agent was built here, which is a configuration, not a fault.
+    replace(bar, el('span', {
+      class: 'mas-hint',
+      text: error.status === 404 ? t('agentNotAttached') : (error.message || ''),
+    }));
+    return;
+  }
+  state.agent = overview;
+  replace(bar,
+    button((overview.killSwitch ? '\u25b6 ' : '\u23f8 ') + t('agentKillSwitch'), async () => {
+      try {
+        await api('/agent/kill-switch', { method: 'POST', body: { on: !overview.killSwitch } });
+        toast(t('agentSaved'), 'ok');
+        refreshAgentBar();
+      } catch (error) { toast(error.message, 'error'); }
+    }, { class: 'mas-btn' + (overview.killSwitch ? ' mas-danger' : '') }),
+    el('span', { class: 'mas-hint', text: agentCounts(overview) }),
+    overview.killSwitch
+      ? el('span', { class: 'mas-warn', text: t('agentKillSwitchHint') })
+      : null);
+}
+
+function selectAgentSub(name) {
+  state.agentSub = name;
+  renderAgent();
+}
+
+function renderAgentSub(name) {
+  const host = document.getElementById('mas-agent-sub');
+  if (!host) return;
+  (AGENT_RENDERERS[name] || renderAgentAssistant)(host);
+}
+
+/* -- jobs ------------------------------------------------------------ */
+
+async function renderAgentJobs(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let jobs; let flows = []; let scripts = [];
+  try {
+    jobs = (await api('/agent/jobs')).jobs || [];
+    flows = ((await api('/flows')).flows || []).map((item) => item.name);
+    scripts = ((await api('/agent/scripts')).scripts || []);
+  } catch (error) { return agentError(host, error); }
+
+  const draft = state.agentJobDraft || {};
+  const kind = draft.kind || 'cron';
+  const action = (draft.payload && draft.payload.action) || 'flow';
+  const kindBox = agentSelect(['at', 'every', 'cron'], kind,
+    (event) => { state.agentJobDraft = Object.assign({}, draft, { kind: event.target.value }); renderAgentSub('jobs'); });
+  const actionBox = agentSelect([
+    { value: 'flow', label: 'flow' }, { value: 'script', label: 'script' },
+    { value: 'prompt', label: 'prompt' }], action,
+    (event) => {
+      state.agentJobDraft = Object.assign({}, draft, { payload: { action: event.target.value, text: (draft.payload || {}).text || '' } });
+      renderAgentSub('jobs');
+    });
+  const targetOptions = action === 'script'
+    ? scripts.map((item) => ({ value: item.id, label: `${item.name} (${item.status})` }))
+    : flows.map((name) => ({ value: name, label: name }));
+  const targetBox = action === 'prompt'
+    ? el('textarea', {
+      class: 'mas-input mas-area', rows: '3', value: (draft.payload || {}).text || draft.target || '',
+      placeholder: t('agentChatPlaceholder'),
+      onInput: (event) => { state.agentJobDraft = Object.assign({}, draft, { target: event.target.value, payload: Object.assign({}, draft.payload || {}, { action: 'prompt', text: event.target.value }) }); },
+    })
+    : agentSelect(targetOptions, draft.target || '', (event) => { state.agentJobDraft = Object.assign({}, draft, { target: event.target.value }); });
+
+  const form = el('div', { class: 'mas-box' }, [
+    el('b', { text: (draft.id ? '✎ ' : '＋ ') + t('agentSubJobs') }),
+    agentField(t('agentJobName'), el('input', {
+      class: 'mas-input', value: draft.name || '',
+      onInput: (event) => { state.agentJobDraft = Object.assign({}, draft, { name: event.target.value }); },
+    })),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('agentJobKind'), kindBox),
+      agentField(t('agentJobSchedule'), el('input', {
+        class: 'mas-input', value: draft.schedule || '', placeholder: '30 7 * * 6',
+        onInput: (event) => { state.agentJobDraft = Object.assign({}, draft, { schedule: event.target.value }); },
+      })),
+    ]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('agentJobAction'), actionBox),
+      agentField(t('agentJobTarget'), targetBox),
+    ]),
+    el('p', { class: 'mas-hint', text: t('agentJobHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('💾 ' + t('agentSave'), async () => {
+        const payload = Object.assign({}, draft, { enabled: draft.enabled !== false });
+        try {
+          if (payload.id) await api(`/agent/jobs/${encodeURIComponent(payload.id)}`, { method: 'PUT', body: payload });
+          else await api('/agent/jobs', { method: 'POST', body: payload });
+          state.agentJobDraft = null;
+          toast(t('agentSaved'), 'ok');
+          renderAgent();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      draft.id ? button('✕', () => { state.agentJobDraft = null; renderAgentSub('jobs'); }) : null,
+    ]),
+  ]);
+
+  const rows = jobs.length ? jobs.map((job) => [
+    job.name || job.id,
+    `${job.kind}: ${job.schedule}`,
+    (job.payload || {}).action || 'flow',
+    agentTime(job.next_run_at),
+    job.enabled ? '✓' : '⏸',
+    job.last_status ? `${job.last_status} ${agentTime(job.last_run_at)}` : '-',
+    el('div', { class: 'mas-row' }, [
+      button(t('agentJobNow'), async () => {
+        try {
+          const result = await api('/agent/job-run', { method: 'POST', body: { id: job.id } });
+          if (result.status === 'queued') toast(t('agentJobQueued'), 'ok');
+          else toast(result.status, result.status === 'done' ? 'ok' : 'warn');
+          renderAgentSub('jobs');
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+      button(job.enabled ? '⏸' : '▶', async () => {
+        try { await api(`/agent/jobs/${encodeURIComponent(job.id)}`, { method: 'PUT', body: { enabled: !job.enabled } }); renderAgentSub('jobs'); } catch (error) { toast(error.message, 'error'); }
+      }),
+      button('✎', () => { state.agentJobDraft = JSON.parse(JSON.stringify(job)); renderAgentSub('jobs'); }),
+      button('🗑', async () => {
+        if (!window.confirm(t('agentConfirmDelete'))) return;
+        try { await api(`/agent/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' }); renderAgentSub('jobs'); } catch (error) { toast(error.message, 'error'); }
+      }),
+    ]),
+  ]) : [[t('agentEmpty'), '', '', '', '', '', '']];
+
+  replace(host, form,
+    jobs.length ? agentTable([t('agentJobName'), t('agentJobSchedule'), t('agentJobAction'),
+      t('agentJobNext'), '', t('agentJobLast'), ''], rows) : null,
+    el('p', { class: 'mas-hint', text: jobs.length ? '' : t('agentEmpty') }));
+}
+
+/* -- scripts --------------------------------------------------------- */
+
+async function renderAgentScripts(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let data;
+  try { data = await api('/agent/scripts'); } catch (error) { return agentError(host, error); }
+  const scripts = data.scripts || [];
+  const config = data.config || {};
+  const draft = state.agentScriptDraft || { language: 'python3', code: '' };
+
+  const form = el('div', { class: 'mas-box' }, [
+    el('b', { text: (draft.id ? '✎ ' : '＋ ') + t('agentSubScripts') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('agentJobName'), el('input', {
+        class: 'mas-input', value: draft.name || '',
+        onInput: (event) => { state.agentScriptDraft = Object.assign({}, draft, { name: event.target.value }); },
+      })),
+      agentField(t('agentScriptLang'), agentSelect(config.languages || ['bash', 'python3'],
+        draft.language, (event) => { state.agentScriptDraft = Object.assign({}, draft, { language: event.target.value }); renderAgentSub('scripts'); })),
+    ]),
+    agentField(t('agentScriptCode'), el('textarea', {
+      class: 'mas-input mas-area mas-code', rows: '8', value: draft.code || '', spellcheck: 'false',
+      onInput: (event) => { state.agentScriptDraft = Object.assign({}, draft, { code: event.target.value }); },
+    })),
+    el('p', { class: 'mas-warn', text: t('agentScriptGate') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('💾 ' + t('agentSave'), async () => {
+        try {
+          if (draft.id) await api(`/agent/scripts/${encodeURIComponent(draft.id)}`, { method: 'PUT', body: draft });
+          else await api('/agent/scripts', { method: 'POST', body: draft });
+          state.agentScriptDraft = null;
+          toast(t('agentSaved'), 'ok');
+          renderAgentSub('scripts');
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      draft.id ? button('✕', () => { state.agentScriptDraft = null; renderAgentSub('scripts'); }) : null,
+      config.running ? button('⏹ ' + t('agentKill'), async () => {
+        try { await api('/agent/script-kill', { method: 'POST', body: {} }); renderAgentSub('scripts'); } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-danger' }) : null,
+    ]),
+    el('p', { class: 'mas-hint', text: `env: ${(config.strippedEnv || []).join(', ')} ${config.passToken ? '' : '(stripped)'}` }),
+  ]);
+
+  const rows = scripts.length ? scripts.map((script) => [
+    script.name || script.id,
+    script.language,
+    script.status === 'approved' ? '✅ approved' : (script.status === 'rejected' ? '⛔ rejected' : '⏳ pending'),
+    `${script.run_count || 0}× ${script.last_exit === null || script.last_exit === undefined ? '' : 'exit=' + script.last_exit}`,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      script.status === 'approved' ? null : button('✓ ' + t('agentApprove'), async () => {
+        try { await api('/agent/script-decision', { method: 'POST', body: { id: script.id, approve: true } }); renderAgentSub('scripts'); } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      script.status === 'rejected' ? null : button('✕ ' + t('agentReject'), async () => {
+        try { await api('/agent/script-decision', { method: 'POST', body: { id: script.id, approve: false } }); renderAgentSub('scripts'); } catch (error) { toast(error.message, 'error'); }
+      }),
+      button('▶ ' + t('agentRun'), async () => {
+        try {
+          const result = await api('/agent/script-run', { method: 'POST', body: { id: script.id } });
+          state.agentScriptOutput = result;
+          renderAgentSub('scripts');
+        } catch (error) { toast(error.message, error.status === 409 ? 'warn' : 'error'); }
+      }),
+      button('✎', () => { state.agentScriptDraft = JSON.parse(JSON.stringify(script)); renderAgentSub('scripts'); }),
+      button('🗑', async () => {
+        if (!window.confirm(t('agentConfirmDelete'))) return;
+        try { await api(`/agent/scripts/${encodeURIComponent(script.id)}`, { method: 'DELETE' }); renderAgentSub('scripts'); } catch (error) { toast(error.message, 'error'); }
+      }),
+    ]),
+  ]) : null;
+
+  replace(host, form,
+    rows ? agentTable([t('agentJobName'), t('agentScriptLang'), t('agentScriptStatus'), t('agentRun'), ''], rows) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
+    state.agentScriptOutput ? el('div', { class: 'mas-box' }, [
+      el('b', { text: `${t('agentScriptOutput')} · exit ${state.agentScriptOutput.exitCode} · ${state.agentScriptOutput.elapsed}s` }),
+      el('pre', { class: 'mas-pre', text: state.agentScriptOutput.output || '(empty)' }),
+    ]) : null);
+}
+
+/* -- captcha --------------------------------------------------------- */
+
+async function renderAgentCaptcha(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let info; let history = [];
+  try {
+    info = await api('/agent/captcha/config');
+    history = (await api('/agent/captcha/history')).history || [];
+  } catch (error) { return agentError(host, error); }
+  const config = info.config || {};
+  const extension = info.extension || {};
+  const draft = Object.assign({}, config);
+  const strategies = config.strategies || [];
+
+  const strategyBoxes = ['vision', 'human', 'extension'].map((name) => el('label', { class: 'mas-check' }, [
+    el('input', {
+      type: 'checkbox', checked: strategies.indexOf(name) >= 0,
+      onChange: (event) => {
+        const next = strategies.slice();
+        if (event.target.checked) next.push(name);
+        else next.splice(next.indexOf(name), 1);
+        draft.strategies = next;
+      },
+    }),
+    el('span', { text: name }),
+  ]));
+
+  const form = el('div', { class: 'mas-box' }, [
+    el('b', { text: t('agentSubCaptcha') }),
+    el('div', { class: 'mas-row mas-wrap' }, strategyBoxes),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('agentCaptchaMaxAttempts'), el('input', {
+        class: 'mas-input', type: 'number', min: '1', max: '10', value: String(config.maxAttempts || 3),
+        onInput: (event) => { draft.maxAttempts = Number(event.target.value); },
+      })),
+      agentField(t('agentCaptchaMinConfidence'), el('input', {
+        class: 'mas-input', type: 'number', step: '0.05', min: '0', max: '1', value: String(config.minConfidence || 0.6),
+        onInput: (event) => { draft.minConfidence = Number(event.target.value); },
+      })),
+      agentField(t('agentCaptchaExtension'), agentSelect(['none', 'buster', 'nopecha'],
+        config.extension || 'none', (event) => { draft.extension = event.target.value; })),
+    ]),
+    el('label', { class: 'mas-check' }, [
+      el('input', { type: 'checkbox', checked: Boolean(config.autoClick), onChange: (event) => { draft.autoClick = event.target.checked; } }),
+      el('span', { text: t('agentCaptchaAutoClick') }),
+    ]),
+    el('p', { class: 'mas-hint', text: t('agentCaptchaHint') }),
+    extension.name && extension.name !== 'none' ? el('p', { class: 'mas-warn', text: `${extension.name}: ${extension.covers || ''} — ${extension.warning || ''}` }) : null,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('💾 ' + t('agentSave'), async () => {
+        try { await api('/agent/captcha/config', { method: 'POST', body: draft }); toast(t('agentSaved'), 'ok'); renderAgentSub('captcha'); } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      button('🔍 ' + t('agentCaptchaSolve'), async () => {
+        try {
+          state.agentCaptchaResult = await api('/agent/captcha/solve', { method: 'POST', body: {} });
+          renderAgentSub('captcha');
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+    ]),
+  ]);
+
+  const result = state.agentCaptchaResult;
+  const proposal = result && result.result && (result.result.actions || []).length
+    ? el('div', { class: 'mas-box' }, [
+      el('b', { text: `${t('agentCaptchaProposal')} · ${result.strategy}${result.needsApproval ? ' · ⏳' : ''}` }),
+      el('p', { class: 'mas-hint', text: [result.result.kind, `confidence ${result.result.confidence}`, result.result.summary].filter(Boolean).join(' · ') }),
+      agentTable(['type', 'x', 'y', 'note'], (result.result.actions || []).map((action) => [
+        action.type, action.x === undefined ? '-' : action.x, action.y === undefined ? '-' : action.y, action.note || action.text || (action.keys || []).join('+'),
+      ])),
+      (result.result.rejected || []).length ? el('p', { class: 'mas-warn', text: `refused: ${result.result.rejected.map((item) => item.reason).join('; ')}` }) : null,
+      result.needsApproval ? button('▶ ' + t('agentRun'), async () => {
+        try {
+          await api('/agent/captcha/execute', { method: 'POST', body: { actions: result.result.actions } });
+          toast('ok', 'ok');
+          state.agentCaptchaResult = null;
+          renderAgentSub('captcha');
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }) : null,
+    ]) : null;
+
+  const historyRows = history.length ? history.slice(0, 20).map((item) => [
+    agentTime(item.at), item.event, item.kind || item.label || '', item.confidence === undefined ? '' : String(item.confidence),
+    truncate(item.summary || item.error || '', 60),
+  ]) : null;
+
+  replace(host, form, proposal,
+    historyRows ? el('div', { class: 'mas-box' }, [
+      el('b', { text: t('agentCaptchaHistory') }),
+      agentTable(['time', 'event', 'kind', 'conf', ''], historyRows),
+    ]) : null);
+}
+
+/* -- telegram -------------------------------------------------------- */
+
+async function renderAgentTelegram(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let status; let settings = {};
+  try {
+    status = await api('/agent/telegram/status');
+    settings = (state.agent && state.agent.settings) || {};
+  } catch (error) { return agentError(host, error); }
+  const targets = status.targets || [];
+  const draft = { mode: status.mode };
+
+  // Chats found through getUpdates. Kept apart from the saved targets on
+  // purpose: this list is a picker, and rendering the saved targets here showed
+  // the operator their own list back and made discovery look broken.
+  const found = state.agentTgFound || [];
+  const foundRows = found.map((target) => [
+    String(target.id), target.title || '', target.type || '',
+    button('＋', async () => {
+      const next = targets.slice();
+      next.push(target);
+      try { await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': next } }); toast(t('agentSaved'), 'ok'); renderAgentSub('telegram'); } catch (error) { toast(error.message, 'error'); }
+    }, { class: 'mas-btn mas-primary' }),
+  ]);
+
+  replace(host,
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: t('agentSubTelegram') }),
+      agentField(t('agentTgMode'), agentSelect(['off', 'bot', 'account'], status.mode,
+        (event) => { draft.mode = event.target.value; })),
+      agentField(t('agentTgBotToken'), el('input', {
+        class: 'mas-input', type: 'password', placeholder: status.botTokenSet ? '•••••• (stored)' : '',
+        onInput: (event) => { draft.botToken = event.target.value; },
+      })),
+      status.mode === 'account' ? el('div', {}, [
+        el('p', { class: 'mas-warn', text: t('agentTgAccountWarn') }),
+        el('div', { class: 'mas-row mas-wrap' }, [
+          agentField('api_id', el('input', { class: 'mas-input', placeholder: status.apiCredentialsSet ? '•••••• (stored)' : '', onInput: (event) => { draft.apiId = event.target.value; } })),
+          agentField('api_hash', el('input', { class: 'mas-input', type: 'password', placeholder: status.apiCredentialsSet ? '•••••• (stored)' : '', onInput: (event) => { draft.apiHash = event.target.value; } })),
+        ]),
+        el('div', { class: 'mas-row mas-wrap' }, [
+          agentField(t('agentTgPhone'), el('input', { class: 'mas-input', value: status.phone || '', placeholder: '+98...', onInput: (event) => { draft.phone = event.target.value; } })),
+          agentField(t('agentTgCode'), el('input', { class: 'mas-input', onInput: (event) => { draft.code = event.target.value; } })),
+        ]),
+        el('div', { class: 'mas-row mas-wrap' }, [
+          button(t('agentTgLogin'), async () => {
+            try { await api('/agent/telegram/login', { method: 'POST', body: { phone: draft.phone } }); toast('code sent', 'ok'); } catch (error) { toast(error.message, 'error'); }
+          }),
+          button(t('agentTgLoginFinish'), async () => {
+            try { await api('/agent/telegram/login-finish', { method: 'POST', body: { code: draft.code } }); toast('ok', 'ok'); renderAgentSub('telegram'); } catch (error) { toast(error.message, 'error'); }
+          }, { class: 'mas-btn mas-primary' }),
+        ]),
+      ]) : null,
+      el('div', { class: 'mas-row mas-wrap' }, [
+        button('💾 ' + t('agentSave'), async () => {
+          const body = { 'telegram.mode': draft.mode };
+          if (draft.botToken) body['telegram.botToken'] = draft.botToken;
+          if (draft.apiId) body['telegram.apiId'] = draft.apiId;
+          if (draft.apiHash) body['telegram.apiHash'] = draft.apiHash;
+          try { await api('/agent/settings', { method: 'POST', body }); toast(t('agentSaved'), 'ok'); renderAgent(); } catch (error) { toast(error.message, 'error'); }
+        }, { class: 'mas-btn mas-primary' }),
+        button('🔎 ' + t('agentTgDiscover'), async () => {
+          try {
+            state.agentTgFound = (await api('/agent/telegram/targets')).targets || [];
+            renderAgentSub('telegram');
+          } catch (error) { toast(error.message, 'error'); }
+        }),
+        button('✉ ' + t('agentTest'), async () => {
+          try { const result = await api('/agent/telegram/test', { method: 'POST', body: {} }); toast(`sent: ${result.sent}`, 'ok'); } catch (error) { toast(error.message, 'error'); }
+        }),
+        button('🩺 probe', async () => {
+          try { const probe = await api('/agent/telegram/status?probe=1'); toast(probe.error || JSON.stringify(probe.identity || {}), probe.error ? 'error' : 'ok'); } catch (error) { toast(error.message, 'error'); }
+        }),
+      ]),
+      el('p', { class: 'mas-hint', text: t('agentTgHint') }),
+      status.error ? el('p', { class: 'mas-warn', text: status.error }) : null,
+    ]),
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: `${t('agentTgTargets')} (${targets.length})` }),
+      targets.length ? agentTable(['id', 'title', 'type', ''], targets.map((target, index) => [
+        String(target.id), target.title || '', target.type || '',
+        button('🗑', async () => {
+          const next = targets.filter((_, position) => position !== index);
+          try { await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': next } }); renderAgentSub('telegram'); } catch (error) { toast(error.message, 'error'); }
+        }),
+      ])) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
+    ]),
+    found.length ? el('div', { class: 'mas-box' }, [
+      el('b', { text: `${t('agentTgDiscover')} (${found.length})` }),
+      agentTable(['id', 'title', 'type', t('agentAdd')], foundRows),
+    ]) : null);
+}
+
+/* -- data ------------------------------------------------------------ */
+
+async function renderAgentData(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let notes = []; let audit = [];
+  try {
+    notes = (await api('/agent/notes')).notes || [];
+    audit = (await api('/agent/audit?limit=60')).audit || [];
+  } catch (error) { return agentError(host, error); }
+  const sqlBox = el('textarea', {
+    class: 'mas-input mas-area mas-code', rows: '3', spellcheck: 'false',
+    value: state.agentSql || 'SELECT id, name, kind, schedule, enabled, last_status FROM jobs',
+    onInput: (event) => { state.agentSql = event.target.value; },
+  });
+
+  replace(host,
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: t('agentQuery') }),
+      sqlBox,
+      el('p', { class: 'mas-hint', text: t('agentQueryHint') }),
+      button('▶ ' + t('agentQueryRun'), async () => {
+        try {
+          const result = await api('/agent/query', { method: 'POST', body: { sql: sqlBox.value } });
+          replace(host.querySelector('.mas-query-result') || host,
+            result.rows.length ? agentTable(result.columns, result.rows.map((row) => result.columns.map((column) => String(row[column] === null ? '' : row[column]).slice(0, 120))))
+              : el('p', { class: 'mas-hint', text: t('agentEmpty') }));
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      el('div', { class: 'mas-query-result' }, state.agentQueryResult || null),
+    ]),
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: `${t('agentNotes')} (${notes.length})` }),
+      notes.length ? agentTable(['time', 'kind', 'body', ''], notes.slice(0, 30).map((note) => [
+        agentTime(note.created_at), note.kind, truncate(note.body, 90),
+        button('🗑', async () => {
+          try { await api(`/agent/notes/${encodeURIComponent(note.id)}`, { method: 'DELETE' }); renderAgentSub('data'); } catch (error) { toast(error.message, 'error'); }
+        }),
+      ])) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
+    ]),
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: t('agentAudit') }),
+      audit.length ? agentTable(['time', 'actor', 'action', 'detail'], audit.map((row) => [
+        agentTime(row.at), row.actor, row.action, truncate(row.detail, 70),
+      ])) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
+    ]));
+}
+
+/* -- keys ------------------------------------------------------------ */
+
+async function renderAgentKeys(host) {
+  const overview = state.agent || (await api('/agent').catch(() => null));
+  if (!overview) return agentError(host, { message: t('agentNotAttached') });
+  const settings = overview.settings || {};
+  const llm = overview.llm || {};
+  const draft = {};
+  const secret = (key, label, placeholder) => agentField(label, el('input', {
+    class: 'mas-input', type: 'password',
+    placeholder: (settings[key] && settings[key].set) ? '•••••• (stored)' : (placeholder || ''),
+    onInput: (event) => { draft[key] = event.target.value; },
+  }));
+
+  replace(host,
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: t('agentSubKeys') }),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        agentField(t('agentProvider'), agentSelect(['ai-browser', 'http-api'], llm.provider,
+          (event) => { draft['ai.provider'] = event.target.value; })),
+        agentField(t('agentChatProvider'), agentSelect(['deepseek', 'generic'], llm.chatProvider,
+          (event) => { draft['ai.chatProvider'] = event.target.value; })),
+      ]),
+      el('p', { class: 'mas-hint', text: t('agentAiHint') }),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        agentField(t('agentBaseUrl'), el('input', { class: 'mas-input', value: settings['ai.baseUrl'] || '', placeholder: 'https://api.deepseek.com/v1', onInput: (event) => { draft['ai.baseUrl'] = event.target.value; } })),
+        agentField(t('agentModel'), el('input', { class: 'mas-input', value: settings['ai.model'] || '', placeholder: 'deepseek-chat', onInput: (event) => { draft['ai.model'] = event.target.value; } })),
+      ]),
+      secret('ai.apiKey', t('agentApiKey')),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        button('💾 ' + t('agentSave'), async () => {
+          try { await api('/agent/settings', { method: 'POST', body: draft }); toast(t('agentSaved'), 'ok'); renderAgent(); } catch (error) { toast(error.message, 'error'); }
+        }, { class: 'mas-btn mas-primary' }),
+        button('🩺 ' + t('agentAiStatus'), async () => {
+          try { const status = await api('/agent/ai/status'); toast(JSON.stringify(status).slice(0, 160), status.available ? 'ok' : 'warn'); } catch (error) { toast(error.message, 'error'); }
+        }),
+        button('🌐 ' + t('agentAiOpen'), async () => {
+          try { await api('/agent/ai/open', { method: 'POST', body: {} }); toast('ok', 'ok'); } catch (error) { toast(error.message, 'error'); }
+        }),
+        button('📸 ' + t('agentAiShot'), async () => {
+          const url = await imageBlobUrl('/agent/ai/shot');
+          if (!url) { toast('no image', 'error'); return; }
+          const viewer = host.querySelector('.mas-ai-shot');
+          replace(viewer || host.appendChild(el('div', { class: 'mas-ai-shot' })),
+            el('img', { src: url, alt: 'agent display', class: 'mas-shot-full' }));
+        }),
+      ]),
+      llm.browser ? el('p', { class: 'mas-hint', text: `agent browser: ${llm.browser.available ? 'reachable' : 'not running'} (port ${llm.browser.port}, display ${llm.browser.display})` }) : null,
+    ]),
+    el('div', { class: 'mas-box' }, [
+      el('b', { text: t('agentSubData') }),
+      el('p', { class: 'mas-hint', text: `db: ${JSON.stringify(overview.counts || {})}` }),
+    ]));
+}
+
+/** Send the same context packet to the model from inside the app.
+ *  The old workflow was: copy the prompt, paste it into a chat website, paste
+ *  the answer back. This does all three without leaving the sidebar, and keeps
+ *  the copy/paste buttons next to it for when the agent has no model attached. */
+async function askAgentDirectly() {
+  const page = state.activePage || (state.pages || [])[0] || null;
+  const body = { flow: state.flow, publicBase: window.location.origin };
+  if (page) body.pageId = page.id;
+  if (state.userRequest && state.userRequest.trim()) body.request = state.userRequest;
+  if (state.aiReply && state.aiReply.trim()) body.previousReply = state.aiReply;
+  if (!body.request) {
+    toast(t('aiRequest'), 'warn');
+    return;
+  }
+  toast('…', 'info');
+  try {
+    const reply = await api('/agent/chat', { method: 'POST', body });
+    state.aiReply = reply.text || '';
+    try { localStorage.setItem(LS.reply, state.aiReply); } catch (_) { /* quota */ }
+    state.aiNotes = aiNotesFrom(state.aiReply);
+    if (reply.flow && reply.flowValid && (reply.flow.steps || []).length) {
+      state.agentFlowProposal = reply.flow;
+    }
+    renderAgentAssistant();
+    if (state.agentFlowProposal) {
+      toast(`${reply.flow.steps.length} steps`, 'ok');
+    } else if (reply.flowErrors && reply.flowErrors.length) {
+      toast(reply.flowErrors[0], 'warn');
+    } else {
+      toast(reply.provider || 'ok', 'ok');
+    }
+  } catch (error) {
+    toast(error.message, error.status === 404 ? 'warn' : 'error');
+  }
+}
+
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);
     toast('copied', 'ok');
   } catch (_) {
     const area = el('textarea', { class: 'mas-input mas-area', rows: '10', value: text });
-    const pane = document.getElementById('mas-tab-ai');
+    const pane = document.getElementById('mas-agent-sub')
+      || document.getElementById('mas-panel');
     pane.appendChild(area);
     area.select();
     toast('Ctrl+C', 'warn');

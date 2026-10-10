@@ -264,11 +264,14 @@ class AutomationEngine:
 
     def __init__(self, backend: ControlBackend, data_dir: str, sleep=time.sleep,
                  clock=time.time, cdp: Any = None, cdp_port: int = 9222,
-                 shots: Any = None, texts: Any = None):
+                 shots: Any = None, texts: Any = None, notifier: Any = None):
         self.backend = backend
         self.data_dir = data_dir
         self._cdp = cdp
         self._cdp_port = cdp_port
+        # Optional Telegram (or other) notifier, told whenever a run stops for a
+        # human. Detached by default, so nothing about a plain run changes.
+        self._notifier = notifier
         # Indexes of what this session produced, so the panel can list every
         # screenshot and every extracted text without rescanning the disk.
         self._shots = shots
@@ -608,6 +611,13 @@ class AutomationEngine:
             "kind": kind, "message": message, "signals": signals,
             "pageOrigin": page_origin, "publicShot": public_name,
         }
+        # The notifier is told before the wait begins, so a slow or dead
+        # Telegram cannot delay the pause itself.
+        if self._notifier is not None:
+            try:
+                self._notifier.notify_handoff(dict(pending, runId=state.run_id))
+            except Exception as exc:  # noqa: BLE001 - a broken notifier must not break a run
+                self._log("warn", "handoff notification failed: %s" % exc)
         self._wait_for_human(state, label, pending, event)
 
     def _wait_for_human(self, state: RunState, label: str,

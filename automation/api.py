@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from . import schema
+from .agent import AgentError
 from .engine import TERMINAL_STATES, png_size
 
 API_PREFIX = "/automation/api"
@@ -127,7 +128,7 @@ class AutomationApi:
     def __init__(self, engine, store: FlowStore, detector=None, *, data_dir: str,
                  token: str = "", control_script: str = "", viewport=None,
                  guide_path: str = "", version: str = "1.0",
-                 shots=None, texts=None):
+                 shots=None, texts=None, agent=None):
         self.engine = engine
         # Indexes of every screenshot and every extracted text this session
         # produced, so two panel tabs can list them with timestamps.
@@ -141,6 +142,9 @@ class AutomationApi:
         self.viewport = viewport or dict(schema.DEFAULT_VIEWPORT)
         self.guide_path = guide_path
         self.version = version
+        # The coworker agent. Optional: a deployment that does not construct one
+        # keeps the original route table and behaves exactly as before.
+        self.agent = agent
         self.routes: List[Tuple[str, str, Callable[..., Response]]] = [
             ("GET", "/info", self.route_info),
             ("GET", "/status", self.route_status),
@@ -166,6 +170,53 @@ class AutomationApi:
             ("POST", "/texts", self.route_text_add),
             ("DELETE", "/texts/*", self.route_text_delete),
             ("POST", "/prompt", self.route_prompt),
+        ]
+        if agent is not None:
+            self.routes.extend(self._agent_routes())
+
+    def _agent_routes(self) -> List[Tuple[str, str, Callable[..., Response]]]:
+        """The coworker agent's surface, added only when an agent is attached.
+
+        Sub-resource actions (`/agent/job-run`, `/agent/script-decision`) are
+        plain paths with the id in the body rather than `/agent/jobs/*/run`,
+        because the router here captures a `*` only at the end of a pattern and
+        widening it would touch every existing route.
+        """
+        return [
+            ("GET", "/agent", self.route_agent_overview),
+            ("POST", "/agent/settings", self.route_agent_settings),
+            ("POST", "/agent/kill-switch", self.route_agent_kill_switch),
+            ("POST", "/agent/query", self.route_agent_query),
+            ("POST", "/agent/chat", self.route_agent_chat),
+            ("GET", "/agent/jobs", self.route_agent_jobs_list),
+            ("POST", "/agent/jobs", self.route_agent_job_create),
+            ("PUT", "/agent/jobs/*", self.route_agent_job_update),
+            ("DELETE", "/agent/jobs/*", self.route_agent_job_delete),
+            ("POST", "/agent/job-run", self.route_agent_job_run),
+            ("GET", "/agent/scripts", self.route_agent_scripts_list),
+            ("POST", "/agent/scripts", self.route_agent_script_create),
+            ("PUT", "/agent/scripts/*", self.route_agent_script_update),
+            ("DELETE", "/agent/scripts/*", self.route_agent_script_delete),
+            ("POST", "/agent/script-decision", self.route_agent_script_decision),
+            ("POST", "/agent/script-run", self.route_agent_script_run),
+            ("POST", "/agent/script-kill", self.route_agent_script_kill),
+            ("GET", "/agent/notes", self.route_agent_notes_list),
+            ("POST", "/agent/notes", self.route_agent_note_add),
+            ("DELETE", "/agent/notes/*", self.route_agent_note_delete),
+            ("GET", "/agent/audit", self.route_agent_audit),
+            ("GET", "/agent/telegram/status", self.route_agent_telegram_status),
+            ("GET", "/agent/telegram/targets", self.route_agent_telegram_targets),
+            ("POST", "/agent/telegram/test", self.route_agent_telegram_test),
+            ("POST", "/agent/telegram/login", self.route_agent_telegram_login),
+            ("POST", "/agent/telegram/login-finish", self.route_agent_telegram_login_finish),
+            ("GET", "/agent/captcha/config", self.route_agent_captcha_config_get),
+            ("POST", "/agent/captcha/config", self.route_agent_captcha_config_set),
+            ("POST", "/agent/captcha/solve", self.route_agent_captcha_solve),
+            ("POST", "/agent/captcha/execute", self.route_agent_captcha_execute),
+            ("GET", "/agent/captcha/history", self.route_agent_captcha_history),
+            ("GET", "/agent/ai/status", self.route_agent_ai_status),
+            ("POST", "/agent/ai/open", self.route_agent_ai_open),
+            ("GET", "/agent/ai/shot", self.route_agent_ai_shot),
         ]
 
     # -- helpers --------------------------------------------------------
@@ -200,6 +251,11 @@ class AutomationApi:
             try:
                 return handler(query=query, body=body, params=match)
             except ApiError as exc:
+                return error_response(exc.status, str(exc))
+            except AgentError as exc:
+                # Raised by the coworker agent; it carries its own status so the
+                # sidebar can tell "you forgot to approve it" (409) from "the
+                # model API is down" (502).
                 return error_response(exc.status, str(exc))
             except ValueError as exc:
                 return error_response(400, str(exc))
@@ -452,8 +508,12 @@ class AutomationApi:
         return text_response(200, _report_section(self.engine.status(), base) or
                              "هنوز اجرایی ثبت نشده است.")
 
-    def route_prompt(self, *, body: bytes = b"", **_: Any) -> Response:
-        payload = self.read_json(body)
+    def build_prompt(self, payload: Dict[str, Any]) -> str:
+        """Assemble the full context packet an AI needs to drive this system.
+
+        Shared by `/prompt` (a human copies it to a chat) and `/agent/chat` (the
+        agent sends it to the model itself), so both always see the same world.
+        """
         guide = _builtin_guide(self.viewport)
         if self.guide_path and os.path.exists(self.guide_path):
             with open(self.guide_path, encoding="utf-8") as handle:
@@ -480,7 +540,183 @@ class AutomationApi:
         if report:
             parts.append(report)
         parts.append(_reply_instructions())
-        return text_response(200, "\n\n---\n\n".join(parts))
+        return "\n\n---\n\n".join(parts)
+
+    def route_prompt(self, *, body: bytes = b"", **_: Any) -> Response:
+        return text_response(200, self.build_prompt(self.read_json(body)))
+
+    # -- coworker agent -------------------------------------------------
+    def route_agent_overview(self, **_: Any) -> Response:
+        return json_response(200, self.agent.overview())
+
+    def route_agent_settings(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(200, {"ok": True,
+                                   "settings": self.agent.save_settings(self.read_json(body))})
+
+    def route_agent_kill_switch(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.set_kill_switch(bool(payload.get("on"))))
+
+    def route_agent_query(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.query(str(payload.get("sql") or ""),
+                                                   int(payload.get("limit") or 200)))
+
+    def route_agent_chat(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        request = str(payload.get("request") or payload.get("prompt") or "")
+        if not request.strip():
+            raise ApiError(400, "missing 'request'")
+        context = {key: payload[key] for key in ("pageId", "flow", "previousReply",
+                                                 "publicBase") if key in payload}
+        context["request"] = request
+        return json_response(200, self.agent.chat(self.build_prompt(context)))
+
+    def route_agent_jobs_list(self, **_: Any) -> Response:
+        return json_response(200, {"jobs": self.agent.jobs()})
+
+    def route_agent_job_create(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(201, {"ok": True, "job": self.agent.save_job(self.read_json(body))})
+
+    def route_agent_job_update(self, *, params: Dict[str, str], body: bytes = b"",
+                               **_: Any) -> Response:
+        job = self.agent.save_job(self.read_json(body), job_id=params["*"])
+        return json_response(200, {"ok": True, "job": job})
+
+    def route_agent_job_delete(self, *, params: Dict[str, str], **_: Any) -> Response:
+        return json_response(200, self.agent.delete_job(params["*"]))
+
+    def route_agent_job_run(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        job_id = str(payload.get("id") or "")
+        if not job_id:
+            raise ApiError(400, "missing 'id'")
+        # A run can take minutes; by default it is started and the answer says
+        # so, because holding the request open that long behind an ingress is a
+        # guess about somebody else's timeout. `wait` is there for callers that
+        # really want the outcome in this response.
+        return json_response(200, self.agent.run_job_now(
+            job_id, wait=bool(payload.get("wait"))))
+
+    def route_agent_scripts_list(self, **_: Any) -> Response:
+        return json_response(200, {"scripts": self.agent.script_list(),
+                                   "config": self.agent.scripts.config()})
+
+    def route_agent_script_create(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        actor = "operator" if payload.get("actor") == "operator" else "agent"
+        return json_response(201, {"ok": True,
+                                   "script": self.agent.script_save(payload, actor=actor)})
+
+    def route_agent_script_update(self, *, params: Dict[str, str], body: bytes = b"",
+                                  **_: Any) -> Response:
+        script = self.agent.script_save(self.read_json(body), script_id=params["*"])
+        return json_response(200, {"ok": True, "script": script})
+
+    def route_agent_script_delete(self, *, params: Dict[str, str], **_: Any) -> Response:
+        return json_response(200, self.agent.script_delete(params["*"]))
+
+    def route_agent_script_decision(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        script_id = str(payload.get("id") or "")
+        if not script_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, {"ok": True, "script": self.agent.script_decision(
+            script_id, bool(payload.get("approve", True)))})
+
+    def route_agent_script_run(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        script_id = str(payload.get("id") or "")
+        if not script_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, self.agent.script_run(script_id))
+
+    def route_agent_script_kill(self, **_: Any) -> Response:
+        return json_response(200, self.agent.script_kill())
+
+    def route_agent_notes_list(self, *, query: Dict[str, List[str]], **_: Any) -> Response:
+        kind = (query.get("kind") or [""])[0] or None
+        limit = int((query.get("limit") or ["200"])[0])
+        return json_response(200, {"notes": self.agent.notes(kind=kind, limit=limit)})
+
+    def route_agent_note_add(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        actor = "agent" if payload.get("actor") == "agent" else "operator"
+        return json_response(201, {"ok": True, "note": self.agent.add_note(
+            str(payload.get("body") or ""), str(payload.get("kind") or "note"),
+            actor=actor)})
+
+    def route_agent_note_delete(self, *, params: Dict[str, str], **_: Any) -> Response:
+        return json_response(200, self.agent.delete_note(params["*"]))
+
+    def route_agent_audit(self, *, query: Dict[str, List[str]], **_: Any) -> Response:
+        limit = int((query.get("limit") or ["200"])[0])
+        return json_response(200, {"audit": self.agent.audit(limit=limit)})
+
+    def route_agent_telegram_status(self, *, query: Dict[str, List[str]], **_: Any) -> Response:
+        probe = (query.get("probe") or ["0"])[0] in ("1", "true", "yes")
+        return json_response(200, self.agent.telegram_status(probe=probe))
+
+    def route_agent_telegram_targets(self, **_: Any) -> Response:
+        return json_response(200, {"targets": self.agent.telegram_targets()})
+
+    def route_agent_telegram_test(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.telegram_test(str(payload.get("text") or "")))
+
+    def route_agent_telegram_login(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        phone = str(payload.get("phone") or "")
+        if not phone.strip():
+            raise ApiError(400, "missing 'phone'")
+        return json_response(200, self.agent.telegram_login_start(phone))
+
+    def route_agent_telegram_login_finish(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        code = str(payload.get("code") or "")
+        if not code.strip():
+            raise ApiError(400, "missing 'code'")
+        return json_response(200, self.agent.telegram_login_finish(
+            code, str(payload.get("password") or "")))
+
+    def route_agent_captcha_config_get(self, **_: Any) -> Response:
+        return json_response(200, {"config": self.agent.captcha.config(),
+                                   "extension": self.agent.captcha.extension_status()})
+
+    def route_agent_captcha_config_set(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(200, {"ok": True,
+                                   "config": self.agent.captcha_set_config(
+                                       self.read_json(body))})
+
+    def route_agent_captcha_solve(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        context = payload.get("context")
+        result = self.agent.captcha_solve(str(payload.get("shot") or ""),
+                                          context if isinstance(context, dict) else None)
+        return json_response(200, result)
+
+    def route_agent_captcha_execute(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        actions = payload.get("actions")
+        if not isinstance(actions, list) or not actions:
+            raise ApiError(400, "missing 'actions'")
+        return json_response(200, self.agent.captcha_execute(actions))
+
+    def route_agent_captcha_history(self, *, query: Dict[str, List[str]], **_: Any) -> Response:
+        limit = int((query.get("limit") or ["50"])[0])
+        return json_response(200, {"history": self.agent.captcha.history(limit=limit)})
+
+    def route_agent_ai_status(self, **_: Any) -> Response:
+        return json_response(200, self.agent.ai_status())
+
+    def route_agent_ai_open(self, **_: Any) -> Response:
+        return json_response(200, self.agent.ai_open())
+
+    def route_agent_ai_shot(self, **_: Any) -> Response:
+        path = self.agent.ai_screenshot()
+        with open(path, "rb") as handle:
+            data = handle.read()
+        return 200, {"Content-Type": "image/png", "Cache-Control": "no-store"}, data
 
 
 class ApiError(Exception):

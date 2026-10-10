@@ -166,6 +166,29 @@ RUN set -eux; \
     google-chrome --version
 
 # ---------------------------------------------------------------------------
+# Telethon, for the optional "send from my own Telegram account" mode.
+#
+# Best-effort on purpose. Telethon is not in the Ubuntu archive, so it has to
+# come from PyPI, and a build must not fail because PyPI was briefly
+# unreachable. When it is missing, the account mode says exactly that in the
+# sidebar, and bot mode - which needs nothing but the standard library - keeps
+# working. Placed after the Chrome layer so a PyPI hiccup cannot invalidate the
+# most expensive cached step.
+# ---------------------------------------------------------------------------
+RUN set -eux; \
+    apt-get update -qq; \
+    apt-get install -y -qq --no-install-recommends python3-pip; \
+    python3 -m pip install --quiet --break-system-packages telethon \
+        || python3 -m pip install --quiet telethon \
+        || echo "WARN: telethon could not be installed"; \
+    if python3 -c 'import telethon; print("telethon:", telethon.__version__)'; then \
+        echo "telegram account mode: available"; \
+    else \
+        echo "telegram account mode: NOT available (bot mode still works)"; \
+    fi; \
+    rm -rf /var/lib/apt/lists/*
+
+# ---------------------------------------------------------------------------
 # Non-root runtime user. Hostim's docs do not state which user an app runs as,
 # so the image does not depend on being root: everything below works as uid
 # 1000, and Chrome runs with --no-sandbox exactly like the Colab launcher.
