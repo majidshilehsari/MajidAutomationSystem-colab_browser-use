@@ -23,22 +23,179 @@ const NOVNC_HTML = `<!doctype html><html><head><style>${CSS}</style></head><body
 const VALID_TOKEN = 'tok123';
 
 /** Stands in for the server: /info is open, everything else needs the token. */
-function fakeApi(requests, posts = [], statusPayload = null) {
+function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
+                 clipText = null) {
   return async (url, options = {}) => {
     const path = String(url);
+    const clean = path.split('?')[0];
     requests.push(path);
     if ((options.method || 'GET').toUpperCase() === 'POST') {
       posts.push({ url: path, body: options.body });
     }
     const token = (options.headers || {})['X-Automation-Token'];
-    const json = (body) => ({ ok: true, status: 200, text: async () => JSON.stringify(body) });
+    const json = (body) => ({ ok: true, status: 200,
+                             text: async () => JSON.stringify(body),
+                             blob: async () => ({ size: 0, type: 'image/png' }) });
     if (path.endsWith('/info')) {
       return json({ authRequired: true, viewport: { width: 1366, height: 768 },
                     engineBusy: false, detector: 'x11+cdp', cdpAvailable: false });
     }
+    if ((options.method || 'GET').toUpperCase() === 'POST'
+        && (clean.endsWith('/clipboard') || clean.endsWith('/agent/devlog')
+            || clean.endsWith('/agent/pages') || clean.endsWith('/agent/suggestions')
+            || clean.includes('/agent/suggestion-'))) {
+      return json({ ok: true, page: { id: 7, title: 'x' },
+        suggestion: { id: 3, status: 'draft' } });
+    }
     if (token !== VALID_TOKEN) {
       return { ok: false, status: 401,
                text: async () => '{"error":"missing or wrong X-Automation-Token header"}' };
+    }
+    if (noAgent && clean.includes('/agent')) {
+      return { ok: false, status: 404,
+               text: async () => '{"error":"no agent is attached to this deployment"}' };
+    }
+    if (clean.endsWith('/agent')) {
+      return json({
+        settings: { 'ui.theme': 'dark' },
+        llm: { provider: 'ai-browser', chatProvider: 'deepseek',
+                             configured: true, browser: { available: false } },
+        telegram: { mode: 'bot', targets: [] },
+        captcha: { enabled: true, strategies: ['vision', 'human'], autoClick: false,
+                   maxAttempts: 3, minConfidence: 0.6, extension: 'none' },
+        captchaExtension: { name: 'none', free: true },
+        scripts: { languages: ['bash', 'python3'], strippedEnv: ['AUTOMATION_TOKEN'],
+                   passToken: false, running: null },
+        scheduler: { alive: true, jobs: 1 }, killSwitch: false,
+        counts: { jobs: 1, scripts: 2, pendingScripts: 1, notes: 3 },
+      });
+    }
+    if (clean.endsWith('/agent/jobs')) {
+      return json({ jobs: [{ id: 'job-1', name: '\u0635\u0628\u062d', kind: 'cron',
+        schedule: '30 7 * * *', target: 'Arena', enabled: true,
+        payload: { action: 'flow' }, next_run_at: 1760000000,
+        last_status: 'done', last_run_at: 1759990000, run_count: 0 }] });
+    }
+    if (clean.endsWith('/agent/scripts')) {
+      return json({ scripts: [{ id: 'scr-1', name: '\u06af\u0632\u0627\u0631\u0634',
+        language: 'python3', status: 'pending', run_count: 0, last_exit: null,
+        code: 'print(1)', timeout: 60 }],
+        config: { languages: ['bash', 'python3'],
+                  strippedEnv: ['AUTOMATION_TOKEN', 'VNC_PASSWORD'],
+                  passToken: false, running: null } });
+    }
+    if (clean.endsWith('/agent/captcha/config')) {
+      return json({ config: { enabled: true, strategies: ['vision', 'human'],
+        autoClick: false, maxAttempts: 3, minConfidence: 0.6, extension: 'none',
+        notifyOnEscalation: true }, extension: { name: 'none', free: true } });
+    }
+    if (clean.endsWith('/agent/captcha/history')) {
+      return json({ history: [{ at: 1760000000, event: 'vision', kind: 'image_select',
+        confidence: 0.9, summary: '\u0633\u0647 \u062a\u0635\u0648\u06cc\u0631' }] });
+    }
+    if (clean.endsWith('/agent/telegram/status')) {
+      return json({ mode: 'bot', targets: [{ id: -100123,
+        title: '\u06af\u0631\u0648\u0647 \u0645\u0646', type: 'supergroup' }],
+        configured: true, botTokenSet: true, apiCredentialsSet: false, error: '' });
+    }
+    if (clean.endsWith('/agent/telegram/targets')) {
+      return json({ targets: [{ id: -100999, title: 'Found group', type: 'supergroup' }] });
+    }
+    if (clean.endsWith('/agent/telegram/log')) {
+      return json({ counts: { all: 2, queued: 0, sent: 1, failed: 1, cancelled: 0 },
+        messages: [
+          { id: 2, created_at: 1760000100, status: 'failed', channel: 'bot',
+            purpose: 'manual', target: '\u06af\u0631\u0648\u0647 \u0645\u0646',
+            body: '\u067e\u06cc\u0627\u0645 \u062f\u0648\u0645', error: 'blocked' },
+          { id: 1, created_at: 1760000000, status: 'sent', channel: 'bot',
+            purpose: 'manual', target: '\u06af\u0631\u0648\u0647 \u0645\u0646',
+            body: '\u0633\u0644\u0627\u0645', error: '' },
+        ] });
+    }
+    if (clean.endsWith('/clipboard')) {
+      const text = clipText === null ? '\u0633\u0644\u0627\u0645 \u06a9\u0644\u06cc\u067e' : clipText;
+      return json({ ok: true, text, length: text.length });
+    }
+    if (clean.endsWith('/agent/devlog')) {
+      return json({ entries: [{ id: 1, at: 1760000000, actor: 'system',
+        title: '\u0646\u0627\u0645\u0647 \u0628\u0647 \u0627\u06cc\u062c\u0646\u062a',
+        body: '\u0645\u062a\u0646 \u0646\u0627\u0645\u0647' }] });
+    }
+    if (clean.endsWith('/agent/pages')) {
+      if (path.includes('id=')) {
+        return json({ id: 7, title: '\u06af\u0632\u0627\u0631\u0634',
+          html: '<b>\u0633\u0644\u0627\u0645</b>', created_at: 1760000000,
+          updated_at: 1760000000, actor: 'agent' });
+      }
+      return json({ pages: [{ id: 7, title: '\u06af\u0632\u0627\u0631\u0634', size: 18,
+        created_at: 1760000000, updated_at: 1760000000, actor: 'agent' }] });
+    }
+    if (clean.endsWith('/agent/suggestions')) {
+      const one = { id: 3, title: '\u062a\u0645 \u067e\u06cc\u0634\u200c\u0641\u0631\u0636',
+        problem: '\u0645\u0634\u06a9\u0644', proposal: '\u067e\u06cc\u0634\u0646\u0647\u0627\u062f',
+        reason: '\u062f\u0644\u06cc\u0644', evidence: '', section: '\u062a\u0645',
+        kind: 'settings', risk: 'low', needs_human: 1, status: 'approved',
+        before_state: '{"key":"ui.theme","value":"light"}',
+        after_state: '{"key":"ui.theme","value":"dark"}',
+        apply_result: '', rollback_note: '', actor: 'agent',
+        created_at: 1760000000, updated_at: 1760000000 };
+      if (path.includes('id=')) return json({ suggestion: one });
+      return json({ suggestions: [one], counts: { approved: 1 } });
+    }
+    if (clean.includes('/agent/suggestion-') || clean.endsWith('/agent/page-delete')) {
+      return json({ ok: true, suggestion: { id: 3, status: 'applied' } });
+    }
+    if (clean.endsWith('/agent/db/schema')) {
+      return json({ ok: true, database: 'agent.db',
+        tables: [{ name: 'settings', rows: 2,
+          columns: [{ name: 'key' }, { name: 'value' }],
+          indexes: [], sensitiveColumns: ['value'] }], note: '' });
+    }
+    if (clean.endsWith('/agent/db/query')) {
+      return json({ ok: true, columns: ['key', 'value'],
+        rows: [{ key: 'telegram.botToken',
+          value: { masked: true, configured: true, length: 15, last4: 'CRET' } }],
+        count: 1, truncated: false, maskedColumns: ['value'] });
+    }
+    if (clean.endsWith('/agent/backups')) {
+      return json({
+        backups: [{ name: 'mas-backup-test.tar.gz', size: 2048, sizeText: '2.0 KB',
+          createdAt: 1760000000, createdAtText: '2026-10-10 10:00:00' }],
+        stats: { dbSizeText: '88 KB', flows: 2, backups: 1, backupSizeText: '2.0 KB',
+          tables: { chat: 3, jobs: 1 }, dir: '/data/backups',
+          lastBackup: { name: 'mas-backup-test.tar.gz', createdAt: 1760000000 },
+          config: { enabled: false, scheduleKind: 'cron', schedule: '', keep: 7,
+            telegramTarget: '', telegramChannel: '', includeSecrets: false,
+            notifyAfterBackup: false, lastJobStatus: '' } } });
+    }
+    if (clean.endsWith('/agent/browser')) {
+      return json({
+        ok: true, cdpPort: 9223,
+        profile: { key: 'agent', fa: '\u06a9\u0631\u0648\u0645 \u0627\u06cc\u062c\u0646\u062a', dir: '/data/ai-profile' },
+        version: { ok: true, Browser: 'Chrome/155.0.8059.39' },
+        tabs: { ok: true, count: 1, tabs: [{ id: 'T1', title: 'DeepSeek',
+          url: 'https://chat.deepseek.com/' }] },
+        history: { ok: true, totals: { visits: 2 }, visits: [{ url: 'https://old.example/',
+          title: '\u0635\u0641\u062d\u0647\u0654 \u0628\u0633\u062a\u0647', at: 1759990000,
+          timeText: '2026-10-10 07:00', visitCount: 1, transition: '\u0644\u06cc\u0646\u06a9' }],
+          searches: [{ term: 'deepseek', timeText: '' }], downloads: [] },
+        closedTabs: [{ url: 'https://old.example/', title: '\u0635\u0641\u062d\u0647\u0654 \u0628\u0633\u062a\u0647',
+          timeText: '2026-10-10 07:00' }],
+        closedTabsNote: 'derived from history' });
+    }
+    if (clean.endsWith('/agent/browser/tabs')) {
+      return json({ ok: true, tabs: [{ id: 'T1', title: 'DeepSeek', url: 'https://chat.deepseek.com/' }] });
+    }
+    if (clean.endsWith('/agent/browser/history')) {
+      return json({ ok: true, visits: [], searches: [], downloads: [], totals: {} });
+    }
+    if (clean.endsWith('/agent/notes')) {
+      return json({ notes: [{ id: 'note-1', kind: 'note',
+        body: '\u06cc\u0627\u062f\u062f\u0627\u0634\u062a', created_at: 1760000000 }] });
+    }
+    if (clean.endsWith('/agent/audit')) {
+      return json({ audit: [{ at: 1760000000, actor: 'operator',
+        action: 'setting.stored', detail: 'telegram.mode' }] });
     }
     if (path.endsWith('/status')) {
       return json(statusPayload || { runId: null, status: 'idle', entries: [], history: [] });
@@ -59,6 +216,86 @@ function fakeApi(requests, posts = [], statusPayload = null) {
           stepLabel: 'خواندن صفحه', chars: 25, createdAt: 1760000050 },
       ] });
     }
+    if (clean.endsWith('/agent/chat/messages')) {
+      return json({ messages: [
+        { id: 'm1', role: 'user', body: '\u0633\u0644\u0627\u0645', provider: 'deepseek',
+          status: 'done', error: '', meta: {}, created_at: 1760000000 },
+        { id: 'm2', role: 'assistant', provider: 'deepseek', status: 'done', error: '',
+          body: '\u0633\u0644\u0627\u0645! \u0686\u0647 \u06a9\u0627\u0631\u06cc \u0627\u0646\u062c\u0627\u0645 \u0628\u062f\u0647\u0645\u061f\n```json\n'
+            + '{"name":"proposal","steps":[{"type":"click","x":10,"y":20}]}\n```',
+          meta: { flow: { name: 'proposal', steps: [{ type: 'click', x: 10, y: 20 }] },
+                  elapsed: 4200 },
+          created_at: 1760000010 },
+        { id: 'm3', role: 'assistant', body: '', provider: 'deepseek',
+          status: 'thinking', error: '', meta: {}, created_at: 1760000020 },
+      ], pending: [{ id: 'm3' }], providers: ['deepseek', 'generic'] });
+    }
+    if (clean.endsWith('/agent/chat/send')) return json({ queued: true, messages: [] });
+    if (clean.endsWith('/agent/chat/clear')) return json({ cleared: 3 });
+    if (clean.endsWith('/agent/chat/apply-flow')) {
+      return json({ flow: { name: 'proposal',
+        steps: [{ id: 'a', type: 'click', x: 10, y: 20, label: 'click 10,20' }] } });
+    }
+    if (clean.endsWith('/agent/operations')) {
+      return json({ operations: [
+        { id: 'op-builtin-lmarena', name: '\u0627\u062a\u0635\u0627\u0644 \u0628\u0647 \u0627\u06cc\u062c\u0646\u062a lmarena',
+          description: '\u0633\u0627\u06cc\u062a \u0631\u0627 \u0628\u0627\u0632 \u0645\u06cc\u200c\u06a9\u0646\u062f', kind: 'browser',
+          builtin: true, builtinKey: 'lmarena', tags: ['chat'], steps: [
+            { type: 'agent_open', provider: 'lmarena', url: 'https://lmarena.ai/' },
+            { type: 'wait', ms: 1500 }],
+          created_at: 1760000000, updated_at: 1760000000, last_run_at: 1760000900,
+          last_status: 'done', run_count: 3 },
+        { id: 'op-1', name: 'my operation', description: '', kind: 'custom',
+          builtin: false, builtinKey: '', tags: [], steps: [{ type: 'click', x: 5, y: 6 }],
+          created_at: 1760000000, updated_at: 1760000000, last_run_at: 0,
+          last_status: '', run_count: 0 },
+      ], stepTypes: {
+        click: { required: ['x', 'y'], optional: ['button'], common: ['waitAfterMs'],
+                 fa: '\u06a9\u0644\u06cc\u06a9', en: 'Click a point' },
+        wait: { required: [], optional: ['ms'], common: [], fa: '\u0635\u0628\u0631', en: 'Wait' },
+        agent_open: { required: [], optional: ['provider', 'url'], common: [],
+                      fa: '\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 \u0686\u062a', en: 'Open a chat' },
+      } });
+    }
+    if (clean.endsWith('/agent/operation-run')) {
+      return json({ started: true, id: 'op-1', status: 'running',
+                    flow: { name: 'my operation', steps: [{ type: 'click', x: 5, y: 6 }] } });
+    }
+    if (clean.endsWith('/agent/key')) {
+      return json({ set: true, enabled: true, createdAt: 1759900000,
+                    lastUsedAt: 1760000000, length: 43, prefix: 'mas_\u20269f2c' });
+    }
+    if (clean.endsWith('/agent/key/reveal')) return json({ key: 'mas_test_key_value' });
+    if (clean.endsWith('/agent/key/rotate')) {
+      return json({ key: 'mas_rotated_key', info: { set: true, enabled: true } });
+    }
+    if (clean.endsWith('/agent/api-index')) {
+      return json({ endpoints: [
+        { method: 'GET',
+          path: 'https://af9833d9.eu-center.hostim.dev/automation/api/agent',
+          fa: '\u0646\u0642\u0634\u0647', en: 'The full map' },
+        { method: 'POST',
+          path: 'https://af9833d9.eu-center.hostim.dev/automation/api/run',
+          fa: '\u0627\u062c\u0631\u0627', en: 'Run a flow' }],
+        keyWays: ['Authorization: Bearer <key>', 'x-agent-key: <key>', '?k=<key>'] });
+    }
+    if (clean.endsWith('/agent/cursor')) {
+      return json({ cursor: { enabled: true, size: 44, color: '#ffd400',
+                              outline: '#1b1b1b', ripple: true, applied: true } });
+    }
+    if (path.endsWith('/pages')) {
+      return json({ pages: [{ id: 'p1', pageKey: 'lmarena.ai/', title: 'Battle Arena',
+        url: 'https://lmarena.ai/', screenshot: 'shots/a.png', publicShot: 'a.png',
+        capturedAt: 1760000000, elements: 12, challengeDetected: false, cdp: true }] });
+    }
+    if (clean.endsWith('/detect')) {
+      return json({ ok: true, snapshot: { id: 'p1', pageKey: 'lmarena.ai/',
+        title: 'Battle Arena', url: 'https://lmarena.ai/', screenshot: 'shots/a.png',
+        publicShot: 'a.png', capturedAt: 1760000000, challengeDetected: false,
+        challenge: { detected: false, signals: [] }, text: 'Start game',
+        elements: [{ tag: 'button', selector: 'button#start', text: 'Start game',
+                     href: '', desktop: { x: 512, y: 384 } }] } });
+    }
     if (path.endsWith('/flows')) {
       return json({ flows: [
         { name: 'Google Search', steps: 10, updatedAt: 1760000000, description: 'جستجو' },
@@ -71,7 +308,8 @@ function fakeApi(requests, posts = [], statusPayload = null) {
 
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
 async function mount({ readyStateComplete = true, standalone = false, flow = null,
-                      status: statusPayload = null } = {}) {
+                      status: statusPayload = null, noAgent = false,
+                      clipText = null } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -86,8 +324,15 @@ async function mount({ readyStateComplete = true, standalone = false, flow = nul
   });
   const { window } = dom;
   // The dedicated panel page sets this class on <body>; the sidebar reads it to
-  // know it is the whole page rather than an overlay inside noVNC.
-  if (standalone) window.document.body.classList.add('mas-standalone');
+  // know it is the whole page rather than an overlay inside noVNC. It also
+  // ships an empty header the sidebar fills with title, tabs, dot and the
+  // desktop-view button (see panel.html).
+  if (standalone) {
+    window.document.body.classList.add('mas-standalone');
+    const head = window.document.createElement('header');
+    head.className = 'mas-page-head';
+    window.document.body.insertBefore(head, window.document.body.firstChild);
+  }
 
   const timers = [];
   const realSetInterval = globalThis.setInterval;
@@ -97,9 +342,13 @@ async function mount({ readyStateComplete = true, standalone = false, flow = nul
     localStorage: window.localStorage, HTMLElement: window.HTMLElement,
     Element: window.Element, Node: window.Node, Event: window.Event,
     CustomEvent: window.CustomEvent, getComputedStyle: window.getComputedStyle.bind(window),
+    // A screenshot is fetched as a blob and turned into an object URL.
+    URL: Object.assign(function URL() {}, window.URL || URL, {
+      createObjectURL: () => 'blob:fake', revokeObjectURL: () => {},
+    }),
     requestAnimationFrame: window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window) : (fn) => setTimeout(fn, 0),
-    fetch: fakeApi(requests, posts, statusPayload),
+    fetch: fakeApi(requests, posts, statusPayload, noAgent, clipText),
     // Tracked so cleanup() can stop the sidebar's poll loops, otherwise the
     // test process never exits. Bound to the originals: referencing the global
     // here would recurse into this very wrapper.
@@ -176,6 +425,10 @@ test('the sidebar mounts without throwing', async () => {
 test('a valid flow renders the step list (the appendChild(null) crash)', async () => {
   const page = await mount();
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     const pane = page.doc.getElementById('mas-tab-flow');
     assert.ok(pane, 'flow tab missing');
     assert.ok(pane.querySelector('.mas-steps'), 'step list was not rendered');
@@ -201,6 +454,10 @@ test('typing mode settings, per-step overrides and human-verification steps edit
   };
   const page = await mount({ flow });
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     const globalMode = page.doc.getElementById('mas-flow-typing-mode');
     assert.ok(globalMode, 'flow-level typing mode selector is missing');
     assert.equal(globalMode.value, 'low');
@@ -303,21 +560,22 @@ test('tabs swap panes and only one is visible', async () => {
   try {
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const tabs = Array.from(page.doc.querySelectorAll('.mas-tab'));
-    assert.deepEqual(tabs.map((n) => n.dataset.tab),
-      ['flow', 'record', 'pages', 'shots', 'texts', 'ai', 'log']);
+    assert.deepEqual(tabs.map((n) => n.dataset.tab), TAB_ORDER);
 
-    tabs[5].dispatchEvent(new page.window.Event('click'));  // AI tab
-    assert.equal(page.display('#mas-tab-ai'), 'block');
+    clickTab(page, 'agent');                                // coworker agent
+    assert.equal(page.display('#mas-tab-agent'), 'block');
     assert.equal(page.display('#mas-tab-flow'), 'none');
-    assert.ok(page.doc.querySelector('#mas-tab-ai textarea'), 'the import box is missing');
+    assert.ok(page.doc.querySelector('#mas-tab-agent [data-sub]'),
+      'the agent sub-tabs are missing');
 
-    tabs[3].dispatchEvent(new page.window.Event('click'));  // screenshots
-    assert.equal(page.display('#mas-tab-shots'), 'block');
-    assert.equal(page.display('#mas-tab-ai'), 'none');
-
-    tabs[4].dispatchEvent(new page.window.Event('click'));  // extracted texts
-    assert.equal(page.display('#mas-tab-texts'), 'block');
-    assert.equal(page.display('#mas-tab-shots'), 'none');
+    clickTab(page, 'db');                                   // database sub-tabs
+    assert.equal(page.display('#mas-tab-db'), 'block');
+    assert.equal(page.display('#mas-tab-agent'), 'none');
+    clickDbSub(page, 'shots');                              // screenshots
+    assert.ok(page.doc.querySelector('#mas-tab-db [data-dbsub="shots"].is-active'));
+    clickDbSub(page, 'texts');                              // extracted texts
+    assert.ok(page.doc.querySelector('#mas-tab-db [data-dbsub="texts"].is-active'));
+    assert.ok(!page.doc.querySelector('#mas-tab-db [data-dbsub="shots"].is-active'));
   } finally {
     await page.cleanup();
   }
@@ -326,6 +584,10 @@ test('tabs swap panes and only one is visible', async () => {
 test('adding a step through the UI creates a row', async () => {
   const page = await mount();
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const pane = page.doc.getElementById('mas-tab-flow');
     const select = pane.querySelector('select');
@@ -403,12 +665,17 @@ test('a wrong token says so in the banner, not in a toast', async () => {
   }
 });
 
-test('the panel declares a dark colour scheme so dropdowns do not turn white', async () => {
+test('the panel follows the persisted theme from the database', async () => {
   const page = await mount();
   try {
+    await authenticate(page);
+    // the fake /agent carries ui.theme=dark: boot must honour the db choice
+    const applied = await page.until(
+      () => page.doc.documentElement.dataset.theme === 'dark');
+    assert.ok(applied, 'the persisted dark theme was never applied');
     const root = page.doc.getElementById('mas-root');
     assert.equal(page.window.getComputedStyle(root).colorScheme, 'dark',
-      'without color-scheme:dark Chrome paints the opened <select> popup white');
+      'widgets must follow the chosen theme, not fight it');
   } finally {
     await page.cleanup();
   }
@@ -417,18 +684,46 @@ test('the panel declares a dark colour scheme so dropdowns do not turn white', a
 test('step list shows no numbering and options are styled dark', async () => {
   const page = await mount();
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     const list = page.doc.querySelector('.mas-steps');
     assert.equal(page.window.getComputedStyle(list).listStyleType, 'none');
-    assert.ok(page.window.getComputedStyle(page.doc.querySelector('select.mas-input'))
-      .backgroundColor.startsWith('rgb(18, 21, 26)'), 'the select must not be white');
+    // jsdom does not resolve var(), so check the token layer in the source:
+    // the select paints with --bg-solid, which both themes define.
+    // jsdom shadows the global URL, so derive the path as a plain string.
+    const cssPath = decodeURIComponent(import.meta.url.replace(/^file:\/\//, ''))
+      .replace(/tests\/test_ui\.mjs$/, 'automation/static/automation.css');
+    const css = fs.readFileSync(cssPath, 'utf8');
+    assert.match(css, /select\.mas-input \{[^}]*background: var\(--bg-solid\)/s,
+      'selects must use the surface token');
+    assert.match(css, /:root \{[^}]*--bg-solid: #ffffff/s, 'light token missing');
+    assert.match(css, /html\[data-theme='dark'\] \{[^}]*--bg-solid: #171b21/s,
+      'dark token missing');
   } finally {
     await page.cleanup();
   }
 });
 
+/** Tabs by name. Chat is first and the library comes before the stages. */
+const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages',
+  'db', 'settings', 'agent', 'log'];
+
+function tab(page, name) {
+  const node = Array.from(page.doc.querySelectorAll('.mas-tab'))
+    .find((item) => item.dataset.tab === name);
+  assert.ok(node, `no tab named ${name}`);
+  return node;
+}
+
+function clickTab(page, name) {
+  tab(page, name).dispatchEvent(new page.window.Event('click'));
+}
+
 async function enableRecording(page) {
   page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-  const recordTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[1];
+  const recordTab = tab(page, 'record');
   recordTab.dispatchEvent(new page.window.Event('click'));
   const toggle = Array.from(page.doc.querySelectorAll('#mas-tab-record button'))[0];
   toggle.dispatchEvent(new page.window.Event('click'));
@@ -447,7 +742,7 @@ test('recording Persian keystrokes becomes a paste step, not type', async () => 
     key('Enter');  // non-printable: flushes the buffer into one step
     await page.wait(10);
 
-    page.doc.querySelectorAll('.mas-tab')[0].dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'flow');
     const types = Array.from(page.doc.querySelectorAll('.mas-step .mas-type'))
       .map((n) => n.textContent);
     assert.deepEqual(types, ['paste', 'key'],
@@ -470,7 +765,7 @@ test('recording ASCII keystrokes still becomes a type step', async () => {
     key('Enter');
     await page.wait(10);
 
-    page.doc.querySelectorAll('.mas-tab')[0].dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'flow');
     const types = Array.from(page.doc.querySelectorAll('.mas-step .mas-type'))
       .map((n) => n.textContent);
     assert.deepEqual(types, ['type', 'key']);
@@ -482,6 +777,10 @@ test('recording ASCII keystrokes still becomes a type step', async () => {
 test('editing a step refreshes its label instead of keeping paste ""', async () => {
   const page = await mount();
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const pane = page.doc.getElementById('mas-tab-flow');
     const select = pane.querySelector('select');
@@ -512,6 +811,10 @@ test('editing a step refreshes its label instead of keeping paste ""', async () 
 test('a hand written label survives editing the step', async () => {
   const page = await mount();
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const pane = page.doc.getElementById('mas-tab-flow');
     pane.querySelector('select').value = 'paste';
@@ -535,7 +838,7 @@ test('a hand written label survives editing the step', async () => {
   }
 });
 
-test('the AI tab sends the user request and an absolute origin', async () => {
+test('the agent assistant sends the user request and an absolute origin', async () => {
   const page = await mount();
   try {
     const input = page.doc.getElementById('mas-token-input');
@@ -543,10 +846,7 @@ test('the AI tab sends the user request and an absolute origin', async () => {
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
 
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[5];
-    aiTab.dispatchEvent(new page.window.Event('click'));
-    await page.wait(10);
+    await openPrompt(page);
 
     const box = page.doc.getElementById('mas-ai-request');
     assert.ok(box, 'the request box is missing');
@@ -554,12 +854,12 @@ test('the AI tab sends the user request and an absolute origin', async () => {
     box.dispatchEvent(new page.window.Event('input'));
 
     // Switching tabs and back must not lose what the human typed.
-    page.doc.querySelectorAll('.mas-tab')[0].dispatchEvent(new page.window.Event('click'));
-    aiTab.dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'flow');
+    clickTab(page, 'agent');
     await page.wait(10);
     assert.equal(page.doc.getElementById('mas-ai-request').value, 'روی اولین نتیجه کلیک کن');
 
-    const build = Array.from(page.doc.querySelectorAll('#mas-tab-ai button'))
+    const build = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
       .find((b) => b.textContent.includes('🧩'));
     build.dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
@@ -581,17 +881,21 @@ test('the standalone panel opens full page and explains recording', async () => 
     assert.equal(page.display('#mas-toggle'), 'none', 'the collapse tab should be gone');
     assert.notEqual(page.display('#mas-panel'), 'none', 'the panel should be open');
 
-    // A way back to the live browser view.
-    const link = page.doc.querySelector('.mas-vnclink');
-    assert.ok(link, 'no link to the browser view');
-    assert.equal(link.getAttribute('href'), '../vnc.html');
+    // A way back to the live desktop view, opening in a new tab.
+    const link = page.doc.querySelector('.mas-desktop-link');
+    assert.ok(link, 'no link to the desktop view');
+    assert.ok(link.textContent.includes('نمای دسکتاپ'), link.textContent);
+    assert.equal(link.getAttribute('href'),
+      '../vnc.html?autoconnect=true&resize=scale&path=websockify');
+    assert.equal(link.getAttribute('target'), '_blank');
 
     // Recording is the one thing that cannot work away from the browser view.
-    page.doc.querySelectorAll('.mas-tab')[1].dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'record');
     const pane = page.doc.getElementById('mas-tab-record');
     assert.equal(pane.querySelectorAll('button').length, 1,
       'only Clear should remain: ' + pane.textContent);
-    assert.ok(pane.querySelector('a[href="../vnc.html"]'), 'no link to record from');
+    assert.ok(pane.querySelector('a[href^="../vnc.html?autoconnect"]'),
+      'no link to record from');
     assert.ok(pane.textContent.length > 40, 'the explanation is missing');
   } finally {
     await page.cleanup();
@@ -640,6 +944,10 @@ test('a finished run shows the board, per step badges and a report button', asyn
   };
   const page = await mount({ status, flow });
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     // The poll only reaches /status once a token is set.
     const input = page.doc.getElementById('mas-token-input');
     input.value = VALID_TOKEN;
@@ -671,6 +979,10 @@ test('a finished run shows the board, per step badges and a report button', asyn
 test('the flow tab can also copy the run report', async () => {
   const page = await mount();
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     const pane = page.doc.getElementById('mas-tab-flow');
     const button = Array.from(pane.querySelectorAll('button'))
       .find((b) => b.textContent.includes('کپی گزارش اجرا'));
@@ -700,6 +1012,10 @@ test('clear all removes every step after asking', async () => {
   };
   const page = await mount({ flow });
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     const pane = page.doc.getElementById('mas-tab-flow');
     assert.equal(pane.querySelectorAll('.mas-step').length, 3);
 
@@ -750,10 +1066,7 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
     input.value = VALID_TOKEN;
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const aiTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[5];
-    aiTab.dispatchEvent(new page.window.Event('click'));
-    await page.wait(10);
+    await openPrompt(page);
 
     const reply = page.doc.getElementById('mas-ai-reply');
     assert.ok(reply, 'no AI reply box');
@@ -762,7 +1075,7 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
       + '### ۳) سؤال و نکته\nکدام نتیجه را کلیک کنم؟';
     reply.dispatchEvent(new page.window.Event('input'));
 
-    const build = Array.from(page.doc.querySelectorAll('#mas-tab-ai button'))
+    const build = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
       .find((b) => b.textContent.includes('🧩'));
     build.dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
@@ -773,11 +1086,11 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
       'the previous answer was not sent back');
 
     // Importing shows the model's prose, not just its code.
-    const importBtn = Array.from(page.doc.querySelectorAll('#mas-tab-ai button'))
+    const importBtn = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
       .find((b) => b.textContent.includes('وارد کردن'));
     importBtn.dispatchEvent(new page.window.Event('click'));
     await page.wait(40);
-    aiTab.dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'agent');
     await page.wait(10);
     const notes = page.doc.querySelector('.mas-ai-notes');
     assert.ok(notes, 'the AI notes box did not appear');
@@ -794,6 +1107,10 @@ test('the AI answer is kept and handed back on the next prompt', async () => {
 test('the saved flow library lists, loads, runs and deletes', async () => {
   const page = await mount();
   try {
+    // The panel opens on the chat tab now, so the stages are drawn on
+    // demand like every other pane.
+    clickTab(page, 'flow');
+    await page.wait(10);
     const input = page.doc.getElementById('mas-token-input');
     input.value = VALID_TOKEN;
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
@@ -827,10 +1144,10 @@ test('the screenshots tab lists every shot with time, size and link', async () =
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const shotsTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[3];
-    shotsTab.dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'db');
+    clickDbSub(page, 'shots');
 
-    const pane = page.doc.getElementById('mas-tab-shots');
+    const pane = page.doc.getElementById('mas-tab-db');
     assert.ok(await page.until(() => pane.querySelectorAll('.mas-shot').length === 2),
       'the shots never listed: ' + pane.textContent);
 
@@ -857,10 +1174,10 @@ test('the texts tab lists saved text and can save a new note', async () => {
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const textsTab = Array.from(page.doc.querySelectorAll('.mas-tab'))[4];
-    textsTab.dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'db');
+    clickDbSub(page, 'texts');
 
-    const pane = page.doc.getElementById('mas-tab-texts');
+    const pane = page.doc.getElementById('mas-tab-db');
     assert.ok(await page.until(() => pane.querySelectorAll('.mas-text').length === 1),
       'the texts never listed: ' + pane.textContent);
     assert.ok(pane.textContent.includes('Battle Arena'), 'the saved text is missing');
@@ -885,6 +1202,921 @@ test('record layer stays hidden until recording starts', async () => {
   const page = await mount();
   try {
     assert.equal(page.display('#mas-record-layer'), 'none');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The coworker agent tab
+ * ------------------------------------------------------------------ */
+
+const AGENT_SUB_LABELS = ['پرامپت', 'صفحه اختصاصی', 'پیشنهادات ایجنت',
+  'کلید ایجنت', 'تلگرام', 'مرورگر', 'نشانگر', 'وظایف', 'کپچا', 'اسکریپت',
+  'داده‌ها', 'کلیدها'];
+
+/** Open the panel, authenticate, switch to the agent tab and one sub-pane. */
+async function openAgentSub(page, label) {
+  const input = page.doc.getElementById('mas-token-input');
+  input.value = VALID_TOKEN;
+  page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+  await page.wait(60);
+  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+  clickTab(page, 'agent');
+  const ready = await page.until(
+    () => page.doc.querySelectorAll('#mas-tab-agent [data-sub]').length
+      === AGENT_SUB_LABELS.length);
+  assert.ok(ready, 'the agent sub-tabs never rendered');
+  if (!label) return;
+  const sub = Array.from(page.doc.querySelectorAll('#mas-tab-agent [data-sub]'))
+    .find((node) => node.textContent.trim() === label);
+  assert.ok(sub, `sub-tab ${label} is missing`);
+  sub.dispatchEvent(new page.window.Event('click'));
+  await page.until(() => page.doc.querySelector('#mas-agent-sub .mas-box') !== null);
+}
+
+/** Authenticate and open the agent's prompt sub-tab (the first one). */
+async function openPrompt(page) {
+  const input = page.doc.getElementById('mas-token-input');
+  input.value = VALID_TOKEN;
+  page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+  await page.wait(60);
+  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+  clickTab(page, 'agent');
+  const ready = await page.until(() => page.doc.getElementById('mas-ai-request') !== null);
+  assert.ok(ready, 'the prompt sub-tab never rendered');
+}
+
+/** Switch inside the telegram pane to one of its nested sub-tabs. */
+function clickTgSub(page, name) {
+  const sub = page.doc.querySelector(`#mas-agent-sub [data-tgsub="${name}"]`);
+  assert.ok(sub, `telegram sub-tab ${name} is missing`);
+  sub.dispatchEvent(new page.window.Event('click'));
+}
+
+/** Switch inside the database tab to one of its three sub-tabs. */
+function clickDbSub(page, name) {
+  const sub = page.doc.querySelector(`#mas-tab-db [data-dbsub="${name}"]`);
+  assert.ok(sub, `db sub-tab ${name} is missing`);
+  sub.dispatchEvent(new page.window.Event('click'));
+}
+
+function paneText(page) {
+  const pane = page.doc.getElementById('mas-agent-sub');
+  return pane ? pane.textContent : '';
+}
+
+function findButton(page, needle, scope = '#mas-tab-agent') {
+  return Array.from(page.doc.querySelectorAll(`${scope} button`))
+    .find((node) => node.textContent.includes(needle));
+}
+
+test('the agent tab lists its sub-panes and the chat tab keeps the assistant', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page);
+    const labels = Array.from(page.doc.querySelectorAll('#mas-tab-agent [data-sub]'))
+      .map((node) => node.textContent.trim());
+    assert.deepEqual(labels, AGENT_SUB_LABELS);
+    // The prompt workspace is the agent's first sub-tab now; the chat tab
+    // only keeps a pointer button, so there is one home for prompts.
+    assert.equal(page.doc.querySelectorAll('#mas-tab-agent [data-sub]')[0]
+      .textContent.trim(), 'پرامپت', 'the prompt sub-tab must come first');
+    assert.ok(page.doc.getElementById('mas-ai-request'), 'the request box is gone');
+    assert.ok(page.doc.getElementById('mas-ai-reply'), 'the import box is gone');
+    assert.ok(findButton(page, '🧩', '#mas-tab-agent'), 'the copy-prompt button is gone');
+    assert.ok(findButton(page, '🤖', '#mas-tab-agent'),
+      'the ask-the-agent-directly button is missing');
+    clickTab(page, 'chat');
+    await page.wait(10);
+    assert.ok(!page.doc.querySelector('#mas-tab-chat #mas-ai-request'),
+      'the chat tab must not embed a second prompt workspace');
+    // the chat tab keeps no prompt toolbox at all any more: the prompt
+    // sub-tab is the single home, and the header must stay quiet.
+    assert.ok(!page.doc.querySelector('#mas-tab-chat .mas-chat-tools'),
+      'the chat tab must not carry the old toolbox');
+    assert.ok(!findButton(page, 'پرامپت', '#mas-tab-chat'),
+      'no pointer button should remain in the chat tab');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the kill switch posts to the API', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page);
+    // The status bar is filled by a second request, so wait for it rather than
+    // racing the render.
+    assert.ok(await page.until(() => findButton(page, 'کلید قطع') !== undefined),
+      'the kill switch button is missing');
+    const kill = findButton(page, 'کلید قطع');
+    kill.dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/kill-switch')));
+    const sent = page.posts.find((post) => post.url.endsWith('/agent/kill-switch'));
+    assert.deepEqual(JSON.parse(sent.body), { on: true });
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the jobs pane lists a schedule and can fire it by hand', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'وظایف');
+    assert.ok(await page.until(() => paneText(page).includes('صبح')),
+      'the saved job never appeared');
+    assert.ok(paneText(page).includes('cron: 30 7 * * *'), 'the schedule is not shown');
+    findButton(page, 'همین حالا').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/job-run')));
+    const sent = page.posts.find((post) => post.url.endsWith('/agent/job-run'));
+    assert.deepEqual(JSON.parse(sent.body), { id: 'job-1' });
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('a pending script shows the approval gate and approving posts it', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'اسکریپت');
+    assert.ok(await page.until(() => paneText(page).includes('pending')),
+      'the script status never appeared');
+    // The gate is explained in the UI, not only enforced on the server.
+    assert.ok(paneText(page).includes('تا تأیید شما اجرا نمی‌شود'),
+      'the approval gate is not explained');
+    findButton(page, 'تأیید').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/script-decision')));
+    const sent = page.posts.find((post) => post.url.endsWith('/agent/script-decision'));
+    assert.deepEqual(JSON.parse(sent.body), { id: 'scr-1', approve: true });
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the telegram pane shows the saved target and can discover chats', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'تلگرام');
+    clickTgSub(page, 'targets');
+    // editable rows: the saved target shows up as an input value, not as text
+    assert.ok(await page.until(() => Array.from(
+      page.doc.querySelectorAll('#mas-agent-sub input'))
+      .some((node) => node.value === 'گروه من')),
+      'the configured target never appeared in an editable field');
+    findButton(page, 'پیدا کردن چت‌ها').dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => paneText(page).includes('Found group')),
+      'the discovered chat never appeared');
+    assert.ok(page.requests.some((url) => url.endsWith('/agent/telegram/targets')));
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the captcha pane says plainly what vision cannot solve', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'کپچا');
+    assert.ok(await page.until(() => paneText(page).includes('کلیک خودکار')),
+      'the captcha settings never rendered');
+    // The honest limitation has to be readable in the UI, not only in the docs.
+    assert.ok(paneText(page).includes('کپچاهای رفتاری'),
+      'the behavioural-captcha limitation is not stated');
+    const auto = Array.from(page.doc.querySelectorAll('#mas-agent-sub input[type=checkbox]'))
+      .find((node) => node.parentElement.textContent.includes('کلیک خودکار'));
+    assert.ok(auto, 'the automatic-click switch is missing');
+    assert.equal(auto.checked, false, 'automatic clicking must default to off');
+    findButton(page, 'تحلیل کپچای فعلی').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/captcha/solve')));
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the data pane offers a read-only query and shows the audit trail', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'داده‌ها');
+    assert.ok(await page.until(() => paneText(page).includes('یادداشت')),
+      'the notes never appeared');
+    assert.ok(paneText(page).includes('setting.stored'), 'the audit trail is not shown');
+    // the phase-9 db-window card is .mas-card; the classic query box is not
+    const sql = page.doc.querySelector('#mas-agent-sub .mas-box:not(.mas-card) textarea');
+    assert.ok(sql, 'the SQL box is missing');
+    sql.value = 'SELECT id, name FROM jobs';
+    sql.dispatchEvent(new page.window.Event('input'));
+    findButton(page, 'اجرا').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((post) => post.url.endsWith('/agent/query')));
+    const sent = page.posts.find((post) => post.url.endsWith('/agent/query'));
+    assert.deepEqual(JSON.parse(sent.body), { sql: 'SELECT id, name FROM jobs' });
+  } finally {
+    await page.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The chat tab: first in the row, and a real conversation
+ * ------------------------------------------------------------------ */
+
+/** Set the token and open the panel, the way an operator would. */
+async function authenticate(page) {
+  const input = page.doc.getElementById('mas-token-input');
+  input.value = VALID_TOKEN;
+  page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+  await page.wait(60);
+  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
+  await page.wait(10);
+}
+
+test('the chat tab is first and the panel opens on it', async () => {
+  const page = await mount();
+  try {
+    assert.equal(TAB_ORDER[0], 'chat', 'chat must be the first tab');
+    assert.equal(page.doc.querySelector('.mas-tab').dataset.tab, 'chat');
+    assert.equal(page.display('#mas-tab-chat'), 'block', 'the panel should open on chat');
+    assert.equal(page.display('#mas-tab-flow'), 'none');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the chat pane shows the conversation, the model and a pending answer', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    const listed = await page.until(
+      () => page.doc.querySelectorAll('#mas-chat-list .mas-bubble').length === 3);
+    assert.ok(listed, 'the conversation never rendered');
+
+    const bubbles = Array.from(page.doc.querySelectorAll('#mas-chat-list .mas-bubble'));
+    assert.ok(bubbles[0].classList.contains('is-mine'), 'the user message came second');
+    assert.ok(bubbles[1].classList.contains('is-ai'), 'the answer is not styled as the model');
+    assert.ok(page.doc.querySelector('#mas-chat-list .mas-thinking'),
+      'a pending answer must say it is still thinking');
+
+    const provider = page.doc.getElementById('mas-chat-provider');
+    assert.deepEqual(Array.from(provider.options).map((node) => node.value),
+      ['deepseek', 'generic'], 'the provider list comes from the server');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('sending a chat message posts the text and the provider', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    await page.until(() => page.doc.getElementById('mas-chat-input') !== null);
+    const box = page.doc.getElementById('mas-chat-input');
+    box.value = 'روی اولین نتیجه کلیک کن';
+    box.dispatchEvent(new page.window.Event('input'));
+    page.doc.getElementById('mas-chat-send').dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+
+    const sent = page.posts.find((item) => item.url.endsWith('/agent/chat/send'));
+    assert.ok(sent, '/agent/chat/send was never called');
+    const body = JSON.parse(sent.body);
+    assert.equal(body.text, 'روی اولین نتیجه کلیک کن');
+    assert.equal(body.provider, 'deepseek');
+    assert.equal(page.doc.getElementById('mas-chat-input').value, '',
+      'the composer should be empty after sending');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('a flow the model proposed can be applied to the stages', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    const applied = await page.until(() => Array.from(
+      page.doc.querySelectorAll('#mas-chat-list button'))
+      .some((node) => node.textContent.includes('⤓')));
+    assert.ok(applied, 'no apply button on the answer');
+    Array.from(page.doc.querySelectorAll('#mas-chat-list button'))
+      .find((node) => node.textContent.includes('⤓'))
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+
+    assert.ok(page.posts.some((item) => item.url.endsWith('/agent/chat/apply-flow')),
+      'apply-flow was never called');
+    assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'flow',
+      'applying a flow should take you to the stages');
+    assert.equal(page.doc.querySelectorAll('#mas-tab-flow .mas-step').length, 1);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The library tab: named operations
+ * ------------------------------------------------------------------ */
+
+test('the library lists operations, built-ins marked, before the stages tab', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    assert.equal(TAB_ORDER[1], 'library', 'the library comes right before the stages');
+    clickTab(page, 'library');
+    const listed = await page.until(
+      () => page.doc.querySelectorAll('#mas-tab-library .mas-op').length === 2);
+    assert.ok(listed, 'the operations never rendered');
+    const cards = Array.from(page.doc.querySelectorAll('#mas-tab-library .mas-op'));
+    assert.ok(cards[0].classList.contains('is-builtin'), 'the built-in is not marked');
+    assert.ok(cards[0].textContent.includes('اتصال به ایجنت lmarena'));
+    assert.ok(cards[0].textContent.includes('آخرین اجرا'),
+      'a built-in that ran should say when');
+    assert.ok(cards[1].textContent.includes('هنوز اجرا نشده'));
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('opening an operation puts its steps into the stages', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'library');
+    const ready = await page.until(() => Array.from(
+      page.doc.querySelectorAll('#mas-tab-library button'))
+      .some((node) => node.textContent.includes('باز کردن در مراحل')));
+    assert.ok(ready, 'no open button');
+    Array.from(page.doc.querySelectorAll('#mas-tab-library button'))
+      .find((node) => node.textContent.includes('باز کردن در مراحل'))
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+
+    assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'flow');
+    const types = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-step .mas-type'))
+      .map((node) => node.textContent);
+    assert.deepEqual(types, ['agent_open', 'wait'], 'the steps did not come across');
+    // The name field is the first input of the stages pane.
+    assert.equal(page.doc.querySelector('#mas-tab-flow input').value,
+      'اتصال به ایجنت lmarena', 'the operation name should become the flow name');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('running an operation hands it to the engine', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'library');
+    const ready = await page.until(() => Array.from(
+      page.doc.querySelectorAll('#mas-tab-library button'))
+      .some((node) => node.textContent.includes('▶')));
+    assert.ok(ready, 'no run button');
+    Array.from(page.doc.querySelectorAll('#mas-tab-library button'))
+      .find((node) => node.textContent.includes('▶'))
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const sent = page.posts.find((item) => item.url.endsWith('/agent/operation-run'));
+    assert.ok(sent, 'operation-run was never called');
+    assert.equal(JSON.parse(sent.body).id, 'op-builtin-lmarena');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Pages: the screenshot first, and a click that really clicks
+ * ------------------------------------------------------------------ */
+
+test('detecting a page puts the screenshot first, with an absolute link', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'pages');
+    // renderPages() fetches the list before it draws the buttons.
+    await page.until(() => page.doc.querySelector('#mas-tab-pages .mas-thumb') !== null);
+    await page.until(() => page.byText('button', '🔍 شناسایی صفحه') !== undefined);
+    page.byText('button', '🔍 شناسایی صفحه')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+
+    const detail = page.doc.getElementById('mas-page-detail');
+    assert.ok(detail, 'no detail pane');
+    assert.ok(detail.firstElementChild.classList.contains('mas-shotfirst'),
+      'the screenshot must be the first thing in the detail: '
+        + detail.firstElementChild.className);
+    assert.ok(detail.querySelector('.mas-shotfirst-img'), 'no image element');
+    const link = detail.querySelector('.mas-shotfirst-link');
+    assert.ok(link, 'no public link');
+    assert.ok(link.textContent.startsWith('https://example.trycloudflare.com/'),
+      'the link must be absolute: ' + link.textContent);
+    // And it comes before the list of older pages.
+    const body = Array.from(page.doc.getElementById('mas-tab-pages').children);
+    assert.ok(body.indexOf(detail) < body.findIndex((node) => node.classList.contains('mas-pages')),
+      'the detected page should sit above the list');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('clicking an element really clicks it on the desktop', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'pages');
+    await page.until(() => page.byText('button', '🔍 شناسایی صفحه') !== undefined);
+    page.byText('button', '🔍 شناسایی صفحه')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+    const real = Array.from(page.doc.querySelectorAll('#mas-page-detail button'))
+      .find((node) => node.textContent.includes('کلیک واقعی'));
+    assert.ok(real, 'no real-click button');
+    real.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+
+    const sent = page.posts.filter((item) => item.url.endsWith('/control')).pop();
+    assert.ok(sent, '/control was never called');
+    assert.deepEqual(JSON.parse(sent.body), { action: 'click', x: 512, y: 384 });
+    // The step-adding button is still there, and still only adds a step.
+    const before = page.posts.filter((item) => item.url.endsWith('/control')).length;
+    Array.from(page.doc.querySelectorAll('#mas-page-detail button'))
+      .find((node) => node.textContent.trim() === 'کلیک')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    assert.equal(page.posts.filter((item) => item.url.endsWith('/control')).length, before,
+      'adding a step must not click anything');
+    assert.equal(page.doc.querySelectorAll('#mas-tab-flow .mas-step').length, 1);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The agent key, the pointer, and both Telegram channels
+ * ------------------------------------------------------------------ */
+
+test('the key pane shows one key, reveals it on purpose, and can cut it', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'کلید ایجنت');
+    const text = paneText(page);
+    assert.ok(text.includes('mas_'), 'the key prefix is missing');
+    assert.ok(text.includes('تاریخ ساخت'), 'no creation date');
+    assert.ok(text.includes('۴۰۳') || text.includes('403'),
+      'the pane must say a cut key is refused with 403');
+
+    page.byText('button', '👁 نمایش کلید').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.doc.querySelector('.mas-keyvalue') !== null);
+    const revealed = page.doc.querySelector('.mas-keyvalue');
+    assert.equal(revealed.value, 'mas_test_key_value');
+    assert.ok(page.posts.some((item) => item.url.endsWith('/agent/key/reveal')),
+      'revealing must go through the API, which audits it');
+
+    page.byText('button', '⏸ قطع دسترسی').dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const cut = page.posts.filter((item) => item.url.endsWith('/agent/key/enable')).pop();
+    assert.ok(cut, 'cutting access never reached the API');
+    assert.equal(JSON.parse(cut.body).enabled, false);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the key pane lists absolute endpoints and the three ways to send the key', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'کلید ایجنت');
+    const ready = await page.until(
+      () => page.doc.querySelectorAll('#mas-agent-sub .mas-codeline').length >= 3);
+    assert.ok(ready, 'the three key ways never rendered');
+    const ways = Array.from(page.doc.querySelectorAll('#mas-agent-sub .mas-codeline code'))
+      .map((node) => node.textContent);
+    assert.deepEqual(ways, ['Authorization: Bearer <key>', 'x-agent-key: <key>', '?k=<key>']);
+
+    const rows = Array.from(page.doc.querySelectorAll('#mas-agent-sub .mas-table tr'));
+    const urls = rows.map((row) => row.textContent)
+      .filter((text) => text.includes('https://af9833d9'));
+    assert.equal(urls.length, 2, 'both endpoints should be absolute: ' + urls.join(' | '));
+    assert.ok(page.doc.querySelector('#mas-agent-sub .mas-table td .mas-btn'),
+      'every endpoint needs its own copy button');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the pointer pane edits the cursor and applies it to the browser', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'نشانگر');
+    const size = Array.from(page.doc.querySelectorAll('#mas-agent-sub input[type="number"]'))[0];
+    assert.equal(size.value, '44', 'the default size should be visible');
+    const colour = Array.from(page.doc.querySelectorAll('#mas-agent-sub input[type="color"]'))[0];
+    assert.equal(colour.value, '#ffd400', 'the pointer should be yellow by default');
+
+    size.value = '64';
+    size.dispatchEvent(new page.window.Event('input'));
+    page.byText('button', '💾 ذخیره و اعمال').dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const saved = page.posts.filter((item) => item.url.endsWith('/agent/cursor')).pop();
+    assert.ok(saved, 'the cursor was never saved');
+    assert.equal(JSON.parse(saved.body).size, 64);
+
+    page.byText('button', '🖱 حرکت نشانگر برای دیدن')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const moved = page.posts.filter((item) => item.url.endsWith('/control')).pop();
+    assert.ok(moved, 'the pointer never moved');
+    assert.equal(JSON.parse(moved.body).action, 'move');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the telegram pane offers both channels and routes each kind of message', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'تلگرام');
+    const modes = Array.from(page.doc.querySelectorAll('#mas-agent-sub select'))[0];
+    assert.deepEqual(Array.from(modes.options).map((node) => node.value),
+      ['off', 'bot', 'account', 'both'], 'both channels must be selectable');
+    clickTgSub(page, 'settings');
+    // renderAgentTelegram fetches before it paints, so wait for the rows.
+    const drawn = await page.until(() =>
+      page.doc.querySelectorAll('#mas-agent-sub .mas-tg-route').length === 4);
+    assert.ok(drawn, 'handoff, captcha, jobs and manual');
+    assert.ok(paneText(page).includes('تحویل به انسان'));
+    assert.ok(paneText(page).includes('هر دو'));
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the telegram test message always carries a target', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'تلگرام');
+    const target = Array.from(page.doc.querySelectorAll('#mas-agent-sub select'))
+      .find((node) => Array.from(node.options)
+        .some((option) => option.value === '-100123'));
+    assert.ok(target, 'the saved target is not offered');
+    page.byText('button', '✉ بفرست').dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const sent = page.posts.filter((item) => item.url.endsWith('/agent/telegram/test')).pop();
+    assert.ok(sent, 'the test message was never sent');
+    const body = JSON.parse(sent.body);
+    assert.equal(body.target, -100123, 'a test message without a target is useless');
+    assert.equal(body.channel, '');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * The run bar stays on screen
+ * ------------------------------------------------------------------ */
+
+test('the run bar sticks to the bottom without covering content', async () => {
+  const page = await mount({ standalone: true });
+  try {
+    const foot = page.doc.querySelector('.mas-foot');
+    const style = page.window.getComputedStyle(foot);
+    // the operator asked for it back as a floating bar: fixed at the bottom,
+    // full width, ONE row, with the body padded so nothing hides behind it.
+    assert.equal(style.position, 'fixed', 'the footer must float at the bottom');
+    assert.equal(style.bottom, '0px');
+    assert.equal(style.display, 'flex', 'the footer is a single row');
+    assert.equal(style.flexWrap, 'nowrap', 'the footer must never wrap');
+    assert.ok(foot.querySelector('#mas-run'), 'the run button left the footer');
+    assert.ok(foot.querySelector('#mas-progress'), 'the counter left the footer');
+    const body = page.window.getComputedStyle(page.doc.querySelector('.mas-body'));
+    assert.notEqual(body.paddingBottom, '0px',
+      'the body needs room above the floating footer');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('inside noVNC the footer stays part of the panel column', async () => {
+  const page = await mount();
+  try {
+    const style = page.window.getComputedStyle(page.doc.querySelector('.mas-foot'));
+    assert.notEqual(style.position, 'fixed',
+      'the overlay panel is already fixed; a second fixed footer would float over noVNC');
+    assert.notEqual(style.position, 'sticky',
+      'inside noVNC the footer scrolls with the panel column');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the agent can be given a message to send, with a purpose', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'تلگرام');
+    clickTgSub(page, 'write');
+    const ready = await page.until(
+      () => page.byText('button', '📤 فرستادن پیام دلخواه') !== undefined);
+    assert.ok(ready, 'the send box is missing');
+
+    // Without text it must refuse instead of sending an empty message.
+    page.byText('button', '📤 فرستادن پیام دلخواه')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    assert.equal(page.posts.filter((item) => item.url.endsWith('/agent/telegram/send')).length,
+      0, 'an empty message should not be sent');
+
+    const boxes = Array.from(page.doc.querySelectorAll('#mas-agent-sub .mas-box'));
+    const sendBox = boxes[boxes.length - 1];   // the write sub-tab's only card
+    const text = sendBox.querySelector('input.mas-input');
+    text.value = 'کار تمام شد';
+    text.dispatchEvent(new page.window.Event('input'));
+    const purpose = Array.from(sendBox.querySelectorAll('select')).pop();
+    purpose.value = 'jobs';
+    purpose.dispatchEvent(new page.window.Event('change'));
+    page.byText('button', '📤 فرستادن پیام دلخواه')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+
+    const sent = page.posts.filter((item) => item.url.endsWith('/agent/telegram/send')).pop();
+    assert.ok(sent, 'the message was never sent');
+    const body = JSON.parse(sent.body);
+    assert.equal(body.text, 'کار تمام شد');
+    assert.equal(body.purpose, 'jobs', 'the purpose decides which channel carries it');
+    assert.equal(body.target, undefined, 'no target means every saved one');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+
+test('without an agent the chat and library tabs disappear', async () => {
+  const page = await mount({ noAgent: true });
+  try {
+    await authenticate(page);
+    const hidden = await page.until(() => {
+      const chat = tab(page, 'chat');
+      const library = tab(page, 'library');
+      return chat.hidden && library.hidden;
+    });
+    assert.ok(hidden, 'both agent-only tabs should be hidden');
+    assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'flow',
+      'the panel must fall back to the stages');
+    assert.equal(page.display('#mas-tab-flow'), 'block');
+    // The rest is exactly the sidebar this project always had — settings
+    // stays visible because theme and clipboard work without the agent too.
+    assert.deepEqual(Array.from(page.doc.querySelectorAll('.mas-tab'))
+      .filter((node) => !node.hidden).map((node) => node.dataset.tab),
+    ['flow', 'record', 'pages', 'settings', 'agent', 'log']);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+/* ------------------------------------------------------------------ *
+ * Phase 9: settings tab, theme persistence, dedicated pages and the
+ * human-gated suggestion pipeline.
+ * ------------------------------------------------------------------ */
+
+test('the settings tab brings theme, clipboard bridge and devlog together', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'settings');
+    const ready = await page.until(
+      () => page.doc.getElementById('mas-clip-text') !== null);
+    assert.ok(ready, 'the clipboard card never rendered');
+    const pane = () => page.doc.getElementById('mas-tab-settings').textContent;
+
+    const dark = findButton(page, 'تاریک', '#mas-tab-settings');
+    assert.ok(dark, 'no dark theme button in the header card');
+    dark.dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    assert.equal(page.doc.documentElement.dataset.theme, 'dark');
+    const saved = page.posts.filter((p) => p.url.endsWith('/agent/settings')).pop();
+    assert.ok(saved, 'the theme choice was never persisted');
+    assert.equal(JSON.parse(saved.body)['ui.theme'], 'dark',
+      'the database is what makes the choice follow the operator');
+
+    assert.ok(await page.until(() => pane().includes('نامه به ایجنت')),
+      'the seeded devlog letter never appeared');
+
+    const read = findButton(page, 'از دسکتاپ بخوان', '#mas-tab-settings');
+    read.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() =>
+      page.doc.getElementById('mas-clip-text').value.includes('کلیپ')),
+      'reading the desktop clipboard never filled the box');
+    const write = findButton(page, 'بفرست به دسکتاپ', '#mas-tab-settings');
+    write.dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    assert.ok(page.posts.some((p) => p.url.endsWith('/clipboard')),
+      'writing to the desktop clipboard never hit the api');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the agent grows a dedicated-page sub-tab backed by the database', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    await openAgentSub(page, 'صفحه اختصاصی');
+    assert.ok(await page.until(() => paneText(page).includes('گزارش')),
+      'the saved page never showed up');
+    assert.ok(page.doc.querySelector('#mas-agent-sub iframe.mas-page-preview'),
+      'the sandboxed preview frame is missing');
+    const open = findButton(page, 'باز کردن', '#mas-agent-sub');
+    open.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() =>
+      page.doc.querySelector('#mas-agent-sub textarea').value.includes('<b>')),
+      'opening a page must load its HTML into the editor');
+    const save = findButton(page, '💾', '#mas-agent-sub');
+    save.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    assert.ok(page.posts.some((p) => p.url.endsWith('/agent/pages')),
+      'saving never hit /agent/pages');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('agent suggestions live behind human gates', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    await openAgentSub(page, 'پیشنهادات ایجنت');
+    assert.ok(await page.until(() => paneText(page).includes('تم پیش‌فرض')),
+      'the saved suggestion never showed up');
+    const detail = findButton(page, 'جزئیات', '#mas-agent-sub');
+    detail.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => paneText(page).includes('"key": "ui.theme"')),
+      'the before/after diff never rendered');
+    const apply = findButton(page, '⚙', '#mas-agent-sub');
+    assert.ok(apply, 'the apply button is missing');
+    // nothing is automatic: cancelling the confirm must not apply
+    page.window.confirm = () => false;
+    apply.dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    assert.ok(!page.posts.some((p) => p.url.endsWith('/agent/suggestion-apply')),
+      'apply fired even though the human cancelled');
+    page.window.confirm = () => true;
+    apply.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    assert.ok(page.posts.some((p) => p.url.endsWith('/agent/suggestion-apply')),
+      'apply never reached the api');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the data pane grows a read-only database window with masking', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'داده‌ها');
+    const schemaBtn = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
+      .find((b) => b.textContent.includes('نقشهٔ دیتابیس'));
+    assert.ok(schemaBtn, 'the schema button is missing');
+    schemaBtn.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.doc.querySelector('.mas-dbschema-out')
+      && page.doc.querySelector('.mas-dbschema-out').textContent.includes('settings')),
+      'the schema map never rendered');
+    const sql = page.doc.getElementById('mas-dbwin-sql');
+    sql.value = 'SELECT * FROM settings';
+    const runBtn = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
+      .find((b) => b.textContent.includes('کوئری فقط‌خواندنی'));
+    runBtn.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts
+      .some((post) => post.url.endsWith('/agent/db/query'))),
+      'the read-only query never hit the api');
+    assert.ok(await page.until(() => page.doc.querySelector('.mas-dbquery-out')
+      && page.doc.querySelector('.mas-dbquery-out').textContent.includes('ماسک‌شده')),
+      'masked values must be visible as masked, never as plaintext');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the standalone header is one line: tabs, dot and desktop button', async () => {
+  const page = await mount({ standalone: true });
+  try {
+    const head = page.doc.querySelector('.mas-page-head');
+    assert.ok(head, 'the page head is missing');
+    assert.ok(head.querySelector('.mas-tabs'), 'the tab row must live in the header');
+    const desktop = head.querySelector('.mas-desktop-link');
+    assert.ok(desktop, 'the desktop-view button is missing');
+    assert.ok(desktop.textContent.includes('نمای دسکتاپ'), desktop.textContent);
+    assert.equal(desktop.getAttribute('target'), '_blank');
+    assert.ok(desktop.getAttribute('href').includes('autoconnect=true'),
+      'the desktop link must carry the working query');
+    assert.ok(head.querySelector('#mas-conn'), 'the status dot belongs in the header');
+    assert.ok(!head.querySelector('.mas-theme-btn') &&
+      !page.doc.getElementById('mas-theme-toggle'),
+      'theme lives in the settings tab, not the header');
+    // order: logo, the word, the tabs, ... and the desktop button at the far
+    // left (last child in RTL); the tabs must wear the sub-tab graphic.
+    const kids = Array.from(head.children);
+    assert.ok(kids[0].classList.contains('mas-brand-logo'), 'the logo must come first');
+    assert.ok(kids[0].querySelector('svg'), 'the logo needs its mark');
+    assert.equal(kids[1].textContent.trim(), '\u0627\u062a\u0648\u0645\u0627\u0633\u06cc\u0648\u0646',
+      'the word \u0627\u062a\u0648\u0645\u0627\u0633\u06cc\u0648\u0646 belongs right after the logo');
+    assert.ok(kids[kids.length - 1].classList.contains('mas-desktop-link'),
+      'the desktop button closes the line at the left');
+    const tabsBox = page.window.getComputedStyle(head.querySelector('.mas-tabs'));
+    assert.equal(tabsBox.borderRadius, '12px',
+      'the header tab bar must be the framed segment, not a broken capsule');
+    const tabStyle = page.window.getComputedStyle(head.querySelector('.mas-tab'));
+    assert.equal(tabStyle.fontSize, '12.5px');
+    assert.equal(tabStyle.borderRadius, '999px');
+    // jsdom does not resolve var(), so the active chip's solid background is
+    // asserted from the stylesheet text instead of a computed color.
+    assert.ok(/\.mas-page-head \.mas-tab\.is-active\s*\{[^}]*background:\s*var\(--bg-solid\)/s.test(CSS),
+      'the active header tab needs the solid chip of the sub-tabs');
+    assert.ok(!page.doc.querySelector('.mas-page-head .mas-sub'),
+      'the extra subtitle line must be gone');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the database tab groups backups, screenshots and texts', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'db');
+    const labels = Array.from(page.doc.querySelectorAll('#mas-tab-db [data-dbsub]'))
+      .map((node) => node.textContent.trim());
+    assert.deepEqual(labels, ['پشتیبان‌گیری', 'اسکرین‌شات‌ها', 'متون استخراج‌شده']);
+    assert.ok(await page.until(() =>
+      page.doc.getElementById('mas-tab-db').textContent.includes('mas-backup-test') ||
+      page.doc.getElementById('mas-tab-db').textContent.includes('پشتیبان')),
+      'the backups sub-tab never rendered');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('language and theme both live in the settings tab', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'settings');
+    const fa = Array.from(page.doc.querySelectorAll('#mas-tab-settings button'))
+      .find((b) => b.textContent.trim() === 'FA');
+    const en = Array.from(page.doc.querySelectorAll('#mas-tab-settings button'))
+      .find((b) => b.textContent.trim() === 'EN');
+    assert.ok(fa && en, 'the language buttons are missing');
+    en.dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    const settingsTab = Array.from(page.doc.querySelectorAll('.mas-tab'))
+      .find((node) => node.dataset.tab === 'settings');
+    assert.equal(settingsTab.textContent.trim(), 'Settings',
+      'switching the language must re-render every label');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the flow tab has one floating action line above the footer', async () => {
+  const page = await mount({
+    standalone: true,
+    clipText: JSON.stringify({ name: '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
+      steps: [{ type: 'move', x: 5, y: 5 }] }),
+  });
+  try {
+    await authenticate(page);
+    clickTab(page, 'flow');
+    const bar = page.doc.querySelector('#mas-tab-flow .mas-flowbar');
+    assert.ok(bar, 'the action line is missing from the flow tab');
+    const style = page.window.getComputedStyle(bar);
+    assert.equal(style.position, 'fixed', 'the line must float above the footer');
+    assert.equal(style.bottom, '46px', 'it sits exactly on top of the footer');
+    assert.equal(style.flexWrap, 'nowrap', 'one line only');
+    const labels = Array.from(bar.querySelectorAll('button')).map((b) => b.textContent.trim());
+    for (const want of ['\u0630\u062e\u06cc\u0631\u0647', '\u0630\u062e\u06cc\u0631\u0647 \u0628\u0627 \u0646\u0627\u0645',
+      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc', '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u0628\u0648\u0631\u062f',
+      '\u067e\u0631\u0627\u0645\u067e\u062a']) {
+      assert.ok(labels.some((label) => label.includes(want)),
+        `the line lost its "${want}" button: ` + labels.join(' | '));
+    }
+
+    // leaving the tab takes the floating line with it
+    clickTab(page, 'db');
+    assert.equal(page.display('#mas-tab-flow'), 'none');
+
+    // the clipboard button really loads the flow JSON
+    clickTab(page, 'flow');
+    const clipBtn = Array.from(bar.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u0628\u0648\u0631\u062f'));
+    clipBtn.dispatchEvent(new page.window.Event('click'));
+    const flowPane = page.doc.getElementById('mas-tab-flow');
+    // the imported step shows up in the list and the name lands in the input
+    assert.ok(await page.until(() => flowPane.textContent.includes('move 5,5')),
+      'the clipboard flow never arrived: ' + flowPane.textContent.slice(0, 200));
+    assert.equal(flowPane.querySelector('input.mas-input').value,
+      '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
+      'the imported flow kept the wrong name');
+
+    // the prompt button jumps into the agent's prompt sub-tab
+    const promptBtn = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-flowbar button'))
+      .find((b) => b.textContent.includes('\u067e\u0631\u0627\u0645\u067e\u062a'));
+    promptBtn.dispatchEvent(new page.window.Event('click'));
+    assert.equal(page.display('#mas-tab-agent'), 'block', 'the agent tab should open');
+    const activeSub = page.doc.querySelector('#mas-tab-agent [data-sub].is-active');
+    assert.equal(activeSub.textContent.trim(), '\u067e\u0631\u0627\u0645\u067e\u062a');
   } finally {
     await page.cleanup();
   }

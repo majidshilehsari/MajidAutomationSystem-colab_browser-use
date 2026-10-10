@@ -1,5 +1,5 @@
 <!DOCTYPE html>
-<html lang="fa" dir="rtl">
+<html lang="fa" dir="rtl" data-theme="light">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -16,13 +16,14 @@
   The asset URLs below get a ?v=<hash> appended by automation/server.py on
   every start, so a new build is never served from the browser cache.
 -->
+<!-- Vazirmatn is self-hosted (automation.css @font-face): no external,
+     render-blocking request, so the page paints even fully offline. -->
 <link rel="stylesheet" href="automation.css">
 </head>
 <body class="mas-standalone">
-  <header class="mas-page-head">
-    <h1>🤖 پنل اتوماسیون</h1>
-    <span class="mas-sub">کنترل همان مرورگر، از صفحه‌ای جدا — اجرا روی سرور انجام می‌شود، نه در این تب</span>
-  </header>
+  <!-- One line only: desktop-view button, the tab row (moved here by the
+       script) and the status dot. Theme and language live in Settings. -->
+  <header class="mas-page-head"></header>
   <script type="module" src="automation.js"></script>
 </body>
 </html>

@@ -216,3 +216,54 @@ test('translate falls back to English then to the key', () => {
   assert.equal(translate('de', 'run'), 'Run');
   assert.equal(translate('fa', 'noSuchKey'), 'noSuchKey');
 });
+
+/* ------------------------------------------------------------------ *
+ * The agent's own step types
+ *
+ * They belong to the same editor as every other step: an operation from the
+ * library is opened into the stages, and a step type the editor does not know
+ * is a step the normaliser silently drops.
+ * ------------------------------------------------------------------ */
+
+test('the agent step types are part of the editor', () => {
+  for (const type of ['agent_open', 'agent_ask', 'captcha_solve']) {
+    assert.ok(stepDef(type), `${type} has no definition`);
+    const step = createStep(type);
+    assert.equal(step.type, type);
+    assert.ok(labelFor(step).length > 3, `${type} has no label`);
+  }
+  assert.equal(labelFor(createStep('agent_ask', { prompt: 'چه خبر؟' })),
+    'ask agent "چه خبر؟"');
+  assert.ok(labelFor(createStep('agent_open', { provider: 'deepseek' }))
+    .includes('deepseek'));
+});
+
+test('normalising keeps the agent steps instead of dropping them', () => {
+  const raw = {
+    name: 'اتصال به ایجنت',
+    steps: [
+      { type: 'agent_open', provider: 'lmarena', url: 'https://lmarena.ai/' },
+      { type: 'wait', ms: 1500 },
+      { type: 'agent_ask', prompt: 'سلام', saveAs: 'جواب ایجنت' },
+      { type: 'captcha_solve', label: 'کپچا' },
+    ],
+  };
+  const { flow, errors } = normaliseImportedFlow(raw);
+  assert.deepEqual(errors, [], errors.join(' | '));
+  assert.deepEqual(flow.steps.map((step) => step.type),
+    ['agent_open', 'wait', 'agent_ask', 'captcha_solve']);
+  assert.equal(flow.steps[2].prompt, 'سلام');
+  // Every step gets an id and a label, so the stages can render and run it.
+  for (const step of flow.steps) {
+    assert.ok(step.id, 'a step without an id cannot be tracked');
+    assert.ok(step.label, 'a step without a label reads as blank');
+  }
+});
+
+test('an agent_ask without a prompt is an error the operator can read', () => {
+  const { flow, errors } = normaliseImportedFlow(
+    { name: 'x', steps: [{ type: 'agent_ask' }] });
+  assert.equal(flow.steps.length, 1);
+  assert.ok(errors.length, 'a prompt is required by the server too');
+  assert.ok(errors.join(' ').includes('prompt'), errors.join(' | '));
+});

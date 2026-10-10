@@ -1,3 +1,29 @@
+/* Self-hosted Vazirmatn (OFL license beside the files). Relative to this
+ * stylesheet, which is copied to <web>/automation/automation.css, so the
+ * fonts live in <web>/automation/fonts/. No external request, no render
+ * blocking — the viewer paints even when the internet is filtered. */
+@font-face {
+  font-family: "Vazirmatn";
+  src: url("fonts/Vazirmatn-Regular.woff2") format("woff2");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Vazirmatn";
+  src: url("fonts/Vazirmatn-Medium.woff2") format("woff2");
+  font-weight: 500;
+  font-style: normal;
+  font-display: swap;
+}
+@font-face {
+  font-family: "Vazirmatn";
+  src: url("fonts/Vazirmatn-Bold.woff2") format("woff2");
+  font-weight: 700;
+  font-style: normal;
+  font-display: swap;
+}
+
 /* Automation sidebar.
  *
  * Everything is scoped under #mas-root so nothing leaks into noVNC's own
@@ -5,29 +31,95 @@
  * the left, and collapses to a single arrow button.
  */
 
+/* Phase-9 design tokens (operator's own pattern): every colour is a variable,
+   components never hardcode one, and the dark theme below only rewrites these
+   values — that is what makes the header toggle work everywhere at once.
+   Warm-neutral light space + a cool teal accent; status colours stay loud. */
+:root {
+  --bg-page: #eef1f4;
+  --bg-solid: #ffffff;
+  --bg-solid-97: var(--bg-solid-97);
+  --surface-2: #f7f8fa;
+  --surface-3: #f0f2f5;
+  --line: #dfe3e8;
+  --line-strong: #e7eaee;
+  --text: #26313d;
+  --text-2: #3b4857;
+  --dim: #64717f;
+  --faint: #94a0ac;
+  --accent: var(--accent);
+  --accent-2: var(--accent-2);
+  --accent-strong: var(--accent-strong);
+  --accent-mid: var(--accent-mid);
+  --accent-soft: rgba(15, 118, 110, 0.08);
+  --info: var(--info);
+  --info-2: var(--info-2);
+  --ok: var(--ok);
+  --ok-strong: var(--ok-strong);
+  --ok-soft: rgba(22, 163, 74, 0.10);
+  --bad: var(--bad);
+  --bad-strong: var(--bad-strong);
+  --bad-deep: var(--bad-deep);
+  --bad-soft: rgba(220, 38, 38, 0.08);
+  --warn: var(--warn);
+  --warn-strong: var(--warn-strong);
+  --warn-soft: rgba(180, 83, 9, 0.10);
+  --radius: 16px;
+}
+html[data-theme='dark'] {
+  --bg-page: #101317;
+  --bg-solid: #171b21;
+  --bg-solid-97: rgba(23, 27, 33, 0.97);
+  --surface-2: #1d222a;
+  --surface-3: #232932;
+  --line: #2e3540;
+  --line-strong: #39414e;
+  --text: #e9edf2;
+  --text-2: #c6cdd6;
+  --dim: #98a2ae;
+  --faint: #6c7683;
+  --accent: #2dd4bf;
+  --accent-2: var(--accent-2);
+  --accent-strong: #5eead4;
+  --accent-mid: #2dd4bf;
+  --accent-soft: rgba(45, 212, 191, 0.12);
+  --info: #7dd3fc;
+  --info-2: #38bdf8;
+  --ok: #4ade80;
+  --ok-strong: #86efac;
+  --ok-soft: rgba(74, 222, 128, 0.12);
+  --bad: #f87171;
+  --bad-strong: #fca5a5;
+  --bad-deep: #fecdd3;
+  --bad-soft: rgba(248, 113, 113, 0.12);
+  --warn: #fbbf24;
+  --warn-strong: #fcd34d;
+  --warn-soft: rgba(251, 191, 36, 0.12);
+  color-scheme: dark;
+}
+
 #mas-root {
-  --mas-bg: rgba(24, 27, 32, 0.94);
-  --mas-bg-solid: #181b20;
-  --mas-line: #343a44;
-  --mas-text: #e6e8ec;
-  --mas-dim: #9aa3af;
-  --mas-accent: #3d8bfd;
-  --mas-ok: #39c07a;
-  --mas-warn: #e0a63c;
-  --mas-bad: #e5484d;
+  --mas-bg: var(--bg-solid-97);
+  --mas-bg-solid: var(--bg-solid);
+  --mas-line: var(--line);
+  --mas-text: var(--text);
+  --mas-dim: var(--dim);
+  --mas-accent: var(--accent);
+  --mas-ok: var(--ok);
+  --mas-warn: var(--warn);
+  --mas-bad: var(--bad);
   --mas-width: 344px;
   all: initial;
   position: static;
   /* `all: initial` above resets this to normal, so it has to be declared after
-   * it. Without it Chrome paints the opened <select> popup and the scrollbars
-   * with the light system theme, which is what made the dropdowns white while
-   * the closed control was dark. */
-  color-scheme: dark;
+   * it. With the light theme it keeps the opened <select> popup, the scrollbars
+   * and form widgets in the same light family as the closed control. */
+  color-scheme: light;
 }
 
 #mas-root, #mas-root * {
   box-sizing: border-box;
-  font-family: -apple-system, "Segoe UI", Roboto, "Helvetica Neue", "Vazirmatn",
+  font-family: "Vazirmatn", -apple-system, "Segoe UI", Roboto, "Helvetica Neue",
     Tahoma, sans-serif;
   font-size: 13px;
   color: var(--mas-text);
@@ -58,7 +150,7 @@
   line-height: 1;
 }
 
-#mas-root .mas-toggle:hover { background: #22262d; }
+#mas-root .mas-toggle:hover { background: var(--line-strong); }
 
 /* ----------------------------------------------------------------- panel */
 
@@ -75,7 +167,7 @@
   background: var(--mas-bg);
   border-left: 1px solid var(--mas-line);
   backdrop-filter: blur(3px);
-  box-shadow: -6px 0 24px rgba(0, 0, 0, 0.35);
+  box-shadow: -6px 0 24px rgba(15, 23, 42, 0.18);
 }
 
 #mas-root .mas-head {
@@ -84,13 +176,13 @@
   gap: 8px;
   padding: 8px 10px;
   border-bottom: 1px solid var(--mas-line);
-  background: #1d2128;
+  background: var(--surface-3);
 }
 
 #mas-root .mas-head b { flex: 1; font-size: 13px; letter-spacing: 0.2px; }
 
 #mas-root .mas-head select {
-  background: #22262d;
+  background: var(--line-strong);
   border: 1px solid var(--mas-line);
   border-radius: 4px;
   color: var(--mas-text);
@@ -125,7 +217,7 @@
 #mas-root .mas-tabs {
   display: flex;
   border-bottom: 1px solid var(--mas-line);
-  background: #1a1e24;
+  background: var(--surface-3);
 }
 
 #mas-root .mas-tab {
@@ -173,7 +265,7 @@
 
 #mas-root .mas-foot {
   border-top: 1px solid var(--mas-line);
-  background: #1d2128;
+  background: var(--surface-3);
   padding: 8px 10px;
 }
 
@@ -189,15 +281,15 @@
   line-height: 1.2;
 }
 
-#mas-root .mas-btn:hover:not(:disabled) { background: #2f3540; }
+#mas-root .mas-btn:hover:not(:disabled) { background: var(--surface-3); }
 #mas-root .mas-btn:disabled { opacity: 0.45; cursor: default; }
-#mas-root .mas-btn.mas-primary { background: #1f5fc4; border-color: #2b6fdd; }
-#mas-root .mas-btn.mas-primary:hover:not(:disabled) { background: #2b6fdd; }
-#mas-root .mas-btn.mas-danger { background: #a12b2f; border-color: #c33a3f; }
+#mas-root .mas-btn.mas-primary { background: var(--accent-strong); border-color: var(--accent); }
+#mas-root .mas-btn.mas-primary:hover:not(:disabled) { background: var(--accent); }
+#mas-root .mas-btn.mas-danger { background: var(--bad-strong); border-color: var(--bad-strong); }
 #mas-root .mas-btn.mas-mini { padding: 1px 6px; font-size: 11px; }
 
 #mas-root .mas-input {
-  background: #12151a;
+  background: var(--bg-solid);
   border: 1px solid var(--mas-line);
   border-radius: 4px;
   color: var(--mas-text);
@@ -223,7 +315,7 @@
 }
 
 #mas-root select.mas-input option:checked {
-  background: #1f5fc4;
+  background: var(--accent-strong);
   color: #fff;
 }
 
@@ -281,7 +373,7 @@
   display: flex;
   align-items: center;
   gap: 5px;
-  background: #1e222a;
+  background: var(--surface-3);
   border: 1px solid var(--mas-line);
   border-radius: 5px;
   padding: 3px 5px;
@@ -290,7 +382,7 @@
 
 #mas-root .mas-step.is-current { border-color: var(--mas-accent); box-shadow: 0 0 0 1px var(--mas-accent); }
 #mas-root .mas-step.is-over { border-color: var(--mas-ok); }
-#mas-root .mas-grip { color: #5b636f; cursor: grab; }
+#mas-root .mas-grip { color: var(--faint); cursor: grab; }
 
 #mas-root .mas-step-label {
   background: transparent;
@@ -311,7 +403,7 @@
 #mas-root .mas-type {
   color: var(--mas-dim);
   font-size: 10.5px;
-  background: #12151a;
+  background: var(--bg-solid);
   border-radius: 3px;
   padding: 1px 4px;
 }
@@ -355,7 +447,7 @@
   position: fixed;
   z-index: 99999;
   cursor: crosshair;
-  background: rgba(61, 139, 253, 0.06);
+  background: rgba(15, 118, 110, 0.05);
   outline: 2px dashed rgba(61, 139, 253, 0.75);
   outline-offset: -2px;
 }
@@ -371,7 +463,7 @@
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(0, 0, 0, 0.5);
+  background: rgba(15, 23, 42, 0.35);
 }
 
 #mas-root .mas-confirm-box {
@@ -406,7 +498,7 @@
   max-height: 48vh;
   overflow: auto;
   pointer-events: auto;
-  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.55);
+  box-shadow: 0 4px 20px rgba(15, 23, 42, 0.18);
 }
 body:not(.mas-standalone) #mas-root .mas-confirm.mas-confirm-handoff {
   right: calc(var(--mas-width) + 12px);
@@ -433,7 +525,7 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
 #mas-root .mas-page {
   display: flex;
   gap: 8px;
-  background: #1e222a;
+  background: var(--surface-3);
   border: 1px solid var(--mas-line);
   border-radius: 5px;
   padding: 5px;
@@ -445,7 +537,7 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
   width: 74px;
   height: 44px;
   flex: none;
-  background: #12151a;
+  background: var(--bg-solid);
   border-radius: 3px;
   overflow: hidden;
 }
@@ -460,10 +552,10 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
   vertical-align: top;
 }
 #mas-root .mas-table th { color: var(--mas-dim); font-weight: 500; }
-#mas-root .mas-table code { font-size: 10.5px; color: #9fd0ff; word-break: break-all; }
+#mas-root .mas-table code { font-size: 10.5px; color: var(--info-2); word-break: break-all; }
 
 #mas-root .mas-pre {
-  background: #12151a;
+  background: var(--bg-solid);
   border: 1px solid var(--mas-line);
   border-radius: 4px;
   padding: 6px;
@@ -482,11 +574,11 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
   display: flex;
   gap: 6px;
   padding: 1px 0;
-  border-bottom: 1px solid rgba(255, 255, 255, 0.04);
+  border-bottom: 1px solid rgba(15, 23, 42, 0.120);
   word-break: break-word;
 }
 
-#mas-root .mas-log-t { color: #5b636f; flex: none; }
+#mas-root .mas-log-t { color: var(--faint); flex: none; }
 #mas-root .mas-log-ok { color: var(--mas-ok); }
 #mas-root .mas-log-step { color: var(--mas-accent); }
 #mas-root .mas-log-warn { color: var(--mas-warn); }
@@ -517,7 +609,7 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
   border-radius: 5px;
   padding: 6px 10px;
   max-width: 300px;
-  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  box-shadow: 0 4px 14px rgba(15, 23, 42, 0.16);
 }
 
 #mas-root .mas-toast-ok { border-left-color: var(--mas-ok); }
@@ -538,19 +630,25 @@ body.mas-standalone #mas-root .mas-confirm.mas-confirm-handoff {
  * ------------------------------------------------------------------ */
 body.mas-standalone {
   margin: 0;
-  background: #0b0d11;
-  color: #e6e8ec;
-  color-scheme: dark;
-  font: 13px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  height: 100vh;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-page);
+  color: var(--text);
+  color-scheme: light;
+  font: 13px/1.6 "Vazirmatn", system-ui, -apple-system, "Segoe UI", Roboto,
+    sans-serif;
 }
 
 body.mas-standalone .mas-page-head {
+  flex: 0 0 auto;
   display: flex;
   align-items: baseline;
   flex-wrap: wrap;
   gap: 10px;
   padding: 14px 20px;
-  border-bottom: 1px solid #343a44;
+  border-bottom: 1px solid var(--line);
 }
 
 body.mas-standalone .mas-page-head h1 {
@@ -564,7 +662,15 @@ body.mas-standalone .mas-page-head .mas-sub {
   font-size: 12px;
 }
 
-/* Not an overlay any more: no fixed positioning, no right rail, full width. */
+/* Not an overlay any more: no fixed positioning, no right rail, full width.
+   The page is a flex column (head / scrolling body / footer), which is what
+   guarantees the footer never paints over the last row of content. */
+body.mas-standalone #mas-root {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
 body.mas-standalone #mas-root .mas-panel {
   position: static;
   top: auto;
@@ -572,11 +678,27 @@ body.mas-standalone #mas-root .mas-panel {
   bottom: auto;
   width: auto;
   max-width: none;
-  min-height: calc(100vh - 57px);
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   border-left: 0;
   box-shadow: none;
   backdrop-filter: none;
-  background: #0b0d11;
+  background: var(--bg-page);
+}
+body.mas-standalone #mas-root .mas-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+body.mas-standalone #mas-root .mas-foot {
+  position: sticky;
+  bottom: 0;
+  flex: 0 0 auto;
+  background: var(--mas-bg-solid);
+  border-top: 1px solid var(--mas-line);
+  box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.08);
 }
 
 body.mas-standalone #mas-root .mas-body,
@@ -604,18 +726,18 @@ body.mas-standalone .mas-vnclink { text-decoration: none; }
   font-variant-numeric: tabular-nums;
   text-align: center;
   white-space: nowrap;
-  color: #8b949e;
-  background: rgba(255, 255, 255, 0.04);
+  color: var(--dim);
+  background: rgba(15, 23, 42, 0.120);
 }
 
 #mas-root .mas-state.is-pending { color: #5c6670; }
-#mas-root .mas-state.is-ok { color: #4ade80; background: rgba(74, 222, 128, 0.12); }
-#mas-root .mas-state.is-error { color: #f87171; background: rgba(248, 113, 113, 0.14); }
+#mas-root .mas-state.is-ok { color: var(--ok); background: rgba(74, 222, 128, 0.12); }
+#mas-root .mas-state.is-error { color: var(--bad); background: rgba(248, 113, 113, 0.14); }
 #mas-root .mas-state.is-skipped { color: #94a3b8; }
-#mas-root .mas-state.is-ignored { color: #fbbf24; background: rgba(251, 191, 36, 0.12); }
+#mas-root .mas-state.is-ignored { color: var(--warn); background: rgba(251, 191, 36, 0.12); }
 
 #mas-root .mas-state.is-running {
-  color: #7dd3fc;
+  color: var(--info);
   background: rgba(125, 211, 252, 0.14);
   animation: mas-pulse 1.4s ease-in-out infinite;
 }
@@ -628,9 +750,9 @@ body.mas-standalone .mas-vnclink { text-decoration: none; }
 #mas-root .mas-runpanel {
   padding: 8px 10px;
   margin-bottom: 6px;
-  border: 1px solid #343a44;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.120);
 }
 
 #mas-root .mas-runpanel[hidden] { display: none !important; }
@@ -646,61 +768,61 @@ body.mas-standalone .mas-vnclink { text-decoration: none; }
   padding: 1px 8px;
   border-radius: 999px;
   font-size: 11px;
-  background: #343a44;
-  color: #e6e8ec;
+  background: var(--line);
+  color: var(--text);
 }
 
 #mas-root .mas-pill-running { background: #1d4ed8; color: #fff; }
-#mas-root .mas-pill-paused, #mas-root .mas-pill-waiting { background: #a16207; color: #fff; }
-#mas-root .mas-pill-done { background: #15803d; color: #fff; }
+#mas-root .mas-pill-paused, #mas-root .mas-pill-waiting { background: var(--warn-strong); color: #fff; }
+#mas-root .mas-pill-done { background: var(--ok-strong); color: #fff; }
 #mas-root .mas-pill-error { background: #b91c1c; color: #fff; }
 #mas-root .mas-pill-stopped { background: #4b5563; color: #fff; }
 
 #mas-root .mas-clock {
   font-variant-numeric: tabular-nums;
   font-weight: 600;
-  color: #7dd3fc;
+  color: var(--info);
 }
 
-#mas-root .mas-count { font-variant-numeric: tabular-nums; color: #8b949e; font-size: 11px; }
+#mas-root .mas-count { font-variant-numeric: tabular-nums; color: var(--dim); font-size: 11px; }
 
 #mas-root .mas-bar {
   height: 5px;
   margin: 7px 0;
   border-radius: 999px;
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(15, 23, 42, 0.120);
   overflow: hidden;
 }
 
 #mas-root .mas-bar-fill {
   height: 100%;
   border-radius: 999px;
-  background: linear-gradient(90deg, #38bdf8, #4ade80);
+  background: linear-gradient(90deg, var(--info), var(--ok));
   transition: width 0.35s ease;
 }
 
-#mas-root .mas-bar-fill.is-error { background: linear-gradient(90deg, #f87171, #ef4444); }
+#mas-root .mas-bar-fill.is-error { background: linear-gradient(90deg, var(--bad), var(--bad)); }
 
 #mas-root .mas-runpanel-now {
   display: flex;
   align-items: center;
   gap: 6px;
   font-size: 12px;
-  color: #cbd5e1;
+  color: var(--text-2);
 }
 
 #mas-root .mas-now-timer {
   font-variant-numeric: tabular-nums;
-  color: #7dd3fc;
+  color: var(--info);
 }
 
 #mas-root .mas-runpanel-error {
   margin-top: 6px;
   padding: 5px 7px;
-  border-left: 3px solid #f87171;
+  border-left: 3px solid var(--bad);
   border-radius: 3px;
   background: rgba(248, 113, 113, 0.1);
-  color: #fecaca;
+  color: var(--bad-deep);
   font-size: 11.5px;
   word-break: break-word;
 }
@@ -721,8 +843,8 @@ body.mas-standalone #mas-root .mas-tabs {
   z-index: 30;
   gap: 6px;
   padding: 8px 0;
-  background: #0b0d11;
-  border-bottom: 1px solid #343a44;
+  background: var(--bg-page);
+  border-bottom: 1px solid var(--line);
 }
 
 body.mas-standalone #mas-root .mas-tab {
@@ -760,12 +882,12 @@ body.mas-standalone #mas-root .mas-step {
 }
 
 body.mas-standalone #mas-root .mas-step:hover {
-  border-color: #343a44;
-  background: rgba(255, 255, 255, 0.03);
+  border-color: var(--line);
+  background: rgba(15, 23, 42, 0.120);
 }
 
 body.mas-standalone #mas-root .mas-step.is-current {
-  border-color: #38bdf8;
+  border-color: var(--info);
   background: rgba(56, 189, 248, 0.09);
 }
 
@@ -784,7 +906,7 @@ body.mas-standalone #mas-root .mas-grid {
 body.mas-standalone #mas-root .mas-settings {
   margin-top: 16px;
   padding: 12px 14px;
-  border: 1px solid #343a44;
+  border: 1px solid var(--line);
   border-radius: 9px;
 }
 
@@ -820,7 +942,7 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
 #mas-root .mas-ai-notes {
   margin: 10px 0;
   padding: 10px 12px;
-  border-left: 3px solid #38bdf8;
+  border-left: 3px solid var(--info);
   border-radius: 6px;
   background: rgba(56, 189, 248, 0.08);
 }
@@ -832,7 +954,7 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
   font: inherit;
   font-size: 12px;
   line-height: 1.7;
-  color: #cbd5e1;
+  color: var(--text-2);
 }
 
 /* Saved flows. */
@@ -845,9 +967,9 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
   align-items: center;
   gap: 10px;
   padding: 8px 10px;
-  border: 1px solid #343a44;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.120);
 }
 
 #mas-root .mas-lib-main {
@@ -858,8 +980,8 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
   flex: 1 1 auto;
 }
 
-#mas-root .mas-lib-meta { font-size: 11px; color: #8b949e; }
-#mas-root .mas-lib-desc { font-size: 11.5px; color: #cbd5e1; opacity: 0.85; }
+#mas-root .mas-lib-meta { font-size: 11px; color: var(--dim); }
+#mas-root .mas-lib-desc { font-size: 11.5px; color: var(--text-2); opacity: 0.85; }
 #mas-root .mas-lib-actions { display: flex; gap: 4px; flex: 0 0 auto; }
 
 body.mas-standalone #mas-root .mas-lib-row { padding: 12px 14px; }
@@ -875,9 +997,9 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
   align-items: center;
   gap: 10px;
   padding: 8px;
-  border: 1px solid #343a44;
+  border: 1px solid var(--line);
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.120);
 }
 
 #mas-root .mas-shot-thumb {
@@ -885,7 +1007,7 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
   display: block;
   border-radius: 6px;
   overflow: hidden;
-  border: 1px solid #343a44;
+  border: 1px solid var(--line);
 }
 
 #mas-root .mas-shot-thumb img {
@@ -902,11 +1024,11 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
   flex-direction: column;
   gap: 2px;
   font-size: 11.5px;
-  color: #8b949e;
+  color: var(--dim);
 }
 
 #mas-root .mas-shot-meta b {
-  color: #e6e8ec;
+  color: var(--text);
   font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
@@ -917,20 +1039,20 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
 #mas-root .mas-texts { display: flex; flex-direction: column; gap: 6px; }
 
 #mas-root .mas-text {
-  border: 1px solid #343a44;
+  border: 1px solid var(--line);
   border-radius: 9px;
-  background: rgba(255, 255, 255, 0.03);
+  background: rgba(15, 23, 42, 0.120);
   padding: 8px 10px;
 }
 
 #mas-root .mas-text summary {
   cursor: pointer;
   font-size: 12px;
-  color: #e6e8ec;
+  color: var(--text);
   font-variant-numeric: tabular-nums;
 }
 
-#mas-root .mas-text-src { color: #8b949e; font-weight: 400; }
+#mas-root .mas-text-src { color: var(--dim); font-weight: 400; }
 
 #mas-root .mas-text pre {
   margin: 8px 0;
@@ -940,7 +1062,7 @@ body.mas-standalone #mas-root .mas-lib-row b { font-size: 13.5px; }
   word-break: break-word;
   font-size: 11.5px;
   line-height: 1.7;
-  color: #cbd5e1;
+  color: var(--text-2);
 }
 
 body.mas-standalone #mas-root .mas-shots {
@@ -950,3 +1072,967 @@ body.mas-standalone #mas-root .mas-shots {
 
 body.mas-standalone #mas-root .mas-shot-thumb { flex: 0 0 180px; }
 body.mas-standalone #mas-root .mas-text pre { max-height: 420px; }
+
+/* ------------------------------------------------------------------ *
+ * Coworker agent tab
+ * ------------------------------------------------------------------ */
+
+/* The agent pane holds a sub-tab bar plus one sub-pane at a time. Each
+   sub-pane is a stack of boxes, so a failure in one section cannot blank the
+   rest of the tab. */
+.mas-agent-sub {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.mas-box {
+  border: 1px solid var(--mas-line);
+  border-radius: 6px;
+  padding: 8px;
+  background: rgba(15, 23, 42, 0.120);
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.mas-box > b {
+  color: var(--mas-text);
+  font-size: 12px;
+}
+
+/* Code and SQL get a monospace face and no spellcheck squiggles: the agent
+   writes both, and a red underline under valid Python is pure noise. */
+.mas-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 11px;
+  line-height: 1.45;
+  white-space: pre;
+  tab-size: 2;
+}
+
+.mas-warn {
+  margin: 0;
+  padding: 6px 8px;
+  border-left: 3px solid var(--mas-warn);
+  background: rgba(224, 166, 60, 0.1);
+  color: var(--mas-text);
+  font-size: 11px;
+  line-height: 1.5;
+  border-radius: 0 4px 4px 0;
+}
+
+.mas-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 11px;
+}
+
+.mas-table th {
+  text-align: start;
+  color: var(--mas-dim);
+  font-weight: 600;
+  border-bottom: 1px solid var(--mas-line);
+  padding: 3px 4px;
+  white-space: nowrap;
+}
+
+.mas-table td {
+  border-bottom: 1px solid rgba(15, 23, 42, 0.120);
+  padding: 3px 4px;
+  vertical-align: top;
+  word-break: break-word;
+}
+
+/* The agent's own display, shown so a one-time login to a chat site is
+   possible without exposing that display over VNC. */
+.mas-shot-full {
+  width: 100%;
+  border: 1px solid var(--mas-line);
+  border-radius: 4px;
+}
+
+.mas-query-result {
+  overflow-x: auto;
+}
+
+.mas-pre {
+  max-height: 240px;
+}
+
+/* Right-to-left: the operator's language is Persian, and a form laid out
+   left-to-right reads backwards. The panel itself stays LTR because noVNC and
+   the rest of the sidebar are, so only the agent's own boxes opt in. */
+.mas-agent-sub .mas-box {
+  direction: rtl;
+}
+
+.mas-agent-sub .mas-code,
+.mas-agent-sub .mas-pre,
+.mas-agent-sub .mas-table {
+  direction: ltr;
+  text-align: start;
+}
+
+/* ------------------------------------------------------------------ *
+ * A footer that stays put
+ *
+ * The run bar is the one thing the operator watches during a run, so it must
+ * not scroll away. In the overlay the panel is a fixed flex column and the
+ * footer already sits under the scrolling body; on the dedicated page the panel
+ * is part of the document flow, so the footer is pinned to the viewport and the
+ * body gets room at the bottom to keep its last line reachable.
+ * ------------------------------------------------------------------ */
+
+#mas-root .mas-foot {
+  z-index: 3;
+  box-shadow: 0 -6px 18px rgba(15, 23, 42, 0.10);
+}
+
+/* Sticky, never fixed: the page is a flex column (head / scrolling body /
+   footer), so the footer owns its row and no content can slip underneath it.
+   The 2026-10 fixed-footer experiment is exactly what caused rows seven and
+   friends to hide behind the run bar. */
+body.mas-standalone #mas-root .mas-foot {
+  position: sticky;
+  bottom: 0;
+  width: auto;
+  max-width: none;
+  background: var(--bg-solid-97);
+  border-top: 1px solid var(--line);
+  backdrop-filter: blur(4px);
+}
+
+body.mas-standalone #mas-root .mas-body { padding-bottom: 12px; }
+
+/* ------------------------------------------------------------------ *
+ * Chat tab
+ * ------------------------------------------------------------------ */
+
+#mas-root #mas-tab-chat,
+#mas-root #mas-tab-library { direction: rtl; }
+
+#mas-root .mas-chat-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 46vh;
+  overflow-y: auto;
+  padding: 4px 2px;
+  margin: 8px 0;
+}
+
+body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); }
+
+#mas-root .mas-bubble {
+  max-width: 92%;
+  padding: 7px 10px;
+  border: 1px solid var(--mas-line);
+  border-radius: 10px;
+  background: var(--surface-3);
+}
+
+#mas-root .mas-bubble.is-mine {
+  align-self: flex-end;
+  background: #22303f;
+  border-color: #33506b;
+}
+
+#mas-root .mas-bubble.is-ai { align-self: flex-start; }
+
+#mas-root .mas-bubble-text {
+  margin: 0;
+  white-space: pre-wrap;
+  word-break: break-word;
+  font: inherit;
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+#mas-root .mas-bubble-meta {
+  margin-top: 4px;
+  color: var(--mas-dim);
+  font-size: 11px;
+  direction: ltr;
+  text-align: end;
+}
+
+#mas-root .mas-thinking {
+  color: var(--mas-warn);
+  animation: mas-pulse 1.4s ease-in-out infinite;
+}
+
+@keyframes mas-pulse { 50% { opacity: 0.35; } }
+
+#mas-root .mas-chat-compose {
+  display: flex;
+  gap: 6px;
+  align-items: flex-end;
+  position: sticky;
+  bottom: 0;
+  background: var(--mas-bg);
+  padding-top: 6px;
+}
+
+#mas-root .mas-chat-input { flex: 1; resize: vertical; min-height: 52px; }
+#mas-root .mas-chat-provider { max-width: 190px; }
+#mas-root .mas-chat-tools { margin-top: 10px; }
+#mas-root .mas-check { display: inline-flex; align-items: center; gap: 5px; }
+
+/* ------------------------------------------------------------------ *
+ * Library tab: operations
+ * ------------------------------------------------------------------ */
+
+#mas-root .mas-ops {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 8px;
+}
+
+#mas-root .mas-op {
+  border: 1px solid var(--mas-line);
+  border-radius: 8px;
+  background: var(--surface-3);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+#mas-root .mas-op.is-builtin { border-inline-start: 3px solid var(--mas-accent); }
+
+#mas-root .mas-op-head {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+#mas-root .mas-op-head b { flex: 1; }
+
+#mas-root .mas-badge {
+  font-size: 10px;
+  border: 1px solid var(--mas-line);
+  border-radius: 8px;
+  padding: 0 6px;
+  color: var(--mas-dim);
+}
+
+#mas-root .mas-op-desc { margin: 0; color: var(--mas-text); }
+#mas-root .mas-op-steps pre { direction: ltr; text-align: left; max-height: 160px; }
+
+#mas-root .mas-op-editor { direction: rtl; }
+
+#mas-root .mas-op-steprow {
+  display: grid;
+  grid-template-columns: 18px 130px 1fr 30px;
+  gap: 5px;
+  align-items: center;
+  margin-bottom: 4px;
+}
+
+#mas-root .mas-op-steprow input { direction: ltr; font-family: ui-monospace, monospace; }
+
+/* ------------------------------------------------------------------ *
+ * Agent key, endpoints, and the pointer
+ * ------------------------------------------------------------------ */
+
+#mas-root .mas-keyvalue {
+  flex: 1;
+  direction: ltr;
+  font-family: ui-monospace, monospace;
+}
+
+#mas-root .mas-codeline { flex-wrap: nowrap; }
+
+#mas-root .mas-code {
+  direction: ltr;
+  text-align: left;
+  unicode-bidi: embed;
+  word-break: break-all;
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  background: var(--surface-2);
+  border: 1px solid var(--mas-line);
+  border-radius: 4px;
+  padding: 2px 5px;
+  flex: 1;
+}
+
+#mas-root .mas-tg-route { margin-bottom: 5px; }
+#mas-root .mas-tg-purpose { min-width: 150px; }
+
+#mas-root .mas-cursor-preview {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 8px;
+  border: 1px dashed var(--mas-line);
+  border-radius: 8px;
+  background: var(--surface-2);
+}
+
+#mas-root .mas-cursor-dot {
+  display: inline-block;
+  border-radius: 5px;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.6);
+}
+
+/* ------------------------------------------------------------------ *
+ * Pages tab: the screenshot comes first
+ * ------------------------------------------------------------------ */
+
+#mas-root .mas-shotfirst {
+  display: flex;
+  gap: 10px;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  border: 1px solid var(--mas-line);
+  border-radius: 8px;
+  background: var(--surface-2);
+  padding: 8px;
+  margin-bottom: 8px;
+}
+
+#mas-root .mas-shotfirst-img {
+  max-width: 100%;
+  max-height: 42vh;
+  border: 1px solid var(--mas-line);
+  border-radius: 5px;
+  flex: 1 1 320px;
+}
+
+#mas-root .mas-shotfirst-meta { flex: 1 1 220px; min-width: 200px; }
+
+#mas-root .mas-shotfirst-link {
+  display: block;
+  direction: ltr;
+  text-align: left;
+  font-size: 11px;
+  word-break: break-all;
+  color: var(--mas-accent);
+}
+
+/* ================================================================== *
+ * Phase 7 design layer: calmer surfaces, pill tabs, chips, tidy tables
+ *
+ * Appended on purpose: every rule above keeps working, and this layer
+ * only refines spacing, surfaces and hierarchy so the panel reads as
+ * one ordered system instead of stacked boxes.
+ * ================================================================== */
+
+#mas-root {
+  --mas-radius: 14px;
+  --mas-radius-sm: 9px;
+  --mas-shadow: 0 6px 18px rgba(15, 23, 42, 0.12);
+  --mas-shadow-soft: 0 2px 8px rgba(15, 23, 42, 0.08);
+  --mas-accent-2: var(--accent-2);
+  --mas-surface: var(--bg-solid);
+  --mas-surface-2: var(--bg-page);
+  --mas-gap: 10px;
+}
+
+/* -- tabs: one scrollable pill row instead of a wrapped button cloud -- */
+#mas-root .mas-tabs {
+  display: flex;
+  gap: 6px;
+  padding: 8px 10px;
+  flex-wrap: wrap;               /* every tab visible — no hidden scroll */
+  border-bottom: 1px solid var(--mas-line);
+  background: var(--bg-solid);
+}
+#mas-root .mas-tab {
+  flex: 0 0 auto;
+  border: 1px solid var(--mas-line);
+  border-radius: 999px;
+  padding: 6px 12px;
+  background: transparent;
+  color: var(--mas-dim);
+  font-size: 12px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+#mas-root .mas-tab:hover { color: var(--mas-text); border-color: var(--mas-accent); }
+#mas-root .mas-tab.is-active {
+  background: linear-gradient(135deg, var(--mas-accent), var(--mas-accent-2));
+  border-color: transparent;
+  color: #ffffff;
+  font-weight: 700;
+}
+
+/* -- every box is now a card with the same rhythm -------------------- */
+#mas-root .mas-box,
+#mas-root .mas-card {
+  background: var(--mas-surface);
+  border: 1px solid var(--mas-line);
+  border-radius: var(--mas-radius);
+  box-shadow: var(--mas-shadow-soft);
+  padding: 12px;
+  margin: 0 0 var(--mas-gap);
+  display: block;
+}
+#mas-root .mas-card-head {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: -2px 0 8px;
+  padding-bottom: 8px;
+  border-bottom: 1px dashed var(--mas-line);
+}
+#mas-root .mas-card-head b { font-size: 13px; }
+#mas-root .mas-subhead {
+  display: block;
+  margin: 10px 0 4px;
+  font-size: 12px;
+  color: var(--mas-accent-2);
+}
+#mas-root .mas-hint { color: var(--mas-dim); font-size: 11.5px; line-height: 1.7; }
+#mas-root .mas-row { gap: var(--mas-gap); }
+#mas-root .mas-chips { gap: 6px; }
+
+/* -- chips: the little counters the sample menus use ----------------- */
+#mas-root .mas-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  border: 1px solid var(--mas-line);
+  border-radius: 999px;
+  background: var(--mas-surface-2);
+  color: var(--mas-text);
+  padding: 3px 9px;
+  font-size: 11px;
+  white-space: nowrap;
+}
+#mas-root .mas-chip-ok { border-color: rgba(22, 163, 74, 0.45); color: var(--ok-strong); }
+#mas-root .mas-chip-bad { border-color: rgba(220, 38, 38, 0.45); color: var(--bad-strong); }
+
+/* -- buttons: one height, clear hierarchy ---------------------------- */
+#mas-root .mas-btn {
+  border: 1px solid var(--mas-line);
+  border-radius: var(--mas-radius-sm);
+  background: var(--mas-surface-2);
+  color: var(--mas-text);
+  padding: 7px 11px;
+  font-size: 12px;
+  cursor: pointer;
+  transition: transform 0.08s ease, border-color 0.15s ease, background 0.15s ease;
+}
+#mas-root .mas-btn:hover { border-color: var(--mas-accent); transform: translateY(-1px); }
+#mas-root .mas-btn.mas-primary {
+  background: linear-gradient(135deg, var(--mas-accent), var(--mas-accent-2));
+  border-color: transparent;
+  color: #ffffff;
+  font-weight: 700;
+}
+#mas-root .mas-btn.mas-danger {
+  background: rgba(220, 38, 38, 0.08);
+  border-color: rgba(220, 38, 38, 0.45);
+  color: var(--bad-strong);
+}
+
+/* -- inputs and fields ------------------------------------------------ */
+#mas-root .mas-input {
+  border: 1px solid var(--mas-line);
+  border-radius: var(--mas-radius-sm);
+  background: var(--surface-2);
+  color: var(--mas-text);
+  padding: 7px 9px;
+  font-size: 12px;
+}
+#mas-root .mas-input:focus {
+  outline: 2px solid rgba(15, 118, 110, 0.30);
+  outline-offset: 1px;
+  border-color: var(--mas-accent);
+}
+#mas-root .mas-textarea { min-height: 64px; resize: vertical; width: 100%; }
+#mas-root .mas-field { gap: 4px; }
+#mas-root .mas-field > span { color: var(--mas-dim); font-size: 11px; }
+#mas-root .mas-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+/* -- tables: zebra rows, roomy cells, no vertical rules -------------- */
+#mas-root .mas-table {
+  width: 100%;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: 11.5px;
+  border: 1px solid var(--mas-line);
+  border-radius: var(--mas-radius-sm);
+  overflow: hidden;
+  margin: 6px 0;
+}
+#mas-root .mas-table th {
+  background: var(--mas-surface-2);
+  color: var(--mas-dim);
+  font-weight: 600;
+  text-align: right;
+  padding: 7px 8px;
+  border-bottom: 1px solid var(--mas-line);
+}
+#mas-root .mas-table td {
+  padding: 7px 8px;
+  border-bottom: 1px solid rgba(216, 224, 232, 0.9);
+  vertical-align: top;
+}
+#mas-root .mas-table tbody tr:nth-child(even) td { background: rgba(15, 23, 42, 0.03); }
+#mas-root .mas-table tbody tr:last-child td { border-bottom: none; }
+
+/* -- collapsible help, the «📖» rows the telegram pane leads with ----- */
+#mas-root .mas-help {
+  border: 1px dashed var(--mas-line);
+  border-radius: var(--mas-radius-sm);
+  background: rgba(15, 118, 110, 0.05);
+  padding: 7px 10px;
+  margin: 6px 0;
+}
+#mas-root .mas-help summary {
+  cursor: pointer;
+  color: var(--mas-accent-2);
+  font-size: 12px;
+  user-select: none;
+}
+#mas-root .mas-help p { margin: 6px 0 2px; line-height: 1.8; font-size: 11.5px; }
+
+/* -- the diagnose report --------------------------------------------- */
+#mas-root .mas-diagnose-list { list-style: none; margin: 6px 0 0; padding: 0; }
+#mas-root .mas-diagnose-step {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  padding: 6px 8px;
+  border-radius: var(--mas-radius-sm);
+  margin-bottom: 4px;
+  background: var(--mas-surface-2);
+  border: 1px solid var(--mas-line);
+}
+#mas-root .mas-diagnose-step.is-ok { border-color: rgba(22, 163, 74, 0.40); }
+#mas-root .mas-diagnose-step.is-bad { border-color: rgba(220, 38, 38, 0.45); }
+#mas-root .mas-diagnose-mark { flex: 0 0 auto; }
+#mas-root .mas-diagnose-step .mas-hint { flex: 1 1 auto; }
+
+/* -- programs list ---------------------------------------------------- */
+#mas-root .mas-prog-list { list-style: none; margin: 4px 0 8px; padding: 0; }
+#mas-root .mas-prog-list li {
+  border: 1px solid var(--mas-line);
+  border-radius: var(--mas-radius-sm);
+  background: var(--mas-surface-2);
+  padding: 7px 9px;
+  margin-bottom: 6px;
+}
+
+/* -- the telegram status card gets a slightly lifted surface --------- */
+#mas-root .mas-tg-status {
+  background: linear-gradient(160deg, rgba(20, 184, 166, 0.10), var(--mas-surface) 55%);
+}
+
+/* ================================================================== *
+ * Phase 9 — the operator's own design pattern, applied as the final
+ * layer so it wins the cascade: RTL-first Vazirmatn, semantic tokens
+ * (both themes), 16px cards with quiet shadows, capsule tab bar,
+ * framed segment sub-tabs, soft status chips, wrapped tables, a 1080px
+ * centered column, four breakpoints and barely-there motion.
+ * ================================================================== */
+
+html[data-theme='dark'] #mas-root,
+html[data-theme='dark'] body.mas-standalone { color-scheme: dark; }
+
+/* -- typography ------------------------------------------------------ */
+body.mas-standalone {
+  font-family: "Vazirmatn", -apple-system, "Segoe UI", Roboto, Tahoma, sans-serif;
+  font-size: 15px;
+  line-height: 1.75;
+}
+body.mas-standalone #mas-root { font-size: 15px; line-height: 1.75; }
+#mas-root button, #mas-root input, #mas-root select, #mas-root textarea {
+  font-family: inherit;
+}
+#mas-root code, #mas-root pre, #mas-root .mas-mono {
+  font-family: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+  font-size: 12.5px;
+}
+
+/* -- container: a calm centered column ------------------------------- */
+body.mas-standalone .mas-page-head > *,
+body.mas-standalone #mas-root .mas-tabpane {
+  width: 100%;
+  max-width: 1080px;
+  margin-left: auto;
+  margin-right: auto;
+}
+body.mas-standalone #mas-root .mas-tabpane { padding: 4px 16px 20px; }
+
+/* -- cards ----------------------------------------------------------- */
+#mas-root .mas-card,
+#mas-root .mas-box.mas-card {
+  background: var(--bg-solid);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  box-shadow: 0 1px 3px rgba(15, 23, 42, 0.05);
+  padding: 18px 20px;
+  margin: 0 0 14px;
+}
+#mas-root .mas-card-head b { font-size: 15px; font-weight: 700; }
+#mas-root .mas-hint { font-size: 12.5px; color: var(--dim); }
+
+/* -- tabs: capsule bar, soft active ---------------------------------- */
+#mas-root .mas-tabs {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--bg-solid);
+  padding: 6px;
+  margin: 10px 0 14px;
+}
+#mas-root .mas-tab {
+  border: 0;
+  border-radius: 999px;
+  padding: 7px 14px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--dim);
+  background: transparent;
+}
+#mas-root .mas-tab:hover { background: var(--surface-2); color: var(--text); }
+#mas-root .mas-tab.is-active {
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-weight: 700;
+}
+html[data-theme='dark'] #mas-root .mas-tab.is-active { color: var(--accent-strong); }
+
+/* -- sub-tabs: framed segment, identical language, count badges ------- */
+#mas-root .mas-subtabs {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  padding: 4px;
+  margin: 0 0 14px;
+}
+#mas-root .mas-subtabs .mas-tab { padding: 6px 12px; font-size: 12.5px; }
+#mas-root .mas-subtabs .mas-tab.is-active {
+  background: var(--bg-solid);
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.10);
+}
+#mas-root .mas-tab .mas-tab-count {
+  display: inline-block;
+  min-width: 18px;
+  margin-inline-start: 5px;
+  padding: 0 5px;
+  border-radius: 999px;
+  background: var(--accent-soft);
+  color: var(--accent);
+  font-size: 11px;
+  font-weight: 700;
+  text-align: center;
+}
+
+/* -- buttons ---------------------------------------------------------- */
+#mas-root .mas-btn {
+  border: 1px solid var(--line-strong);
+  border-radius: 10px;
+  background: var(--bg-solid);
+  color: var(--text);
+  font-weight: 600;
+  padding: 7px 14px;
+}
+#mas-root .mas-btn:hover:not(:disabled) {
+  background: var(--surface-2);
+  border-color: var(--accent);
+  transform: none;
+}
+#mas-root .mas-btn.mas-primary {
+  background: var(--accent);
+  border-color: var(--accent);
+  color: #ffffff;
+}
+#mas-root .mas-btn.mas-primary:hover:not(:disabled) {
+  background: var(--accent-strong);
+  border-color: var(--accent-strong);
+}
+html[data-theme='dark'] #mas-root .mas-btn.mas-primary { color: #06281f; }
+#mas-root .mas-btn.mas-danger {
+  background: transparent;
+  border-color: var(--bad);
+  color: var(--bad);
+}
+
+/* -- inputs ----------------------------------------------------------- */
+#mas-root .mas-input,
+#mas-root textarea.mas-input,
+#mas-root select.mas-input {
+  background: var(--bg-solid);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  color: var(--text);
+  padding: 8px 10px;
+}
+#mas-root .mas-input:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+
+/* -- chips: soft background + same-family text ------------------------- */
+#mas-root .mas-chip {
+  border: 0;
+  border-radius: 999px;
+  padding: 2px 10px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--surface-3);
+  color: var(--dim);
+}
+#mas-root .mas-chip-ok { background: var(--ok-soft); color: var(--ok-strong); }
+#mas-root .mas-chip-bad { background: var(--bad-soft); color: var(--bad-strong); }
+#mas-root .mas-chip-warn { background: var(--warn-soft); color: var(--warn-strong); }
+#mas-root .mas-chip-info { background: var(--accent-soft); color: var(--accent); }
+
+/* -- tables inside a rounded wrapper ---------------------------------- */
+#mas-root .mas-tablewrap {
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: auto;
+  background: var(--bg-solid);
+  margin: 8px 0;
+}
+#mas-root .mas-table { font-size: 12.5px; }
+#mas-root .mas-table th {
+  background: var(--surface-2);
+  color: var(--dim);
+  font-weight: 600;
+  font-size: 12px;
+}
+#mas-root .mas-table td { border-bottom: 1px solid var(--line-strong); }
+#mas-root .mas-table tbody tr:hover { background: var(--surface-2); }
+#mas-root .mas-table tbody tr:last-child td { border-bottom: 0; }
+
+/* -- theme toggle in the header --------------------------------------- */
+.mas-theme-btn {
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--bg-solid);
+  color: var(--text);
+  font: 600 13px "Vazirmatn", sans-serif;
+  padding: 5px 14px;
+  cursor: pointer;
+}
+.mas-theme-btn:hover { border-color: var(--accent); }
+
+/* -- motion: subtle, and off when the operator asks for calm ----------- */
+@keyframes mas-fadeUp {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: none; }
+}
+#mas-root .mas-tabpane:not([hidden]) { animation: mas-fadeUp 0.18s ease both; }
+#mas-root .mas-card { animation: mas-fadeUp 0.18s ease both; }
+@media (prefers-reduced-motion: reduce) {
+  #mas-root *, #mas-root *::before, #mas-root *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+}
+
+/* -- breakpoints ------------------------------------------------------- */
+@media (max-width: 960px) {
+  body.mas-standalone #mas-root .mas-tabpane { padding: 4px 12px 16px; }
+}
+@media (max-width: 900px) {
+  body.mas-standalone { font-size: 14px; }
+}
+@media (max-width: 820px) {
+  #mas-root .mas-card, #mas-root .mas-box.mas-card { padding: 14px 16px; }
+  #mas-root .mas-row.mas-wrap { flex-direction: column; align-items: stretch; }
+}
+@media (max-width: 620px) {
+  body.mas-standalone { font-size: 13.5px; }
+  #mas-root .mas-tab { padding: 6px 10px; font-size: 12px; }
+  body.mas-standalone #mas-root .mas-tabpane { padding: 2px 8px 12px; }
+}
+
+/* phase-9 extras: preview frame, diff columns, devlog items */
+#mas-root .mas-page-preview {
+  width: 100%;
+  height: 420px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: #ffffff;
+}
+#mas-root .mas-diff { align-items: stretch; }
+#mas-root .mas-diff-col { flex: 1 1 240px; min-width: 0; }
+#mas-root .mas-pre {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 8px 10px;
+  overflow: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+#mas-root .mas-devlog-item { border-bottom: 1px solid var(--line-strong); padding: 6px 0; }
+#mas-root .mas-devlog-item summary { cursor: pointer; }
+
+/* ================================================================== *
+ * Phase 9b — one fixed header line, one fixed footer line.
+ * The tab row lives inside the header; theme/language moved to the
+ * Settings tab; the footer is a single floating row pinned to the
+ * bottom, with the body padded so nothing hides behind it.
+ * ================================================================== */
+
+body.mas-standalone .mas-page-head {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: var(--bg-solid-97);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+}
+body.mas-standalone .mas-page-head > * { max-width: none; margin: 0; }
+body.mas-standalone .mas-page-title {
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+body.mas-standalone .mas-page-head .mas-tabs {
+  flex: 1 1 auto;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+body.mas-standalone .mas-page-head .mas-tab { padding: 5px 12px; font-size: 12.5px; }
+body.mas-standalone .mas-desktop-link { white-space: nowrap; }
+/* the second title bar (panel head) is redundant on the dedicated page */
+body.mas-standalone #mas-root .mas-head { display: none; }
+
+body.mas-standalone #mas-root .mas-foot {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 45;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  min-height: 44px;
+  background: var(--bg-solid-97);
+  border-top: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+}
+body.mas-standalone #mas-root .mas-runbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+body.mas-standalone #mas-root .mas-statusline {
+  flex: 1 1 auto;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* the step panel opens as a drawer above the fixed bar instead of
+   stretching the footer into several rows */
+body.mas-standalone #mas-root .mas-runpanel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 94px;
+  z-index: 44;
+  max-height: 38vh;
+  overflow: auto;
+  background: var(--bg-solid);
+  border-top: 1px solid var(--line);
+  padding: 8px 12px;
+}
+body.mas-standalone #mas-root .mas-body { padding-bottom: 60px; }
+
+
+/* ================================================================== *
+ * Phase 11 — header tabs wear exactly the sub-tab graphic (framed
+ * segment, capsule buttons, soft active), and the flow tab gets one
+ * floating action line pinned right above the footer.
+ * ================================================================== */
+
+.mas-page-head .mas-brand-logo {
+  display: inline-flex;
+  align-items: center;
+  flex: 0 0 auto;
+}
+body.mas-standalone .mas-page-head .mas-tabs {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-2);
+  padding: 4px;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+.mas-page-head .mas-tab {
+  border: 0;
+  border-radius: 999px;
+  padding: 6px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  font-family: inherit;
+  color: var(--dim);
+  background: transparent;
+  cursor: pointer;
+  white-space: nowrap;
+  flex: 0 0 auto;
+}
+.mas-page-head .mas-tab:hover { background: var(--surface-2); color: var(--text); }
+.mas-page-head .mas-tab.is-active {
+  background: var(--bg-solid);
+  color: var(--accent);
+  font-weight: 700;
+  box-shadow: 0 1px 4px rgba(15, 23, 42, 0.10);
+}
+html[data-theme='dark'] .mas-page-head .mas-tab.is-active { color: var(--accent-strong); }
+
+/* -- flow action line: floating, single row, above the footer --------- */
+.mas-flowbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  margin-top: 14px;
+}
+body.mas-standalone .mas-flowbar {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 46px;
+  z-index: 44;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+  margin: 0;
+  padding: 8px 12px;
+  background: var(--bg-solid-97);
+  border-top: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+}
+body.mas-standalone .mas-flowbar .mas-btn { flex: 0 0 auto; white-space: nowrap; }
+/* keep the pane's last card clear of the floating line */
+body.mas-standalone #mas-tab-flow { padding-bottom: 58px; }

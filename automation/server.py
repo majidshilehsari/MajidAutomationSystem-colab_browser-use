@@ -36,6 +36,8 @@ from typing import Any, Dict, Optional, Tuple, Type
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from automation import cdp, schema  # noqa: E402
+from automation.agent import AgentHub  # noqa: E402
+from automation.cursor import CursorFx  # noqa: E402
 from automation.archive import shot_archive, text_archive  # noqa: E402
 from automation.api import API_PREFIX, AutomationApi, FlowStore  # noqa: E402
 from automation.detect import Detector  # noqa: E402
@@ -60,6 +62,70 @@ def cache_query(static_dir: str) -> str:
     return "?v=%s" % digest
 
 
+#: The viewer must always fill the window: no page scroll, noVNC scaled to the
+#: viewport. A classic script in <head> runs before noVNC's deferred module, so
+#: the resize setting is already right when noVNC reads it.
+VIEW_MARKER = "<!-- automation-view -->"
+VIEW_END_MARKER = "<!-- /automation-view -->"
+VIEW_BLOCK = (
+    VIEW_MARKER + "\n"
+    "<script>\n"
+    "(function () {\n"
+    "  try {\n"
+    "    // \"scale\" keeps the whole desktop visible at any window size;\n"
+    "    // overwriting on every start is deliberate: always full screen.\n"
+    "    localStorage.setItem('noVNC_setting_resize', 'scale');\n"
+    "  } catch (error) { /* private mode: the CSS below still applies */ }\n"
+    "})();\n"
+    "</script>\n"
+    "<style>\n"
+    "  html, body { height: 100% !important; margin: 0 !important;\n"
+    "               overflow: hidden !important; }\n"
+    "  #noVNC_container, #noVNC_screen { position: fixed !important;\n"
+    "    inset: 0 !important; width: 100vw !important; height: 100vh !important; }\n"
+    "</style>\n"
+    + VIEW_END_MARKER
+)
+VIEW_INJECT = re.compile(
+    re.escape(VIEW_MARKER) + r".*?" + re.escape(VIEW_END_MARKER), re.S)
+
+#: `import ... from './core.mjs'` inside the copied sidebar script. The hash on
+#: panel.html only versions automation.js itself; without this, a browser that
+#: cached core.mjs once keeps pairing a new sidebar with old label tables and
+#: shows raw keys like "tabChat" - exactly the bug the operator reported.
+MODULE_IMPORT = re.compile(r"(from\s*['\"])(\./[A-Za-z0-9_.-]+\.mjs)(['\"])")
+
+
+def _file_hash(path: str) -> str:
+    with open(path, "rb") as handle:
+        return hashlib.sha256(handle.read()).hexdigest()[:10]
+
+
+def version_module_imports(auto_dir: str) -> int:
+    """Rewrite relative module imports of the copied files to carry ?v=hash."""
+    patched = 0
+    for name in sorted(os.listdir(auto_dir)):
+        if not name.endswith((".js", ".mjs")):
+            continue
+        full = os.path.join(auto_dir, name)
+        with open(full, encoding="utf-8") as handle:
+            source = handle.read()
+
+        def add_query(match: "re.Match[str]") -> str:
+            target = os.path.join(auto_dir, os.path.basename(match.group(2)))
+            if not os.path.exists(target):
+                return match.group(0)
+            return "%s%s?v=%s%s" % (match.group(1), match.group(2),
+                                    _file_hash(target), match.group(3))
+
+        updated = MODULE_IMPORT.sub(add_query, source)
+        if updated != source:
+            with open(full, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+            patched += 1
+    return patched
+
+
 def inject_block(static_dir: str) -> str:
     """The sidebar tags, with a content hash so a new build cannot be served
     from the browser's cache. Rewritten on every start, so it never goes stale.
@@ -67,6 +133,10 @@ def inject_block(static_dir: str) -> str:
     query = cache_query(static_dir)
     return (
         MARKER + "\n"
+        # No external font link here on purpose: a render-blocking stylesheet
+        # from fonts.googleapis.com left the viewer blank for operators whose
+        # network cannot reach Google. Vazirmatn ships self-hosted inside
+        # automation.css (@font-face, woff2 next to the css).
         '<link rel="stylesheet" href="automation/automation.css%s">\n'
         '<script type="module" src="automation/automation.js%s"></script>\n'
         "%s\n" % (query, query, END_MARKER)
@@ -117,6 +187,13 @@ def prepare_web_root(web_root: str, novnc_dir: str, static_dir: str) -> Dict[str
             if os.path.isfile(src):
                 shutil.copy2(src, os.path.join(web_root, "automation", name))
                 report["staticCopied"].append(name)
+            elif os.path.isdir(src):
+                # self-hosted webfonts and any future asset folder
+                shutil.copytree(src, os.path.join(web_root, "automation", name),
+                                dirs_exist_ok=True)
+                report["staticCopied"].append(name + "/")
+    report["versionedImports"] = version_module_imports(
+        os.path.join(web_root, "automation"))
 
     guide = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_guide.md")
     if os.path.exists(guide):
@@ -140,6 +217,11 @@ def prepare_web_root(web_root: str, novnc_dir: str, static_dir: str) -> Dict[str
     if os.path.exists(target_vnc):
         with open(target_vnc, encoding="utf-8") as handle:
             html = handle.read()
+        if VIEW_INJECT.search(html):
+            html = VIEW_INJECT.sub(lambda _: VIEW_BLOCK, html, count=1)
+        elif "</head>" in html:
+            html = html.replace("</head>", VIEW_BLOCK + "</head>", 1)
+            report["viewPatched"] = True
         block = inject_block(static_dir)
         if INJECT_BLOCK.search(html):
             # Replace rather than skip: the hash may have changed since the last
@@ -190,13 +272,55 @@ def make_handler_class(api: AutomationApi, base_handler: Type) -> Type:
                 self.wfile.write(payload)
             return True
 
+        ROOT_PAGE = (
+            "<!doctype html>\n<html lang=\"fa\" dir=\"rtl\">\n<head>\n"
+            "<meta charset=\"utf-8\">\n"
+            "<meta http-equiv=\"refresh\" content=\"0; url=/vnc.html"
+            "?autoconnect=true&amp;resize=scale&amp;path=websockify\">\n"
+            "<title>Majid Automation System</title>\n</head>\n"
+            "<body onload=\"location.replace('/vnc.html?autoconnect=true"
+            "&resize=scale&path=websockify')\">\n"
+            "<p style=\"font-family:sans-serif;text-align:center;margin-top:20vh\">"
+            "\u062f\u0631 \u062d\u0627\u0644 \u0627\u0646\u062a\u0642\u0627\u0644 "
+            "\u0628\u0647 \u062f\u0633\u06a9\u062a\u0627\u067e\u2026 "
+            "<a href=\"/vnc.html?autoconnect=true&amp;resize=scale&amp;path="
+            "websockify\">/vnc.html</a></p>\n</body>\n</html>\n"
+        )
+
+        def _root_redirect(self) -> bool:
+            """The platform's own domain must open the product, not a 404.
+
+            Hostim hands every app a bare domain, and its health check demands
+            HTTP 200 — a 302 on `/` made the platform mark the app unhealthy
+            and stop routing to it (the operator saw a page that "opened but
+            showed nothing"). So `/` answers 200 with a tiny page that
+            redirects itself to the viewer immediately; probes are happy and
+            humans land on the desktop. `/info` and the API are untouched.
+            """
+            parsed = urllib.parse.urlparse(self.path)
+            if parsed.path not in ("", "/"):
+                return False
+            body = self.ROOT_PAGE.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            if self.command != "HEAD":
+                self.wfile.write(body)
+            return True
+
         def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler naming
             if self._api_request("GET"):
+                return
+            if self._root_redirect():
                 return
             super().do_GET()
 
         def do_HEAD(self):  # noqa: N802
             if self._api_request("HEAD"):
+                return
+            if self._root_redirect():
                 return
             super().do_HEAD()
 
@@ -287,16 +411,39 @@ def build_api(args: argparse.Namespace) -> AutomationApi:
     # ctrl+a happens to select.
     shots = shot_archive(args.data_dir)
     texts = text_archive(args.data_dir)
+    flows = FlowStore(args.data_dir)
+    # The coworker agent is built before the engine so the engine can be handed
+    # the same notifier instance: a run that stops for a human then tells
+    # Telegram, without the engine knowing anything about Telegram.
+    agent = None
+    if not getattr(args, "no_agent", False):
+        agent = AgentHub(
+            args.data_dir, engine=None, flows=flows, backend=backend, cdp=cdp,
+            token=token,
+            public_base=getattr(args, "public_base", "") or "",
+            ai_port=int(getattr(args, "ai_cdp_port", 9223) or 9223),
+            ai_display=str(getattr(args, "ai_display", ":2") or ":2"))
+    # The visible pointer: a big yellow cursor plus a ripple on every click.
+    # It reads its own settings from the agent store when there is one, and
+    # quietly does nothing when CDP is not answering.
+    cursor_fx = CursorFx(cdp, args.cdp_port,
+                         config=(agent.cursor_config_for_backend()
+                                 if agent is not None else None))
+    backend.cursor_fx = cursor_fx
     engine = AutomationEngine(backend, args.data_dir, cdp=cdp, cdp_port=args.cdp_port,
-                              shots=shots, texts=texts)
+                              shots=shots, texts=texts,
+                              notifier=agent.notifier if agent is not None else None,
+                              agent=agent, cursor_fx=cursor_fx)
+    if agent is not None:
+        agent.engine = engine
     detector = Detector(backend, args.data_dir, viewport=dict(schema.DEFAULT_VIEWPORT),
                         cdp_port=args.cdp_port)
     guide_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_guide.md")
     return AutomationApi(
-        engine, FlowStore(args.data_dir), detector,
+        engine, flows, detector,
         data_dir=args.data_dir, token=token, control_script=args.control_script,
         viewport=dict(schema.DEFAULT_VIEWPORT), guide_path=guide_path,
-        shots=shots, texts=texts)
+        shots=shots, texts=texts, agent=agent)
 
 
 def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
@@ -318,6 +465,16 @@ def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
     parser.add_argument("--cdp-port", type=int, default=9222)
     parser.add_argument("--token", default="")
     parser.add_argument("--token-file", default="")
+    parser.add_argument("--no-agent", action="store_true",
+                        help="do not build the coworker agent (no scheduler thread, "
+                             "no /agent routes)")
+    parser.add_argument("--public-base", default="",
+                        help="public HTTPS origin used in links the agent sends out; "
+                             "defaults to the platform's BUILTIN_DOMAIN when set")
+    parser.add_argument("--ai-cdp-port", type=int, default=9223,
+                        help="debugging port of the agent's own browser")
+    parser.add_argument("--ai-display", default=":2",
+                        help="X display the agent's own browser runs on")
     parser.add_argument("--prepare-only", action="store_true",
                         help="build the web root and exit (no server)")
     parser.add_argument("--no-prepare", action="store_true")
@@ -331,6 +488,10 @@ def main(argv: Optional[list] = None) -> int:
     args.web_root = os.path.abspath(args.web_root)
     args.data_dir = os.path.abspath(args.data_dir)
     args.control_script = os.path.abspath(args.control_script)
+    # Hostim injects the app's built-in domain; links the agent sends out
+    # (Telegram handoffs, screenshots) need it to be absolute.
+    if not args.public_base and os.environ.get("BUILTIN_DOMAIN"):
+        args.public_base = "https://%s" % os.environ["BUILTIN_DOMAIN"].strip("/")
     logging.basicConfig(
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -352,6 +513,13 @@ def main(argv: Optional[list] = None) -> int:
     if not api.token:
         LOG.warning("no automation token was supplied: the API is open to anyone "
                     "who can reach this port. Set AUTOMATION_TOKEN.")
+    if api.agent is not None:
+        # Fills in any schedule that has no next-run time yet (a restart, or a
+        # job created while the server was down) and starts the one thread that
+        # fires jobs. Serial by design: the desktop has one mouse.
+        api.agent.start()
+        LOG.info("coworker agent ready (%d job(s) scheduled)",
+                 len(api.agent.jobs()))
 
     web_root = os.path.abspath(args.web_root)
     proxy = proxy_class(
@@ -374,6 +542,11 @@ def main(argv: Optional[list] = None) -> int:
 
     def shutdown(*_: Any) -> None:
         LOG.info("shutting down")
+        if api.agent is not None:
+            try:
+                api.agent.stop()
+            except Exception as exc:  # noqa: BLE001 - shutdown must always finish
+                LOG.warning("agent shutdown failed: %s", exc)
         server.stop()
 
     signal.signal(signal.SIGTERM, shutdown)

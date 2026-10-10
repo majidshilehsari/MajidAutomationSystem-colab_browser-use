@@ -26,6 +26,12 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 # allow everything else. Double quotes must pass because generated labels look
 # like: paste "سلام" and Persian names/labels are ordinary user input.
 _NAME_RE = re.compile(r"^[^\x00-\x1f\x7f/\\<>]{0,120}$", re.UNICODE)
+# A step label is display text, not a filename, so it may contain a slash: the
+# labels this module generates itself look like `goto https://lmarena.ai/`, and
+# a rule that rejects its own output makes validate_flow() non-idempotent - a
+# flow could be saved once and never again. Control characters and angle
+# brackets stay forbidden because labels are rendered into HTML and logs.
+_LABEL_RE = re.compile(r"^[^\x00-\x1f\x7f<>]{0,120}$", re.UNICODE)
 
 # Every step type, its required keys and the optional keys it accepts.
 STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
@@ -49,6 +55,17 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     # must stay under direct human control. The engine does not solve it.
     "pause_for_human_verification": {"required": ["prompt"], "optional": []},
     "shell": {"required": ["command"], "optional": []},
+    # The coworker agent's own browser (Xvfb :2 / CDP 9223): open a chat
+    # provider there, or ask it a question and read the answer back. These are
+    # what make an operation like "prompt DeepSeek and get its message" a
+    # sequence of ordinary, inspectable steps.
+    "agent_open": {"required": [], "optional": ["provider", "url"]},
+    "agent_ask": {"required": ["prompt"],
+                  "optional": ["provider", "timeout", "freshChat", "saveAs"]},
+    # Screenshot the desktop and run the captcha chain on it. The outcome is a
+    # proposal unless captcha.autoClick is on, exactly like the captcha pane.
+    "captcha_solve": {"required": [],
+                      "optional": ["label", "autoClick", "notify", "shot"]},
 }
 
 #: Fields accepted on every step regardless of type.
@@ -64,6 +81,64 @@ COMMON_STEP_FIELDS = [
 ]
 
 _INT_COORD_FIELDS = ("x", "y", "x1", "y1", "x2", "y2")
+
+#: What the library tab shows for each step type: the fields it needs, the
+#: fields it accepts, and one line of plain Persian about what it actually
+#: does on the desktop. Keeping this beside the schema means a new step type
+#: cannot ship without its own documentation.
+STEP_DOCS: Dict[str, Dict[str, str]] = {
+    "click": {"fa": "کلیک روی یک نقطهٔ دسکتاپ (مختصات از شناسایی صفحه).",
+              "en": "Click a desktop point (coordinates from page detection)."},
+    "double_click": {"fa": "دوبار کلیک پشت سر هم روی یک نقطه.",
+                     "en": "Double click a point."},
+    "drag": {"fa": "کشیدن از یک نقطه به نقطهٔ دیگر (جابه‌جایی، انتخاب متن).",
+             "en": "Drag from one point to another."},
+    "move": {"fa": "بردن نشانگر به یک نقطه بدون کلیک.",
+             "en": "Move the pointer without clicking."},
+    "type": {"fa": "تایپ متن؛ متن فارسی خودکار از راه clipboard می‌رود.",
+             "en": "Type text; non-ASCII goes through the clipboard."},
+    "paste": {"fa": "چسباندن متن از clipboard با Ctrl+V.",
+              "en": "Paste text from the clipboard with Ctrl+V."},
+    "key": {"fa": "زدن کلیدها، مثل [\"ctrl\", \"a\"] یا [\"Return\"].",
+            "en": "Press keys, e.g. [\"ctrl\", \"a\"] or [\"Return\"]."},
+    "scroll": {"fa": "اسکرول عمودی؛ مقدار مثبت یعنی پایین.",
+               "en": "Vertical scroll; positive means down."},
+    "wait": {"fa": "صبر به میلی‌ثانیه، بدون دست زدن به چیزی.",
+             "en": "Wait a number of milliseconds."},
+    "wait_for_text": {"fa": "صبر تا متنی روی صفحه پیدا (یا با absent غایب) شود.",
+                      "en": "Wait until a text appears (or with absent, disappears)."},
+    "goto_url": {"fa": "باز کردن یک آدرس در مرورگر اتوماسیون.",
+                 "en": "Open a URL in the automation browser."},
+    "focus_window": {"fa": "آوردن پنجره‌ای با این عنوان به جلو.",
+                     "en": "Raise the window with this title."},
+    "screenshot": {"fa": "اسکرین‌شات از دسکتاپ و ثبتش در اسکرین‌شات‌ها.",
+                   "en": "Take a desktop screenshot and archive it."},
+    "capture_text": {"fa": "خواندن متن دیده‌شدهٔ صفحه برای گزارش اجرا.",
+                     "en": "Read the visible page text into the run report."},
+    "pause_for_human_verification": {
+        "fa": "توقف عمدی برای انسان (کپچا، رمز دوم، رضایت‌نامه). سامانه حل نمی‌کند.",
+        "en": "Deliberate pause for a human (CAPTCHA, MFA, consent). Not solved."},
+    "shell": {"fa": "اجرای یک دستور shell روی دسکتاپ (با احتیاط: بدون sandbox).",
+              "en": "Run a shell command on the desktop (no sandbox)."},
+    "agent_open": {"fa": "باز کردن سایت چت در مرورگر اختصاصی ایجنت (نمایش :2).",
+                   "en": "Open a chat site in the agent's own browser (display :2)."},
+    "agent_ask": {"fa": "تایپ پرامپت در چت ایجنت، صبر تا پایان پاسخ و آوردن متنش.",
+                  "en": "Type a prompt into the agent chat and read the answer."},
+    "captcha_solve": {"fa": "اسکرین‌شات + زنجیرهٔ حل کپچا؛ خروجی پیشنهاد است.",
+                      "en": "Screenshot + captcha chain; the outcome is a proposal."},
+}
+
+
+def step_catalog() -> Dict[str, Dict[str, Any]]:
+    """Every step type with its fields and its one-line description."""
+    catalog: Dict[str, Dict[str, Any]] = {}
+    for kind, spec in STEP_TYPES.items():
+        docs = STEP_DOCS.get(kind, {})
+        catalog[kind] = {"required": list(spec["required"]),
+                         "optional": list(spec["optional"]),
+                         "common": list(COMMON_STEP_FIELDS),
+                         "fa": docs.get("fa", ""), "en": docs.get("en", "")}
+    return catalog
 
 
 class SchemaError(Exception):
@@ -160,7 +235,7 @@ def _validate_step(step: Any, index: int, viewport: Dict[str, int], errors: List
         if field in step and not isinstance(step[field], bool):
             _err(errors, "%s (%s): '%s' must be true or false" % (where, kind, field))
 
-    if "label" in step and (not isinstance(step["label"], str) or not _NAME_RE.match(step["label"])):
+    if "label" in step and (not isinstance(step["label"], str) or not _LABEL_RE.match(step["label"])):
         _err(errors, "%s (%s): 'label' must be plain text up to 120 characters" % (where, kind))
 
     step_id = step.get("id")

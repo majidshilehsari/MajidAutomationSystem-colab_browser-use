@@ -43,6 +43,10 @@ class ControlBackend:
         self.display = display
         self.screenshot_dir = screenshot_dir
         self.timeout = timeout
+        # Optional visual feedback: the yellow pointer and the click ripple
+        # from automation.cursor. Purely cosmetic, failures are swallowed
+        # inside CursorFx, and None means "leave the desktop alone".
+        self.cursor_fx: Any = None
         self._proc_lock = threading.Lock()
         self._proc: Optional[subprocess.Popen] = None
 
@@ -121,6 +125,15 @@ class ControlBackend:
 
     # -- primitives -----------------------------------------------------
     def click(self, x: int, y: int, button: str = "left", clicks: int = 1) -> Tuple[int, str, str]:
+        # The ring is drawn *before* the click so the operator sees where the
+        # pointer was when it happened, not where it ended up. Wrapped because
+        # the contract of a cosmetic effect is that it can never break a run,
+        # and this is the place that has to enforce it.
+        if self.cursor_fx is not None:
+            try:
+                self.cursor_fx.click_effect(int(x), int(y))
+            except Exception:  # noqa: BLE001 - cosmetic, never fatal
+                pass
         if clicks == 2:
             return self.control(["doubleclick", x, y])
         if clicks > 2:
@@ -162,7 +175,15 @@ class ControlBackend:
         return self.control(["scroll", amount])
 
     def goto_url(self, url: str) -> Tuple[int, str, str]:
-        return self.control(["url", url])
+        result = self.control(["url", url])
+        if result[0] == 0 and self.cursor_fx is not None:
+            # A navigation replaces the page, and with it the injected cursor
+            # style, so put the pointer back on the new document.
+            try:
+                self.cursor_fx.install()
+            except Exception:  # noqa: BLE001 - cosmetic, never fatal
+                pass
+        return result
 
     def focus_window(self, title: str) -> Tuple[int, str, str]:
         return self.control(["focus", title])
@@ -264,11 +285,23 @@ class AutomationEngine:
 
     def __init__(self, backend: ControlBackend, data_dir: str, sleep=time.sleep,
                  clock=time.time, cdp: Any = None, cdp_port: int = 9222,
-                 shots: Any = None, texts: Any = None):
+                 shots: Any = None, texts: Any = None, notifier: Any = None,
+                 agent: Any = None, cursor_fx: Any = None):
         self.backend = backend
         self.data_dir = data_dir
         self._cdp = cdp
         self._cdp_port = cdp_port
+        # The coworker agent, when attached: it serves the agent_open,
+        # agent_ask and captcha_solve step types and receives the handoff
+        # notifications through `notifier`. Assigned after construction by
+        # server.build_api, which builds the hub first for exactly this reason.
+        self._agent = agent
+        self.cursor_fx = cursor_fx
+        if cursor_fx is not None and getattr(self.backend, "cursor_fx", None) is None:
+            self.backend.cursor_fx = cursor_fx
+        # Optional Telegram (or other) notifier, told whenever a run stops for a
+        # human. Detached by default, so nothing about a plain run changes.
+        self._notifier = notifier
         # Indexes of what this session produced, so the panel can list every
         # screenshot and every extracted text without rescanning the disk.
         self._shots = shots
@@ -608,6 +641,13 @@ class AutomationEngine:
             "kind": kind, "message": message, "signals": signals,
             "pageOrigin": page_origin, "publicShot": public_name,
         }
+        # The notifier is told before the wait begins, so a slow or dead
+        # Telegram cannot delay the pause itself.
+        if self._notifier is not None:
+            try:
+                self._notifier.notify_handoff(dict(pending, runId=state.run_id))
+            except Exception as exc:  # noqa: BLE001 - a broken notifier must not break a run
+                self._log("warn", "handoff notification failed: %s" % exc)
         self._wait_for_human(state, label, pending, event)
 
     def _wait_for_human(self, state: RunState, label: str,
@@ -759,6 +799,17 @@ class AutomationEngine:
         if delay:
             self._interruptible_sleep(delay / 1000.0)
 
+    def page_text(self, limit: int = 2000) -> str:
+        """The visible page text, for callers that only want to look.
+
+        Used by the chat tab when the operator asks for context, and by
+        nothing that can change anything.
+        """
+        rc, out, err = self._page_text()
+        if rc != 0:
+            return ""
+        return (out or "")[:int(limit)]
+
     def _capture(self, shot_dir: str, name: str) -> Optional[str]:
         previous = getattr(self.backend, "screenshot_dir", None)
         try:
@@ -815,7 +866,63 @@ class AutomationEngine:
             return (0, path or "", "") if path else (1, "", "screenshot failed")
         if kind == "shell":
             return self.backend.shell(step["command"])
+        if kind == "agent_open":
+            return self._agent_open(step)
+        if kind == "agent_ask":
+            return self._agent_ask(step)
+        if kind == "captcha_solve":
+            return self._captcha_solve(step)
         return 1, "", "unsupported step type: %s" % kind
+
+    # -- steps that reach the coworker agent -------------------------------
+    def _no_agent(self) -> Tuple[int, str, str]:
+        return (1, "", "this deployment has no coworker agent attached"
+                       " (it was started with --no-agent)")
+
+    def _agent_open(self, step: Dict[str, Any]) -> Tuple[int, str, str]:
+        if self._agent is None:
+            return self._no_agent()
+        try:
+            result = self._agent.ai_open(provider=step.get("provider") or None,
+                                         url=step.get("url") or None)
+        except Exception as exc:  # noqa: BLE001 - one step failing is a step failing
+            return 1, "", str(exc)
+        return 0, json.dumps(result, ensure_ascii=False), ""
+
+    def _agent_ask(self, step: Dict[str, Any]) -> Tuple[int, str, str]:
+        if self._agent is None:
+            return self._no_agent()
+        try:
+            result = self._agent.ai_ask(
+                str(step.get("prompt") or ""),
+                provider=step.get("provider") or None,
+                timeout=float(step.get("timeout") or 0) or None,
+                fresh_chat=None if step.get("freshChat") is None
+                else bool(step.get("freshChat")))
+        except Exception as exc:  # noqa: BLE001
+            return 1, "", str(exc)
+        text_out = str(result.get("text") or "")
+        if step.get("saveAs"):
+            # The answer becomes a note, so later steps and the operator can
+            # both find it again.
+            self._agent.add_note("%s\n%s" % (step.get("prompt") or "", text_out),
+                                 kind="agent-answer", actor="flow")
+        return 0, text_out, ""
+
+    def _captcha_solve(self, step: Dict[str, Any]) -> Tuple[int, str, str]:
+        if self._agent is None:
+            return self._no_agent()
+        context = {"label": step.get("label") or "captcha step"}
+        if step.get("autoClick") is not None:
+            context["autoClick"] = bool(step.get("autoClick"))
+        if step.get("notify") is not None:
+            context["notify"] = bool(step.get("notify"))
+        try:
+            result = self._agent.captcha_solve(shot_name=step.get("shot") or "",
+                                               context=context)
+        except Exception as exc:  # noqa: BLE001
+            return 1, "", str(exc)
+        return 0, json.dumps(result, ensure_ascii=False), 
 
     def _wait_for_text(self, step: Dict[str, Any]) -> Tuple[int, str, str]:
         needle = step["text"]

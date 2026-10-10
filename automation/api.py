@@ -17,6 +17,8 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
 from . import schema
+from . import clipboard
+from .agent import AgentError
 from .engine import TERMINAL_STATES, png_size
 
 API_PREFIX = "/automation/api"
@@ -127,7 +129,7 @@ class AutomationApi:
     def __init__(self, engine, store: FlowStore, detector=None, *, data_dir: str,
                  token: str = "", control_script: str = "", viewport=None,
                  guide_path: str = "", version: str = "1.0",
-                 shots=None, texts=None):
+                 shots=None, texts=None, agent=None):
         self.engine = engine
         # Indexes of every screenshot and every extracted text this session
         # produced, so two panel tabs can list them with timestamps.
@@ -141,6 +143,9 @@ class AutomationApi:
         self.viewport = viewport or dict(schema.DEFAULT_VIEWPORT)
         self.guide_path = guide_path
         self.version = version
+        # The coworker agent. Optional: a deployment that does not construct one
+        # keeps the original route table and behaves exactly as before.
+        self.agent = agent
         self.routes: List[Tuple[str, str, Callable[..., Response]]] = [
             ("GET", "/info", self.route_info),
             ("GET", "/status", self.route_status),
@@ -166,6 +171,112 @@ class AutomationApi:
             ("POST", "/texts", self.route_text_add),
             ("DELETE", "/texts/*", self.route_text_delete),
             ("POST", "/prompt", self.route_prompt),
+            # The browser<->desktop clipboard bridge (noVNC carries keys, not
+            # clipboard text, so the panel moves it explicitly).
+            ("GET", "/clipboard", self.route_clipboard_read),
+            ("POST", "/clipboard", self.route_clipboard_write),
+        ]
+        if agent is not None:
+            self.routes.extend(self._agent_routes())
+
+    def _agent_routes(self) -> List[Tuple[str, str, Callable[..., Response]]]:
+        """The coworker agent's surface, added only when an agent is attached.
+
+        Sub-resource actions (`/agent/job-run`, `/agent/script-decision`) are
+        plain paths with the id in the body rather than `/agent/jobs/*/run`,
+        because the router here captures a `*` only at the end of a pattern and
+        widening it would touch every existing route.
+        """
+        return [
+            ("GET", "/agent", self.route_agent_overview),
+            ("POST", "/agent/settings", self.route_agent_settings),
+            ("POST", "/agent/kill-switch", self.route_agent_kill_switch),
+            ("POST", "/agent/query", self.route_agent_query),
+            ("POST", "/agent/chat", self.route_agent_chat),
+            ("GET", "/agent/jobs", self.route_agent_jobs_list),
+            ("POST", "/agent/jobs", self.route_agent_job_create),
+            ("PUT", "/agent/jobs/*", self.route_agent_job_update),
+            ("DELETE", "/agent/jobs/*", self.route_agent_job_delete),
+            ("POST", "/agent/job-run", self.route_agent_job_run),
+            ("GET", "/agent/scripts", self.route_agent_scripts_list),
+            ("POST", "/agent/scripts", self.route_agent_script_create),
+            ("PUT", "/agent/scripts/*", self.route_agent_script_update),
+            ("DELETE", "/agent/scripts/*", self.route_agent_script_delete),
+            ("POST", "/agent/script-decision", self.route_agent_script_decision),
+            ("POST", "/agent/script-run", self.route_agent_script_run),
+            ("POST", "/agent/script-kill", self.route_agent_script_kill),
+            ("GET", "/agent/notes", self.route_agent_notes_list),
+            ("POST", "/agent/notes", self.route_agent_note_add),
+            ("DELETE", "/agent/notes/*", self.route_agent_note_delete),
+            ("GET", "/agent/audit", self.route_agent_audit),
+            ("GET", "/agent/telegram/status", self.route_agent_telegram_status),
+            ("GET", "/agent/telegram/targets", self.route_agent_telegram_targets),
+            ("POST", "/agent/telegram/test", self.route_agent_telegram_test),
+            ("POST", "/agent/telegram/send", self.route_agent_telegram_send),
+            ("POST", "/agent/telegram/login", self.route_agent_telegram_login),
+            ("POST", "/agent/telegram/login-finish", self.route_agent_telegram_login_finish),
+            ("GET", "/agent/captcha/config", self.route_agent_captcha_config_get),
+            ("POST", "/agent/captcha/config", self.route_agent_captcha_config_set),
+            ("POST", "/agent/captcha/solve", self.route_agent_captcha_solve),
+            ("POST", "/agent/captcha/execute", self.route_agent_captcha_execute),
+            ("GET", "/agent/captcha/history", self.route_agent_captcha_history),
+            ("GET", "/agent/ai/status", self.route_agent_ai_status),
+            ("POST", "/agent/ai/open", self.route_agent_ai_open),
+            ("GET", "/agent/ai/shot", self.route_agent_ai_shot),
+            # the chat tab
+            ("GET", "/agent/chat/messages", self.route_agent_chat_messages),
+            ("POST", "/agent/chat/send", self.route_agent_chat_send),
+            ("POST", "/agent/chat/clear", self.route_agent_chat_clear),
+            ("POST", "/agent/chat/apply-flow", self.route_agent_chat_apply_flow),
+            # the generated agent key
+            ("GET", "/agent/key", self.route_agent_key_info),
+            ("POST", "/agent/key/reveal", self.route_agent_key_reveal),
+            ("POST", "/agent/key/rotate", self.route_agent_key_rotate),
+            ("POST", "/agent/key/enable", self.route_agent_key_enable),
+            # the operations library
+            ("GET", "/agent/operations", self.route_agent_operations_list),
+            ("POST", "/agent/operations", self.route_agent_operations_create),
+            ("PUT", "/agent/operations/*", self.route_agent_operations_update),
+            ("DELETE", "/agent/operations/*", self.route_agent_operations_delete),
+            ("POST", "/agent/operation-run", self.route_agent_operation_run),
+            ("POST", "/agent/operation-reset", self.route_agent_operation_reset),
+            # the pointer and the click ripple
+            ("GET", "/agent/cursor", self.route_agent_cursor_get),
+            ("POST", "/agent/cursor", self.route_agent_cursor_set),
+            # the copy-paste route list
+            ("GET", "/agent/api-index", self.route_agent_api_index),
+            # the coworker agent's eyes on Chrome
+            ("GET", "/agent/browser", self.route_agent_browser),
+            ("GET", "/agent/browser/tabs", self.route_agent_browser_tabs),
+            ("GET", "/agent/browser/history", self.route_agent_browser_history),
+            ("POST", "/agent/browser/tab", self.route_agent_browser_tab),
+            # continuous database backups
+            ("GET", "/agent/backups", self.route_agent_backups_list),
+            ("POST", "/agent/backups", self.route_agent_backups_create),
+            ("GET", "/agent/backup-download", self.route_agent_backup_download),
+            ("POST", "/agent/backup-delete", self.route_agent_backup_delete),
+            ("POST", "/agent/backup-send", self.route_agent_backup_send),
+            ("POST", "/agent/backup-config", self.route_agent_backup_config),
+            # the trustworthy telegram test
+            ("GET", "/agent/telegram/log", self.route_agent_telegram_log),
+            ("POST", "/agent/telegram/diagnose", self.route_agent_telegram_diagnose),
+            # Phase 9: the development journal, dedicated HTML pages,
+            # structured suggestions behind human gates, and a strictly
+            # read-only window into the whole database.
+            ("GET", "/agent/devlog", self.route_agent_devlog_list),
+            ("POST", "/agent/devlog", self.route_agent_devlog_add),
+            ("GET", "/agent/pages", self.route_agent_pages_list),
+            ("POST", "/agent/pages", self.route_agent_pages_save),
+            ("POST", "/agent/page-delete", self.route_agent_page_delete),
+            ("GET", "/agent/suggestions", self.route_agent_suggestions_list),
+            ("POST", "/agent/suggestions", self.route_agent_suggestion_create),
+            ("POST", "/agent/suggestion-update", self.route_agent_suggestion_update),
+            ("POST", "/agent/suggestion-decision", self.route_agent_suggestion_decision),
+            ("POST", "/agent/suggestion-apply", self.route_agent_suggestion_apply),
+            ("POST", "/agent/suggestion-rollback", self.route_agent_suggestion_rollback),
+            ("POST", "/agent/suggestion-delete", self.route_agent_suggestion_delete),
+            ("GET", "/agent/db/schema", self.route_agent_db_schema),
+            ("POST", "/agent/db/query", self.route_agent_db_query),
         ]
 
     # -- helpers --------------------------------------------------------
@@ -175,11 +286,44 @@ class AutomationApi:
         # unguessable.
         return bool(self.token) and path != "/info" and not path.startswith("/public/")
 
-    def authorized(self, path: str, headers: Dict[str, str]) -> bool:
+    def authenticate(self, path: str, headers: Dict[str, str],
+                     query: Optional[Dict[str, List[str]]] = None) -> str:
+        """Who is asking: "public", "operator", "agent", "cut" or "denied".
+
+        Two keys open this API. The platform token (`AUTOMATION_TOKEN`) is the
+        operator's and always wins, so cutting the agent can never lock the
+        human out of their own sidebar. The agent key is the one the sidebar
+        generates, accepts it as `Authorization: Bearer`, as `x-agent-key`, or
+        as `?k=` for clients that cannot set headers - and when access is cut,
+        or the kill switch is on, it answers 403 instead of silently working.
+        """
         if not self.requires_auth(path):
-            return True
+            return "public"
         supplied = headers.get("x-automation-token", "")
-        return secrets.compare_digest(supplied, self.token)
+        if supplied and secrets.compare_digest(supplied, self.token):
+            return "operator"
+        candidate = ""
+        auth = headers.get("authorization", "")
+        if auth.lower().startswith("bearer "):
+            candidate = auth[len("bearer "):].strip()
+        if not candidate:
+            candidate = headers.get("x-agent-key", "")
+        if not candidate and query:
+            candidate = (query.get("k") or [""])[0]
+        if not candidate or self.agent is None:
+            return "denied"
+        if not self.agent.store.agent_key_enabled():
+            return "cut"
+        if self.agent.store.kill_switch_engaged():
+            return "cut"
+        if not self.agent.check_agent_access(candidate):
+            return "denied"
+        return "agent"
+
+    def authorized(self, path: str, headers: Dict[str, str],
+                   query: Optional[Dict[str, List[str]]] = None) -> bool:
+        return self.authenticate(path, headers, query) in ("public", "operator",
+                                                           "agent")
 
     def handle(self, method: str, path: str, *, query: Optional[Dict[str, List[str]]] = None,
                body: bytes = b"", headers: Optional[Dict[str, str]] = None) -> Response:
@@ -188,8 +332,23 @@ class AutomationApi:
         headers = headers or {}
         method = method.upper()
 
-        if not self.authorized(path, headers):
+        verdict = self.authenticate(path, headers, query)
+        if verdict == "cut":
+            return error_response(
+                403, "agent access is cut: the key is disabled or the kill switch "
+                     "is on. The operator's own token still works.")
+        if verdict == "denied":
             return error_response(401, "missing or wrong X-Automation-Token header")
+        # Routes with a human gate (decisions, apply, rollback, deletes) read
+        # this to tell the operator's own token from the agent key.
+        self._last_verdict = verdict
+        if verdict == "agent" and self.agent is not None:
+            # The connector promise: every agent-key call is audited, with the
+            # endpoint but never the key itself, and never through ?k= logs.
+            try:
+                self.agent.audit_key_use(method, path)
+            except Exception:
+                pass
 
         for route_method, pattern, handler in self.routes:
             if route_method != method:
@@ -200,6 +359,11 @@ class AutomationApi:
             try:
                 return handler(query=query, body=body, params=match)
             except ApiError as exc:
+                return error_response(exc.status, str(exc))
+            except AgentError as exc:
+                # Raised by the coworker agent; it carries its own status so the
+                # sidebar can tell "you forgot to approve it" (409) from "the
+                # model API is down" (502).
                 return error_response(exc.status, str(exc))
             except ValueError as exc:
                 return error_response(400, str(exc))
@@ -276,7 +440,57 @@ class AutomationApi:
         if action == "confirm":
             approve = bool(payload.get("approve", False))
             return json_response(200, {"run": self.engine.confirm(approve)})
-        raise ApiError(400, "action must be one of pause, resume, stop, confirm")
+        return self._manual_primitive(action, payload)
+
+    def _manual_primitive(self, action: str,
+                          payload: Dict[str, Any]) -> Response:
+        """One primitive, right now, without building a flow.
+
+        This is what makes the pages tab's "click it" button real: a click on
+        an element's desktop coordinates. Refused while a run owns the mouse,
+        because two drivers on one pointer is how runs get corrupted.
+        """
+        backend = self.engine.backend if self.engine is not None else None
+        if backend is None:
+            raise ApiError(409, "no control backend is attached")
+        if self.engine is not None and self.engine.busy():
+            raise ApiError(409, "a run owns the mouse right now")
+        try:
+            if action == "click":
+                rc, out, err = backend.click(int(payload.get("x")),
+                                             int(payload.get("y")),
+                                             str(payload.get("button") or "left"),
+                                             int(payload.get("clicks") or 1))
+            elif action == "double_click":
+                rc, out, err = backend.click(int(payload.get("x")),
+                                             int(payload.get("y")), "left", 2)
+            elif action == "move":
+                rc, out, err = backend.move(int(payload.get("x")),
+                                            int(payload.get("y")))
+            elif action == "type":
+                rc, out, err = backend.type_text(str(payload.get("text") or ""))
+            elif action == "paste":
+                rc, out, err = backend.paste(str(payload.get("text") or ""))
+            elif action == "key":
+                keys = payload.get("keys")
+                if not isinstance(keys, list) or not keys:
+                    raise ApiError(400, "'keys' must be a non-empty list")
+                rc, out, err = backend.key(keys)
+            elif action == "goto_url":
+                rc, out, err = backend.goto_url(str(payload.get("url") or ""))
+            elif action == "screenshot":
+                rc, out, err = backend.screenshot(
+                    str(payload.get("name") or "manual-%d.png" % int(time.time())))
+            else:
+                raise ApiError(400, "action must be one of pause, resume, stop, "
+                                    "confirm, click, double_click, move, type, "
+                                    "paste, key, goto_url, screenshot")
+        except (TypeError, ValueError) as exc:
+            raise ApiError(400, "bad coordinates or text: %s" % exc)
+        if rc != 0:
+            return json_response(502, {"ok": False, "rc": rc,
+                                       "error": (err or out)[:400]})
+        return json_response(200, {"ok": True, "rc": rc, "stdout": (out or "")[:400]})
 
     def route_flows_list(self, **_: Any) -> Response:
         return json_response(200, {"flows": self.store.list()})
@@ -452,8 +666,12 @@ class AutomationApi:
         return text_response(200, _report_section(self.engine.status(), base) or
                              "هنوز اجرایی ثبت نشده است.")
 
-    def route_prompt(self, *, body: bytes = b"", **_: Any) -> Response:
-        payload = self.read_json(body)
+    def build_prompt(self, payload: Dict[str, Any]) -> str:
+        """Assemble the full context packet an AI needs to drive this system.
+
+        Shared by `/prompt` (a human copies it to a chat) and `/agent/chat` (the
+        agent sends it to the model itself), so both always see the same world.
+        """
         guide = _builtin_guide(self.viewport)
         if self.guide_path and os.path.exists(self.guide_path):
             with open(self.guide_path, encoding="utf-8") as handle:
@@ -480,7 +698,526 @@ class AutomationApi:
         if report:
             parts.append(report)
         parts.append(_reply_instructions())
-        return text_response(200, "\n\n---\n\n".join(parts))
+        return "\n\n---\n\n".join(parts)
+
+    def route_prompt(self, *, body: bytes = b"", **_: Any) -> Response:
+        return text_response(200, self.build_prompt(self.read_json(body)))
+
+    # -- coworker agent -------------------------------------------------
+    def route_agent_overview(self, **_: Any) -> Response:
+        return json_response(200, self.agent.overview())
+
+    def route_agent_settings(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(200, {"ok": True,
+                                   "settings": self.agent.save_settings(self.read_json(body))})
+
+    def route_agent_kill_switch(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.set_kill_switch(bool(payload.get("on"))))
+
+    def route_agent_query(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.query(str(payload.get("sql") or ""),
+                                                   int(payload.get("limit") or 200)))
+
+    def route_agent_chat(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        request = str(payload.get("request") or payload.get("prompt") or "")
+        if not request.strip():
+            raise ApiError(400, "missing 'request'")
+        context = {key: payload[key] for key in ("pageId", "flow", "previousReply",
+                                                 "publicBase") if key in payload}
+        context["request"] = request
+        return json_response(200, self.agent.chat(self.build_prompt(context)))
+
+    def route_agent_jobs_list(self, **_: Any) -> Response:
+        return json_response(200, {"jobs": self.agent.jobs()})
+
+    def route_agent_job_create(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(201, {"ok": True, "job": self.agent.save_job(self.read_json(body))})
+
+    def route_agent_job_update(self, *, params: Dict[str, str], body: bytes = b"",
+                               **_: Any) -> Response:
+        job = self.agent.save_job(self.read_json(body), job_id=params["*"])
+        return json_response(200, {"ok": True, "job": job})
+
+    def route_agent_job_delete(self, *, params: Dict[str, str], **_: Any) -> Response:
+        return json_response(200, self.agent.delete_job(params["*"]))
+
+    def route_agent_job_run(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        job_id = str(payload.get("id") or "")
+        if not job_id:
+            raise ApiError(400, "missing 'id'")
+        # A run can take minutes; by default it is started and the answer says
+        # so, because holding the request open that long behind an ingress is a
+        # guess about somebody else's timeout. `wait` is there for callers that
+        # really want the outcome in this response.
+        return json_response(200, self.agent.run_job_now(
+            job_id, wait=bool(payload.get("wait"))))
+
+    def route_agent_scripts_list(self, **_: Any) -> Response:
+        return json_response(200, {"scripts": self.agent.script_list(),
+                                   "config": self.agent.scripts.config()})
+
+    def route_agent_script_create(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        actor = "operator" if payload.get("actor") == "operator" else "agent"
+        return json_response(201, {"ok": True,
+                                   "script": self.agent.script_save(payload, actor=actor)})
+
+    def route_agent_script_update(self, *, params: Dict[str, str], body: bytes = b"",
+                                  **_: Any) -> Response:
+        script = self.agent.script_save(self.read_json(body), script_id=params["*"])
+        return json_response(200, {"ok": True, "script": script})
+
+    def route_agent_script_delete(self, *, params: Dict[str, str], **_: Any) -> Response:
+        return json_response(200, self.agent.script_delete(params["*"]))
+
+    def route_agent_script_decision(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        script_id = str(payload.get("id") or "")
+        if not script_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, {"ok": True, "script": self.agent.script_decision(
+            script_id, bool(payload.get("approve", True)))})
+
+    def route_agent_script_run(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        script_id = str(payload.get("id") or "")
+        if not script_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, self.agent.script_run(script_id))
+
+    def route_agent_script_kill(self, **_: Any) -> Response:
+        return json_response(200, self.agent.script_kill())
+
+    def route_agent_notes_list(self, *, query: Dict[str, List[str]], **_: Any) -> Response:
+        kind = (query.get("kind") or [""])[0] or None
+        limit = int((query.get("limit") or ["200"])[0])
+        return json_response(200, {"notes": self.agent.notes(kind=kind, limit=limit)})
+
+    def route_agent_note_add(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        actor = "agent" if payload.get("actor") == "agent" else "operator"
+        return json_response(201, {"ok": True, "note": self.agent.add_note(
+            str(payload.get("body") or ""), str(payload.get("kind") or "note"),
+            actor=actor)})
+
+    def route_agent_note_delete(self, *, params: Dict[str, str], **_: Any) -> Response:
+        return json_response(200, self.agent.delete_note(params["*"]))
+
+    def route_agent_audit(self, *, query: Dict[str, List[str]], **_: Any) -> Response:
+        limit = int((query.get("limit") or ["200"])[0])
+        return json_response(200, {"audit": self.agent.audit(limit=limit)})
+
+    def route_agent_telegram_status(self, *, query: Dict[str, List[str]], **_: Any) -> Response:
+        probe = (query.get("probe") or ["0"])[0] in ("1", "true", "yes")
+        return json_response(200, self.agent.telegram_status(probe=probe))
+
+    def route_agent_telegram_targets(self, **_: Any) -> Response:
+        return json_response(200, {"targets": self.agent.telegram_targets()})
+
+    def route_agent_telegram_test(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        text = str(payload.get("text") or "")
+        target = payload.get("target")
+        channel = str(payload.get("channel") or "") or None
+        if target in (None, ""):
+            raise ApiError(400, "a test message needs a target: pick who should "
+                                "receive it")
+        return json_response(200, self.agent.telegram_send(
+            text or "پیام آزمایشی از سامانهٔ اتوماسیون ✔",
+            target=target, channel=channel, purpose="manual"))
+
+    def route_agent_telegram_send(self, *, body: bytes = b"", **_: Any) -> Response:
+        """A message the agent decided to send, to a target it names.
+
+        Same validation as the test route, plus a `purpose`, so a message can
+        be routed over the channel that purpose is configured to use.
+        """
+        payload = self.read_json(body)
+        text = str(payload.get("text") or "")
+        if not text.strip():
+            raise ApiError(400, "missing 'text'")
+        return json_response(200, self.agent.telegram_send(
+            text,
+            target=payload.get("target"),
+            channel=str(payload.get("channel") or "") or None,
+            purpose=str(payload.get("purpose") or "manual"),
+            actor=str(payload.get("actor") or "agent")))
+
+    def route_agent_telegram_login(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        phone = str(payload.get("phone") or "")
+        if not phone.strip():
+            raise ApiError(400, "missing 'phone'")
+        return json_response(200, self.agent.telegram_login_start(phone))
+
+    def route_agent_telegram_login_finish(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        code = str(payload.get("code") or "")
+        if not code.strip():
+            raise ApiError(400, "missing 'code'")
+        return json_response(200, self.agent.telegram_login_finish(
+            code, str(payload.get("password") or "")))
+
+    def route_agent_captcha_config_get(self, **_: Any) -> Response:
+        return json_response(200, {"config": self.agent.captcha.config(),
+                                   "extension": self.agent.captcha.extension_status()})
+
+    def route_agent_captcha_config_set(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(200, {"ok": True,
+                                   "config": self.agent.captcha_set_config(
+                                       self.read_json(body))})
+
+    def route_agent_captcha_solve(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        context = payload.get("context")
+        result = self.agent.captcha_solve(str(payload.get("shot") or ""),
+                                          context if isinstance(context, dict) else None)
+        return json_response(200, result)
+
+    def route_agent_captcha_execute(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        actions = payload.get("actions")
+        if not isinstance(actions, list) or not actions:
+            raise ApiError(400, "missing 'actions'")
+        return json_response(200, self.agent.captcha_execute(actions))
+
+    def route_agent_captcha_history(self, *, query: Dict[str, List[str]], **_: Any) -> Response:
+        limit = int((query.get("limit") or ["50"])[0])
+        return json_response(200, {"history": self.agent.captcha.history(limit=limit)})
+
+    def route_agent_ai_status(self, **_: Any) -> Response:
+        return json_response(200, self.agent.ai_status())
+
+    def route_agent_ai_open(self, **_: Any) -> Response:
+        return json_response(200, self.agent.ai_open())
+
+    def route_agent_ai_shot(self, **_: Any) -> Response:
+        path = self.agent.ai_screenshot()
+        with open(path, "rb") as handle:
+            data = handle.read()
+        return 200, {"Content-Type": "image/png", "Cache-Control": "no-store"}, data
+
+    # -- the chat tab ------------------------------------------------------
+    def route_agent_chat_messages(self, query: Dict[str, List[str]],
+                                  **_: Any) -> Response:
+        limit = int((query.get("limit") or ["200"])[0])
+        return json_response(200, {
+            "messages": self.agent.chat_messages(limit),
+            "pending": self.agent.chat_pending(),
+            "providers": self.agent.chat_providers(),
+        })
+
+    def route_agent_chat_send(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.chat_send(
+            str(payload.get("text") or ""),
+            provider=str(payload.get("provider") or ""),
+            with_context=bool(payload.get("withContext"))))
+
+    def route_agent_chat_clear(self, **_: Any) -> Response:
+        return json_response(200, self.agent.chat_clear())
+
+    def route_agent_chat_apply_flow(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        message_id = str(payload.get("id") or "")
+        if not message_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, {"flow": self.agent.chat_apply_flow(message_id)})
+
+    # -- the generated agent key --------------------------------------------
+    def route_agent_key_info(self, **_: Any) -> Response:
+        return json_response(200, self.agent.agent_key_info())
+
+    def route_agent_key_reveal(self, **_: Any) -> Response:
+        return json_response(200, self.agent.agent_key_reveal())
+
+    def route_agent_key_rotate(self, **_: Any) -> Response:
+        return json_response(200, self.agent.agent_key_rotate())
+
+    def route_agent_key_enable(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        if "enabled" not in payload:
+            raise ApiError(400, "missing 'enabled'")
+        return json_response(200,
+                             self.agent.agent_key_set_enabled(bool(payload["enabled"])))
+
+    # -- the operations library ----------------------------------------------
+    def route_agent_operations_list(self, **_: Any) -> Response:
+        return json_response(200, {"operations": self.agent.operation_list(),
+                                   "stepTypes": schema.step_catalog()})
+
+    def route_agent_operations_create(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(201, {"operation":
+                                   self.agent.operation_save(self.read_json(body))})
+
+    def route_agent_operations_update(self, *, body: bytes = b"",
+                                      params: Dict[str, str], **_: Any) -> Response:
+        return json_response(200, {"operation": self.agent.operation_save(
+            self.read_json(body), operation_id=params["*"])})
+
+    def route_agent_operations_delete(self, *, params: Dict[str, str],
+                                      **_: Any) -> Response:
+        return json_response(200, self.agent.operation_delete(params["*"]))
+
+    def route_agent_operation_run(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        operation_id = str(payload.get("id") or "")
+        if not operation_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, self.agent.operation_run(operation_id))
+
+    def route_agent_operation_reset(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        operation_id = str(payload.get("id") or "")
+        if not operation_id:
+            raise ApiError(400, "missing 'id'")
+        return json_response(200, {"operation":
+                                   self.agent.operation_reset(operation_id)})
+
+    # -- the pointer and the click ripple -------------------------------------
+    def route_agent_cursor_get(self, **_: Any) -> Response:
+        return json_response(200, {"cursor": self.agent.cursor_info()})
+
+    def route_agent_cursor_set(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(200, {"cursor":
+                                   self.agent.cursor_set(self.read_json(body))})
+
+    # -- Chrome knowledge -------------------------------------------------
+    def route_agent_browser(self, *, query: Optional[Dict[str, List[str]]] = None,
+                            **_: Any) -> Response:
+        query = query or {}
+        return json_response(200, self.agent.browser_overview(
+            profile=(query.get("profile") or [""])[0],
+            limit=int((query.get("limit") or ["200"])[0] or 200),
+            query=(query.get("q") or [""])[0],
+            days=float((query.get("days") or ["0"])[0] or 0)))
+
+    def route_agent_browser_tabs(self, **_: Any) -> Response:
+        return json_response(200, self.agent.browser_tabs())
+
+    def route_agent_browser_history(self, *,
+                                    query: Optional[Dict[str, List[str]]] = None,
+                                    **_: Any) -> Response:
+        query = query or {}
+        return json_response(200, self.agent.browser_history(
+            profile=(query.get("profile") or [""])[0],
+            limit=int((query.get("limit") or ["200"])[0] or 200),
+            query=(query.get("q") or [""])[0],
+            days=float((query.get("days") or ["0"])[0] or 0)))
+
+    def route_agent_browser_tab(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.browser_tab(
+            str(payload.get("action") or ""),
+            target_id=str(payload.get("id") or ""),
+            url=str(payload.get("url") or ""),
+            port=payload.get("port") or None))
+
+    # -- backups ----------------------------------------------------------
+    def route_agent_backups_list(self, **_: Any) -> Response:
+        return json_response(200, self.agent.backup_list())
+
+    def route_agent_backups_create(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        secrets = payload.get("includeSecrets")
+        return json_response(201, self.agent.backup_create(
+            include_secrets=None if secrets is None else bool(secrets),
+            label=str(payload.get("label") or "")))
+
+    def route_agent_backup_download(self, *,
+                                    query: Optional[Dict[str, List[str]]] = None,
+                                    **_: Any) -> Response:
+        name = ((query or {}).get("name") or [""])[0]
+        data = self.agent.backup_read(name)
+        return 200, {"Content-Type": "application/gzip",
+                     "Content-Disposition": 'attachment; filename="%s"' % name,
+                     "Cache-Control": "no-store"}, data
+
+    def route_agent_backup_delete(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.backup_delete(
+            str(payload.get("name") or "")))
+
+    def route_agent_backup_send(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.backup_send(
+            name=str(payload.get("name") or ""),
+            target=str(payload.get("target") or ""),
+            channel=str(payload.get("channel") or "")))
+
+    def route_agent_backup_config(self, *, body: bytes = b"", **_: Any) -> Response:
+        return json_response(200, self.agent.backup_configure(
+            self.read_json(body)))
+
+    # -- the step-by-step telegram test ------------------------------------
+    def route_agent_telegram_log(self, *,
+                                 query: Optional[Dict[str, List[str]]] = None,
+                                 **_: Any) -> Response:
+        limit = int(((query or {}).get("limit") or ["100"])[0] or 100)
+        return json_response(200, self.agent.telegram_log(limit=limit))
+
+    def route_agent_telegram_diagnose(self, *, body: bytes = b"",
+                                      **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.telegram_diagnose(
+            target=payload.get("target") or "",
+            channel=str(payload.get("channel") or ""),
+            text=str(payload.get("text") or "")))
+
+    # -- clipboard bridge (operator surface) -----------------------------
+    def route_clipboard_read(self, **_: Any) -> Response:
+        try:
+            text = clipboard.read_text()
+        except clipboard.ClipboardError as exc:
+            raise ApiError(409, str(exc))
+        return json_response(200, {"ok": True, "text": text,
+                                   "length": len(text)})
+
+    def route_clipboard_write(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        if "text" not in payload:
+            raise ApiError(400, "missing 'text'")
+        try:
+            result = clipboard.write_text(str(payload.get("text") or ""))
+        except clipboard.ClipboardError as exc:
+            raise ApiError(409, str(exc))
+        return json_response(200, result)
+
+    # -- Phase 9 agent surfaces ------------------------------------------
+    def _actor(self) -> str:
+        return "agent" if getattr(self, "_last_verdict", "operator") == "agent" \
+            else "operator"
+
+    def _require_operator(self) -> None:
+        if self._actor() != "operator":
+            raise ApiError(403, "این عمل فقط با رمز خودِ اپراتور انجام می‌شود؛"
+                                " کلید ایجنت اجازهٔ آن را ندارد.")
+
+    def _int_id(self, payload: Dict[str, Any], name: str = "id") -> int:
+        try:
+            return int(payload.get(name))
+        except (TypeError, ValueError):
+            raise ApiError(400, "'%s' must be a number" % name)
+
+    def _int_query(self, query: Optional[Dict[str, List[str]]], name: str,
+                   default: int = 0) -> int:
+        raw = ((query or {}).get(name) or [""])[0]
+        if raw == "":
+            return default
+        try:
+            return int(raw)
+        except ValueError:
+            raise ApiError(400, "'%s' must be a number" % name)
+
+    def route_agent_devlog_list(self, *,
+                                query: Optional[Dict[str, List[str]]] = None,
+                                **_: Any) -> Response:
+        return json_response(200, self.agent.devlog_list(
+            limit=self._int_query(query, "limit", 50)))
+
+    def route_agent_devlog_add(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(201, self.agent.devlog_add(
+            str(payload.get("title") or ""), str(payload.get("body") or ""),
+            actor=self._actor()))
+
+    def route_agent_pages_list(self, *,
+                               query: Optional[Dict[str, List[str]]] = None,
+                               **_: Any) -> Response:
+        page_id = self._int_query(query, "id", 0)
+        if page_id:
+            return json_response(200, self.agent.pages_get(page_id))
+        return json_response(200, self.agent.pages_list())
+
+    def route_agent_pages_save(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(201, self.agent.pages_save(
+            str(payload.get("title") or ""), str(payload.get("html") or ""),
+            page_id=payload.get("id"), actor=self._actor()))
+
+    def route_agent_page_delete(self, *, body: bytes = b"", **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.pages_delete(
+            self._int_id(payload), actor=self._actor()))
+
+    def route_agent_suggestions_list(self, *,
+                                     query: Optional[Dict[str, List[str]]] = None,
+                                     **_: Any) -> Response:
+        suggestion_id = self._int_query(query, "id", 0)
+        if suggestion_id:
+            return json_response(200, {"suggestion":
+                                       self.agent.suggestion_get(suggestion_id)})
+        def one(name: str) -> str:
+            return ((query or {}).get(name) or [""])[0]
+        return json_response(200, self.agent.suggestions_list(
+            status=one("status"), section=one("section"), kind=one("kind"),
+            risk=one("risk"), q=one("q"),
+            limit=self._int_query(query, "limit", 100),
+            include_archived=one("archived") in ("1", "true")))
+
+    def route_agent_suggestion_create(self, *, body: bytes = b"",
+                                      **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(201, self.agent.suggestion_create(
+            payload, actor=self._actor()))
+
+    def route_agent_suggestion_update(self, *, body: bytes = b"",
+                                      **_: Any) -> Response:
+        payload = self.read_json(body)
+        suggestion_id = self._int_id(payload)
+        payload.pop("id", None)
+        return json_response(200, self.agent.suggestion_update(
+            suggestion_id, payload, actor=self._actor()))
+
+    def route_agent_suggestion_decision(self, *, body: bytes = b"",
+                                        **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.suggestion_decision(
+            self._int_id(payload), str(payload.get("decision") or ""),
+            note=str(payload.get("note") or ""), actor=self._actor()))
+
+    def route_agent_suggestion_apply(self, *, body: bytes = b"",
+                                     **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.suggestion_apply(
+            self._int_id(payload), actor=self._actor()))
+
+    def route_agent_suggestion_rollback(self, *, body: bytes = b"",
+                                        **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.suggestion_rollback(
+            self._int_id(payload), actor=self._actor()))
+
+    def route_agent_suggestion_delete(self, *, body: bytes = b"",
+                                      **_: Any) -> Response:
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.suggestion_remove(
+            self._int_id(payload), actor=self._actor()))
+
+    def route_agent_db_schema(self, **_: Any) -> Response:
+        return json_response(200, self.agent.db_schema())
+
+    def route_agent_db_query(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, self.agent.db_query(
+            str(payload.get("sql") or ""), actor=self._actor()))
+
+    def route_agent_api_index(self, **_: Any) -> Response:
+        return json_response(200, {"endpoints": self.agent.api_index(),
+                                   "keyWays": [
+            "Authorization: Bearer <key>",
+            "x-agent-key: <key>",
+            "?k=<key>",
+        ]})
 
 
 class ApiError(Exception):
