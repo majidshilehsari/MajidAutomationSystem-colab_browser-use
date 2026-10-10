@@ -321,8 +321,15 @@ async function mount({ readyStateComplete = true, standalone = false, flow = nul
   });
   const { window } = dom;
   // The dedicated panel page sets this class on <body>; the sidebar reads it to
-  // know it is the whole page rather than an overlay inside noVNC.
-  if (standalone) window.document.body.classList.add('mas-standalone');
+  // know it is the whole page rather than an overlay inside noVNC. It also
+  // ships an empty header the sidebar fills with title, tabs, dot and the
+  // desktop-view button (see panel.html).
+  if (standalone) {
+    window.document.body.classList.add('mas-standalone');
+    const head = window.document.createElement('header');
+    head.className = 'mas-page-head';
+    window.document.body.insertBefore(head, window.document.body.firstChild);
+  }
 
   const timers = [];
   const realSetInterval = globalThis.setInterval;
@@ -558,13 +565,14 @@ test('tabs swap panes and only one is visible', async () => {
     assert.ok(page.doc.querySelector('#mas-tab-agent [data-sub]'),
       'the agent sub-tabs are missing');
 
-    clickTab(page, 'shots');                                // screenshots
-    assert.equal(page.display('#mas-tab-shots'), 'block');
+    clickTab(page, 'db');                                   // database sub-tabs
+    assert.equal(page.display('#mas-tab-db'), 'block');
     assert.equal(page.display('#mas-tab-agent'), 'none');
-
-    clickTab(page, 'texts');                                // extracted texts
-    assert.equal(page.display('#mas-tab-texts'), 'block');
-    assert.equal(page.display('#mas-tab-shots'), 'none');
+    clickDbSub(page, 'shots');                              // screenshots
+    assert.ok(page.doc.querySelector('#mas-tab-db [data-dbsub="shots"].is-active'));
+    clickDbSub(page, 'texts');                              // extracted texts
+    assert.ok(page.doc.querySelector('#mas-tab-db [data-dbsub="texts"].is-active'));
+    assert.ok(!page.doc.querySelector('#mas-tab-db [data-dbsub="shots"].is-active'));
   } finally {
     await page.cleanup();
   }
@@ -696,7 +704,7 @@ test('step list shows no numbering and options are styled dark', async () => {
 });
 
 /** Tabs by name. Chat is first and the library comes before the stages. */
-const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages', 'shots', 'texts',
+const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages',
   'db', 'settings', 'agent', 'log'];
 
 function tab(page, name) {
@@ -870,17 +878,21 @@ test('the standalone panel opens full page and explains recording', async () => 
     assert.equal(page.display('#mas-toggle'), 'none', 'the collapse tab should be gone');
     assert.notEqual(page.display('#mas-panel'), 'none', 'the panel should be open');
 
-    // A way back to the live browser view.
-    const link = page.doc.querySelector('.mas-vnclink');
-    assert.ok(link, 'no link to the browser view');
-    assert.equal(link.getAttribute('href'), '../vnc.html');
+    // A way back to the live desktop view, opening in a new tab.
+    const link = page.doc.querySelector('.mas-desktop-link');
+    assert.ok(link, 'no link to the desktop view');
+    assert.ok(link.textContent.includes('نمای دسکتاپ'), link.textContent);
+    assert.equal(link.getAttribute('href'),
+      '../vnc.html?autoconnect=true&resize=scale&path=websockify');
+    assert.equal(link.getAttribute('target'), '_blank');
 
     // Recording is the one thing that cannot work away from the browser view.
     clickTab(page, 'record');
     const pane = page.doc.getElementById('mas-tab-record');
     assert.equal(pane.querySelectorAll('button').length, 1,
       'only Clear should remain: ' + pane.textContent);
-    assert.ok(pane.querySelector('a[href="../vnc.html"]'), 'no link to record from');
+    assert.ok(pane.querySelector('a[href^="../vnc.html?autoconnect"]'),
+      'no link to record from');
     assert.ok(pane.textContent.length > 40, 'the explanation is missing');
   } finally {
     await page.cleanup();
@@ -1129,10 +1141,10 @@ test('the screenshots tab lists every shot with time, size and link', async () =
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const shotsTab = tab(page, 'shots');
-    shotsTab.dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'db');
+    clickDbSub(page, 'shots');
 
-    const pane = page.doc.getElementById('mas-tab-shots');
+    const pane = page.doc.getElementById('mas-tab-db');
     assert.ok(await page.until(() => pane.querySelectorAll('.mas-shot').length === 2),
       'the shots never listed: ' + pane.textContent);
 
@@ -1159,10 +1171,10 @@ test('the texts tab lists saved text and can save a new note', async () => {
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
     page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    const textsTab = tab(page, 'texts');
-    textsTab.dispatchEvent(new page.window.Event('click'));
+    clickTab(page, 'db');
+    clickDbSub(page, 'texts');
 
-    const pane = page.doc.getElementById('mas-tab-texts');
+    const pane = page.doc.getElementById('mas-tab-db');
     assert.ok(await page.until(() => pane.querySelectorAll('.mas-text').length === 1),
       'the texts never listed: ' + pane.textContent);
     assert.ok(pane.textContent.includes('Battle Arena'), 'the saved text is missing');
@@ -1239,6 +1251,13 @@ function clickTgSub(page, name) {
   sub.dispatchEvent(new page.window.Event('click'));
 }
 
+/** Switch inside the database tab to one of its three sub-tabs. */
+function clickDbSub(page, name) {
+  const sub = page.doc.querySelector(`#mas-tab-db [data-dbsub="${name}"]`);
+  assert.ok(sub, `db sub-tab ${name} is missing`);
+  sub.dispatchEvent(new page.window.Event('click'));
+}
+
 function paneText(page) {
   const pane = page.doc.getElementById('mas-agent-sub');
   return pane ? pane.textContent : '';
@@ -1269,10 +1288,12 @@ test('the agent tab lists its sub-panes and the chat tab keeps the assistant', a
     await page.wait(10);
     assert.ok(!page.doc.querySelector('#mas-tab-chat #mas-ai-request'),
       'the chat tab must not embed a second prompt workspace');
-    assert.ok(findButton(page, 'پرامپت', '#mas-tab-chat'),
-      'the chat tab needs its pointer into the prompt sub-tab');
-    assert.ok(page.doc.querySelector('#mas-tab-chat .mas-chat-tools'),
-      'the toolbox is not part of the chat tab');
+    // the chat tab keeps no prompt toolbox at all any more: the prompt
+    // sub-tab is the single home, and the header must stay quiet.
+    assert.ok(!page.doc.querySelector('#mas-tab-chat .mas-chat-tools'),
+      'the chat tab must not carry the old toolbox');
+    assert.ok(!findButton(page, 'پرامپت', '#mas-tab-chat'),
+      'no pointer button should remain in the chat tab');
   } finally {
     await page.cleanup();
   }
@@ -1751,15 +1772,17 @@ test('the run bar sticks to the bottom without covering content', async () => {
   try {
     const foot = page.doc.querySelector('.mas-foot');
     const style = page.window.getComputedStyle(foot);
-    // sticky, not fixed: the footer stays glued to the bottom of the viewport
-    // while keeping its place in the flow, so no row can ever slip under it.
-    assert.equal(style.position, 'sticky', 'the footer must stick on the panel page');
+    // the operator asked for it back as a floating bar: fixed at the bottom,
+    // full width, ONE row, with the body padded so nothing hides behind it.
+    assert.equal(style.position, 'fixed', 'the footer must float at the bottom');
     assert.equal(style.bottom, '0px');
+    assert.equal(style.display, 'flex', 'the footer is a single row');
+    assert.equal(style.flexWrap, 'nowrap', 'the footer must never wrap');
     assert.ok(foot.querySelector('#mas-run'), 'the run button left the footer');
     assert.ok(foot.querySelector('#mas-progress'), 'the counter left the footer');
     const body = page.window.getComputedStyle(page.doc.querySelector('.mas-body'));
-    assert.equal(body.overflowY, 'auto',
-      'the body must scroll inside its own box, not under the footer');
+    assert.notEqual(body.paddingBottom, '0px',
+      'the body needs room above the floating footer');
   } finally {
     await page.cleanup();
   }
@@ -1835,7 +1858,7 @@ test('without an agent the chat and library tabs disappear', async () => {
     // stays visible because theme and clipboard work without the agent too.
     assert.deepEqual(Array.from(page.doc.querySelectorAll('.mas-tab'))
       .filter((node) => !node.hidden).map((node) => node.dataset.tab),
-    ['flow', 'record', 'pages', 'shots', 'texts', 'settings', 'agent', 'log']);
+    ['flow', 'record', 'pages', 'settings', 'agent', 'log']);
   } finally {
     await page.cleanup();
   }
@@ -1959,6 +1982,67 @@ test('the data pane grows a read-only database window with masking', async () =>
     assert.ok(await page.until(() => page.doc.querySelector('.mas-dbquery-out')
       && page.doc.querySelector('.mas-dbquery-out').textContent.includes('ماسک‌شده')),
       'masked values must be visible as masked, never as plaintext');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the standalone header is one line: tabs, dot and desktop button', async () => {
+  const page = await mount({ standalone: true });
+  try {
+    const head = page.doc.querySelector('.mas-page-head');
+    assert.ok(head, 'the page head is missing');
+    assert.ok(head.querySelector('.mas-tabs'), 'the tab row must live in the header');
+    const desktop = head.querySelector('.mas-desktop-link');
+    assert.ok(desktop, 'the desktop-view button is missing');
+    assert.ok(desktop.textContent.includes('نمای دسکتاپ'), desktop.textContent);
+    assert.equal(desktop.getAttribute('target'), '_blank');
+    assert.ok(desktop.getAttribute('href').includes('autoconnect=true'),
+      'the desktop link must carry the working query');
+    assert.ok(head.querySelector('#mas-conn'), 'the status dot belongs in the header');
+    assert.ok(!head.querySelector('.mas-theme-btn') &&
+      !page.doc.getElementById('mas-theme-toggle'),
+      'theme lives in the settings tab, not the header');
+    assert.ok(!page.doc.querySelector('.mas-page-head .mas-sub'),
+      'the extra subtitle line must be gone');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the database tab groups backups, screenshots and texts', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'db');
+    const labels = Array.from(page.doc.querySelectorAll('#mas-tab-db [data-dbsub]'))
+      .map((node) => node.textContent.trim());
+    assert.deepEqual(labels, ['پشتیبان‌گیری', 'اسکرین‌شات‌ها', 'متون استخراج‌شده']);
+    assert.ok(await page.until(() =>
+      page.doc.getElementById('mas-tab-db').textContent.includes('mas-backup-test') ||
+      page.doc.getElementById('mas-tab-db').textContent.includes('پشتیبان')),
+      'the backups sub-tab never rendered');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('language and theme both live in the settings tab', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'settings');
+    const fa = Array.from(page.doc.querySelectorAll('#mas-tab-settings button'))
+      .find((b) => b.textContent.trim() === 'FA');
+    const en = Array.from(page.doc.querySelectorAll('#mas-tab-settings button'))
+      .find((b) => b.textContent.trim() === 'EN');
+    assert.ok(fa && en, 'the language buttons are missing');
+    en.dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    const settingsTab = Array.from(page.doc.querySelectorAll('.mas-tab'))
+      .find((node) => node.dataset.tab === 'settings');
+    assert.equal(settingsTab.textContent.trim(), 'Settings',
+      'switching the language must re-render every label');
   } finally {
     await page.cleanup();
   }

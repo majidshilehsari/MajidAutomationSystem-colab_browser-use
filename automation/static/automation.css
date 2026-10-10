@@ -1875,3 +1875,91 @@ html[data-theme='dark'] #mas-root .mas-btn.mas-primary { color: #06281f; }
 }
 #mas-root .mas-devlog-item { border-bottom: 1px solid var(--line-strong); padding: 6px 0; }
 #mas-root .mas-devlog-item summary { cursor: pointer; }
+
+/* ================================================================== *
+ * Phase 9b — one fixed header line, one fixed footer line.
+ * The tab row lives inside the header; theme/language moved to the
+ * Settings tab; the footer is a single floating row pinned to the
+ * bottom, with the body padded so nothing hides behind it.
+ * ================================================================== */
+
+body.mas-standalone .mas-page-head {
+  position: sticky;
+  top: 0;
+  z-index: 40;
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 10px;
+  padding: 7px 14px;
+  background: var(--bg-solid-97);
+  border-bottom: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+}
+body.mas-standalone .mas-page-head > * { max-width: none; margin: 0; }
+body.mas-standalone .mas-page-title {
+  font-size: 15px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+body.mas-standalone .mas-page-head .mas-tabs {
+  flex: 1 1 auto;
+  margin: 0;
+  border: 0;
+  background: transparent;
+  padding: 0;
+  flex-wrap: nowrap;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+body.mas-standalone .mas-page-head .mas-tab { padding: 5px 12px; font-size: 12.5px; }
+body.mas-standalone .mas-desktop-link { white-space: nowrap; }
+/* the second title bar (panel head) is redundant on the dedicated page */
+body.mas-standalone #mas-root .mas-head { display: none; }
+
+body.mas-standalone #mas-root .mas-foot {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 45;
+  display: flex;
+  flex-direction: row;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  min-height: 44px;
+  background: var(--bg-solid-97);
+  border-top: 1px solid var(--line);
+  backdrop-filter: blur(6px);
+}
+body.mas-standalone #mas-root .mas-runbar {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  flex: 0 0 auto;
+}
+body.mas-standalone #mas-root .mas-statusline {
+  flex: 1 1 auto;
+  margin: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+/* the step panel opens as a drawer above the fixed bar instead of
+   stretching the footer into several rows */
+body.mas-standalone #mas-root .mas-runpanel {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 46px;
+  z-index: 44;
+  max-height: 38vh;
+  overflow: auto;
+  background: var(--bg-solid);
+  border-top: 1px solid var(--line);
+  padding: 8px 12px;
+}
+body.mas-standalone #mas-root .mas-body { padding-bottom: 60px; }

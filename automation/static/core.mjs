@@ -806,6 +806,9 @@ export const STRINGS = {
     dbWinCols: 'ستون', dbWinSensitive: 'ستون‌های حساس',
     dbWinRun: 'کوئری فقط‌خواندنی', dbWinPh: 'SELECT … — فقط خواندن',
     dbWinMaskedNote: 'ماسک‌شده (محرمانه)', dbWinTruncated: 'بیش از ۵۰۰ ردیف؛ نتیجه بریده شد',
+    openDesktop: 'نمای دسکتاپ',
+    dbSubBackups: 'پشتیبان‌گیری', dbSubShots: 'اسکرین‌شات‌ها', dbSubTexts: 'متون استخراج‌شده',
+    settingsLangTitle: 'زبان پنل', settingsLangHint: 'زبان و تم هر دو این‌جا زندگی می‌کنند؛ هدر فقط یک خط می‌ماند.',
   },
   en: {
     title: 'Automation',
@@ -1206,6 +1209,9 @@ export const STRINGS = {
     dbWinCols: 'columns', dbWinSensitive: 'sensitive columns',
     dbWinRun: 'run read-only query', dbWinPh: 'SELECT … — read only',
     dbWinMaskedNote: 'masked (secret)', dbWinTruncated: 'more than 500 rows; result truncated',
+    openDesktop: 'Desktop view',
+    dbSubBackups: 'backups', dbSubShots: 'screenshots', dbSubTexts: 'extracted texts',
+    settingsLangTitle: 'panel language', settingsLangHint: 'language and theme both live here; the header stays one line.',
   },
 };
 

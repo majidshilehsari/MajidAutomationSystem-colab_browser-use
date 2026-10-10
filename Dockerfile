@@ -138,6 +138,13 @@ RUN set -eux; \
 # or missing package can then never ship a silently broken image; the build
 # stops with a readable message instead.
 # ---------------------------------------------------------------------------
+# The operator's own Persian font, bundled in the repo (OFL license beside
+# the files). Installing it FIRST means the candidate loop below sees Persian
+# coverage immediately, skips every apt package and keeps the image small -
+# and the fluxbox taskbar/menu can render Persian with a known family.
+COPY automation/static/fonts-ttf/ /usr/share/fonts/truetype/vazirmatn/
+RUN fc-cache -f >/dev/null 2>&1 || true
+
 RUN set -eux; \
     apt-get update -qq; \
     has_persian() { \

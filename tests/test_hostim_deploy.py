@@ -163,7 +163,8 @@ class TestRootMirrorOfHostimDockerfile(unittest.TestCase):
 
     def test_mirror_does_not_copy_the_colab_launchers(self):
         copies = re.findall(r"(?m)^COPY\s+(\S+)", self.mirror)
-        self.assertEqual(copies, ["automation/", "browser_control.sh", "hostim/"])
+        self.assertEqual(copies, ["automation/static/fonts-ttf/", "automation/",
+                                  "browser_control.sh", "hostim/"])
 
     def test_mirror_keeps_the_hostim_entrypoint_and_healthcheck(self):
         # The image still runs the hostim/ copies even when built from the root

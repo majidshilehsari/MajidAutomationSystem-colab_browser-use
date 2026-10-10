@@ -14,8 +14,8 @@ import {
 } from './core.mjs';
 
 /** Tab order, and the tab the panel opens on. */
-const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages', 'shots',
-  'texts', 'db', 'settings', 'agent', 'log'];
+const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages',
+  'db', 'settings', 'agent', 'log'];
 const DEFAULT_TAB = 'chat';
 
 /** The tab the panel opens on: the remembered one, else the first. */
@@ -195,17 +195,6 @@ function buildPanel() {
     el('div', { class: 'mas-head' }, [
       el('b', { text: t('title') }),
       el('span', { id: 'mas-conn', class: 'mas-dot', title: 'status' }),
-      el('select', {
-        id: 'mas-lang', onChange: (event) => {
-          state.lang = event.target.value;
-          localStorage.setItem(LS.lang, state.lang);
-          rerenderAll();
-        },
-      }, [el('option', { value: 'fa' }, 'FA'), el('option', { value: 'en' }, 'EN')]),
-      el('button', {
-        id: 'mas-theme-btn', class: 'mas-theme-btn', type: 'button',
-        title: t('settingsThemeTitle'), onClick: () => cycleTheme(),
-      }),
       el('button', {
         class: 'mas-icon', type: 'button', text: '×', title: t('close'),
         onClick: () => setPanelOpen(false),
@@ -232,8 +221,6 @@ function buildPanel() {
       el('section', { id: 'mas-tab-flow', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-record', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-pages', class: 'mas-tabpane', hidden: true }),
-      el('section', { id: 'mas-tab-shots', class: 'mas-tabpane', hidden: true }),
-      el('section', { id: 'mas-tab-texts', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-db', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-settings', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-agent', class: 'mas-tabpane', hidden: true }),
@@ -294,7 +281,6 @@ function buildPanel() {
   root.append(toggle, panel, confirm, layer, el('div', { id: 'mas-toast', class: 'mas-toast-box' }));
   document.body.appendChild(root);
 
-  document.getElementById('mas-lang').value = state.lang;
   return root;
 }
 
@@ -325,8 +311,6 @@ function selectTab(name) {
   if (name === 'chat') renderChat();
   if (name === 'library') renderOperations();
   if (name === 'pages') renderPages();
-  if (name === 'shots') renderShots();
-  if (name === 'texts') renderTexts();
   if (name === 'log') renderLog();
   if (name === 'db') renderDatabase();
   if (name === 'settings') renderSettings();
@@ -1142,8 +1126,9 @@ function renderRecord() {
       el('p', { class: 'mas-hint', text: t('recordStandalone') }),
       el('div', { class: 'mas-row' }, [
         el('a', {
-          class: 'mas-btn mas-primary', href: '../vnc.html', target: '_blank',
-          rel: 'noopener', text: '🖥 ' + t('openVnc'),
+          class: 'mas-btn mas-primary',
+          href: '../vnc.html?autoconnect=true&resize=scale&path=websockify',
+          target: '_blank', rel: 'noopener', text: '🖥 ' + t('openDesktop'),
         }),
         button(t('clear'), () => {
           state.flow.steps = []; persistFlow(); renderFlow(); renderRecord();
@@ -1541,8 +1526,8 @@ function shotLink(name) {
   return `${API_PREFIX}/public/shot/${encodeURIComponent(name)}`;
 }
 
-async function renderShots() {
-  const pane = document.getElementById('mas-tab-shots');
+async function renderShots(host) {
+  const pane = host || document.getElementById('mas-tab-shots');
   if (!pane) return;
   replace(pane, el('p', { class: 'mas-empty', text: '…' }));
   let rows = [];
@@ -1594,8 +1579,8 @@ async function renderShots() {
  * Extracted texts tab: what the system read off a page and kept
  * ------------------------------------------------------------------ */
 
-async function renderTexts() {
-  const pane = document.getElementById('mas-tab-texts');
+async function renderTexts(host) {
+  const pane = host || document.getElementById('mas-tab-texts');
   if (!pane) return;
   replace(pane, el('p', { class: 'mas-empty', text: '…' }));
   let rows = [];
@@ -3109,15 +3094,6 @@ function renderChat() {
       button('➤ ' + t('chatSend'), sendChat,
         { class: 'mas-btn mas-primary', id: 'mas-chat-send' }),
     ]),
-    el('details', { class: 'mas-box mas-chat-tools' }, [
-      el('summary', { text: '🧩 ' + t('chatTools') }),
-      el('p', { class: 'mas-hint', text: t('chatToolsHint') }),
-      button('🧩 ' + t('chatToolsOpen'), () => {
-        selectTab('agent');
-        selectAgentSub('prompt');
-        setPanelOpen(true);
-      }, { class: 'mas-btn mas-primary' }),
-    ]),
   );
   // The prompt workspace itself lives in the agent's first sub-tab now; the
   // chat tab only points at it, so there is exactly one place to build a
@@ -3587,24 +3563,33 @@ function start() {
   const standalone = isStandalone();
   applyTheme(state.theme, { save: false });
   buildPanel();
-  const pageToggle = document.getElementById('mas-theme-toggle');
-  if (pageToggle) pageToggle.addEventListener('click', () => cycleTheme());
   if (standalone) {
-    // The panel is the whole page here, so the collapse tab is pointless and a
-    // link back to the live browser view is not.
+    // One fixed header line: title, the tab row, the status dot and - at the
+    // far left in RTL - the desktop-view button that opens a new tab.
     const toggle = document.getElementById('mas-toggle');
     if (toggle) toggle.hidden = true;
-    const head = document.querySelector('#mas-panel .mas-head');
-    if (head) {
-      head.appendChild(el('a', {
-        class: 'mas-btn mas-vnclink', href: '../vnc.html', target: '_blank',
-        rel: 'noopener', text: '🖥 ' + t('openVnc'),
+    const pageHead = document.querySelector('.mas-page-head');
+    if (pageHead) {
+      const tabsNode = document.querySelector('#mas-root .mas-tabs');
+      const conn = document.getElementById('mas-conn');
+      pageHead.appendChild(el('h1', { class: 'mas-page-title', text: t('title') }));
+      if (tabsNode) pageHead.appendChild(tabsNode);
+      if (conn) pageHead.appendChild(conn);
+      pageHead.appendChild(el('a', {
+        class: 'mas-btn mas-desktop-link',
+        href: '../vnc.html?autoconnect=true&resize=scale&path=websockify',
+        target: '_blank', rel: 'noopener', text: '🌐 ' + t('openDesktop'),
       }));
     }
   } else {
     // From inside noVNC, offer the dedicated panel in its own tab.
     const head = document.querySelector('#mas-panel .mas-head');
     if (head) {
+      head.appendChild(el('a', {
+        class: 'mas-btn mas-vnclink',
+        href: 'vnc.html?autoconnect=true&resize=scale&path=websockify',
+        target: '_blank', rel: 'noopener', text: '🌐 ' + t('openDesktop'),
+      }));
       head.appendChild(el('a', {
         class: 'mas-btn mas-vnclink', href: 'automation/panel.html', target: '_blank',
         rel: 'noopener', title: t('openPanel'), text: '⧉ ' + t('openPanel'),
@@ -3650,6 +3635,26 @@ if (document.readyState === 'loading') {
 async function renderDatabase() {
   const pane = document.getElementById('mas-tab-db');
   if (!pane) return;
+  // The operator's grouping: backups, screenshots and extracted texts all
+  // live under the database tab as three sub-tabs, same behaviour as before.
+  const subs = ['backups', 'shots', 'texts'];
+  const active = subs.includes(state.dbSub) ? state.dbSub : 'backups';
+  const host = el('div', { class: 'mas-subhost' });
+  replace(pane,
+    el('div', { class: 'mas-tabs mas-subtabs' }, subs.map((name) => el('button', {
+      class: 'mas-tab' + (name === active ? ' is-active' : ''),
+      dataset: { dbsub: name }, type: 'button',
+      text: t('dbSub' + name.charAt(0).toUpperCase() + name.slice(1)),
+      onClick: () => { state.dbSub = name; renderDatabase(); },
+    }))),
+    host);
+  if (active === 'shots') return renderShots(host);
+  if (active === 'texts') return renderTexts(host);
+  return renderBackups(host);
+}
+
+async function renderBackups(host) {
+  const pane = host;
   replace(pane, el('p', { class: 'mas-empty', text: '…' }));
   let data;
   try {
@@ -4015,6 +4020,21 @@ async function renderSettings() {
     }))),
   ]);
 
+  const langCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '🌐 ' + t('settingsLangTitle') })]),
+    el('p', { class: 'mas-hint', text: t('settingsLangHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [['fa', 'FA'], ['en', 'EN']].map(([code, label]) => el('button', {
+      class: 'mas-btn' + (state.lang === code ? ' mas-primary' : ''), type: 'button',
+      text: label,
+      onClick: () => {
+        state.lang = code;
+        localStorage.setItem(LS.lang, code);
+        rerenderAll();
+        selectTab('settings');
+      },
+    }))),
+  ]);
+
   const clipText = el('textarea', {
     id: 'mas-clip-text', class: 'mas-input mas-mono', rows: 5,
     placeholder: t('settingsClipPh'),
@@ -4098,7 +4118,7 @@ async function renderSettings() {
     ]),
   ]);
 
-  replace(pane, themeCard, clipCard, devlogCard, infoCard);
+  replace(pane, themeCard, langCard, clipCard, devlogCard, infoCard);
   if (hasAgent) loadDevlog();
 }
 

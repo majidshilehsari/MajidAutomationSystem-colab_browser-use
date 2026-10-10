@@ -1653,6 +1653,32 @@ settings، رد کوئری‌های نوشتاری/چنددستوری/ATTACH، �
 کلیپ‌بورد، صفحهٔ اختصاصی، دروازهٔ confirm در اعمال پیشنهاد، پنجرهٔ
 فقط‌خواندنی با ماسک).
 
+## ۲۰. دور دهم: هدر یک‌خطی، فوتر شناور، زیرتب‌های دیتابیس و فونت فارسی دسکتاپ
+
+بازخورد کاربر با دو عکس: (۱) آدرس لخت باید دقیقاً همان نمای
+`vnc.html?autoconnect=true&resize=scale&path=websockify` را بیاورد، (۲) فوتر
+تمام‌عرض، یک خط و چسبیده به کف، (۳) هدر یک خط شامل ردیف تب‌ها، (۴) تم و زبان
+به تب تنظیمات بروند، (۵) اسکرین‌شات‌ها و متون استخراج‌شده زیرتب دیتابیس شوند،
+(۶) جملهٔ زیر عنوان حذف شود، (۷) دکمهٔ «نمای دسکتاپ» در تب جدید باز شود،
+(۸) مربع‌های توخالی (tofu) در تسک‌بار/منوی دسکتاپ فارسی درست شود.
+
+| # | تغییر | فایل(ها) | نکتهٔ فنی |
+|---|---|---|---|
+| ۱ | ریدایرکت آدرس لخت با پارامتر کامل | `automation/server.py` | ROOT_PAGE همچنان ۲۰۰ می‌دهد (health check) ولی مقصد meta-refresh/`location.replace` حالا `?autoconnect=true&resize=scale&path=websockify` دارد؛ هرگز به `/vnc.html` خالی برنگردانید |
+| ۲ | هدر یک‌خطی چسبان | `panel.html` + `automation.js` + `automation.css` | `.mas-page-head` خالی ship می‌شود و JS عنوان، ردیف تب‌ها، نقطهٔ وضعیت و دکمهٔ دسکتاپ را در آن می‌گذارد؛ `#mas-root .mas-head` در حالت standalone مخفی است؛ جملهٔ «کنترل همان مرورگر…» حذف شد |
+| ۳ | فوتر شناور تمام‌عرض | `automation.css` | `.mas-foot` در standalone شده `position:fixed` یک ردیف `nowrap` با `min-height:44px`؛ پنل گام‌ها به‌جای باز کردن فوتر، کشویی (`fixed bottom:46px`) روی آن باز می‌شود؛ `.mas-body` پدینگ کف ۶۰px گرفت |
+| ۴ | زیرتب‌های دیتابیس | `automation.js` | تب «دیتابیس» سه زیرتب دارد: پشتیبان‌گیری / اسکرین‌شات‌ها / متون استخراج‌شده (`state.dbSub` + `[data-dbsub]`)؛ `renderShots/renderTexts` پارامتر host گرفتند و تب‌های مستقل shots/texts از TAB_ORDER حذف شدند |
+| ۵ | تم و زبان در تنظیمات | `automation.js` + `core.mjs` | انتخاب FA/EN و دکمهٔ تم از هدر حذف و به کارت‌های تب تنظیمات منتقل شدند (`settingsLangTitle/Hint`) |
+| ۶ | دکمهٔ «نمای دسکتاپ» | `automation.js` | در هدر (انتهای چپ در RTL) با `target=_blank` و href `../vnc.html?autoconnect=true&resize=scale&path=websockify`؛ لینک داخل noVNC و تب ضبط هم همین پارامترها را گرفتند |
+| ۷ | حذف جعبه‌ابزار چت | `automation.js` | کارت «🧩 ابزارهای دستیار» و دکمهٔ اشاره‌گر از تب چت حذف شد؛ خانهٔ یکتای پرامپت همان زیرتب «ایجنت همکار → پرامپت» است |
+| ۸ | فونت فارسی دسکتاپ | `automation/static/fonts-ttf/` + `hostim/Dockerfile` + entrypoint | Vazirmatn TTF (Regular/Bold + لایسنس OFL) مستقیم در image کپی و `fc-cache` قبل از حلقهٔ کاندیدای apt اجرا می‌شود؛ entrypoint اول family دقیق `Vazirmatn` را ترجیح می‌دهد؛ اگر نبود `DESKTOP_LANG=en` منوی انگلیسی (`hostim/fluxbox-menu-en`) و نام Workspace انگلیسی می‌دهد |
+
+### نکته‌های بازگشت‌ناپذیر (رگرسیون ممنوع)
+- ریدایرکت لخت **بدون پارامتر** = کارت رمز noVNC ظاهر نمی‌شود.
+- mirror ریشه باید دقیقاً hostim/Dockerfile باشد با note بعد از خط `# syntax`؛
+  تست `TestRootMirrorOfHostimDockerfile` drift را می‌گیرد.
+- فهرست COPYهای mirror حالا `automation/static/fonts-ttf/` هم دارد (تست به‌روز شد).
+
 # بخش ب — مسیر Colab (شاخهٔ پایدار `colab-stable`)
 
 این بخش **نسخهٔ پایدار و مستقل Colab** است. استقرار Hostim هیچ تغییری در آن

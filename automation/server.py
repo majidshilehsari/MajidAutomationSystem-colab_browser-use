@@ -275,13 +275,16 @@ def make_handler_class(api: AutomationApi, base_handler: Type) -> Type:
         ROOT_PAGE = (
             "<!doctype html>\n<html lang=\"fa\" dir=\"rtl\">\n<head>\n"
             "<meta charset=\"utf-8\">\n"
-            "<meta http-equiv=\"refresh\" content=\"0; url=/vnc.html\">\n"
+            "<meta http-equiv=\"refresh\" content=\"0; url=/vnc.html"
+            "?autoconnect=true&amp;resize=scale&amp;path=websockify\">\n"
             "<title>Majid Automation System</title>\n</head>\n"
-            "<body onload=\"location.replace('/vnc.html')\">\n"
+            "<body onload=\"location.replace('/vnc.html?autoconnect=true"
+            "&resize=scale&path=websockify')\">\n"
             "<p style=\"font-family:sans-serif;text-align:center;margin-top:20vh\">"
             "\u062f\u0631 \u062d\u0627\u0644 \u0627\u0646\u062a\u0642\u0627\u0644 "
             "\u0628\u0647 \u062f\u0633\u06a9\u062a\u0627\u067e\u2026 "
-            "<a href=\"/vnc.html\">/vnc.html</a></p>\n</body>\n</html>\n"
+            "<a href=\"/vnc.html?autoconnect=true&amp;resize=scale&amp;path="
+            "websockify\">/vnc.html</a></p>\n</body>\n</html>\n"
         )
 
         def _root_redirect(self) -> bool:

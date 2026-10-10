@@ -56,6 +56,10 @@ PERSIAN_KEYBOARD=${PERSIAN_KEYBOARD:-on}
 # what the operator's wall clock says; change it and the clock follows.
 DESKTOP_TZ=${DESKTOP_TZ:-Asia/Tehran}
 export TZ="$DESKTOP_TZ"
+# "en" switches the desktop chrome (workspace names + right-click menu) to
+# English, for anyone who would rather not look at Persian there. The panel
+# stays Persian-first either way; this only touches fluxbox.
+DESKTOP_LANG=${DESKTOP_LANG:-fa}
 # The coworker agent's own browser. It runs on a SECOND display and a SECOND
 # Chrome profile so it can never fight the automation for the one mouse and
 # keyboard on :1, and so `wmctrl -a "Google Chrome"` cannot pick the wrong
@@ -303,15 +307,25 @@ prepare_desktop() {
     # has that covers fa, and substitute it in.
     local mas_font=""
     if command -v fc-list >/dev/null 2>&1; then
-      mas_font=$(fc-list :lang=fa family 2>/dev/null | sort -u | head -1)
-      mas_font=${mas_font%%,*}
+      # The bundled Vazirmatn TTFs are the sure thing; anything else is a
+      # best-effort fallback for images built before the font shipped.
+      if fc-list : family 2>/dev/null | grep -qx "Vazirmatn"; then
+        mas_font="Vazirmatn"
+      else
+        mas_font=$(fc-list :lang=fa family 2>/dev/null | sort -u | head -1)
+        mas_font=${mas_font%%,*}
+      fi
     fi
     mas_font=${mas_font:-DejaVu Sans}
     sed -i "s/MasFont/${mas_font//\//\\/}/g" "$fb_dir/mas-style" 2>/dev/null || true
     log "desktop font: $mas_font"
   fi
-  if [[ -f "$APP_DIR/hostim/fluxbox-menu" ]]; then
-    cp -f "$APP_DIR/hostim/fluxbox-menu" "$fb_dir/mas-menu" 2>/dev/null || true
+  local menu_src="$APP_DIR/hostim/fluxbox-menu"
+  if [[ "$DESKTOP_LANG" == "en" && -f "$APP_DIR/hostim/fluxbox-menu-en" ]]; then
+    menu_src="$APP_DIR/hostim/fluxbox-menu-en"
+  fi
+  if [[ -f "$menu_src" ]]; then
+    cp -f "$menu_src" "$fb_dir/mas-menu" 2>/dev/null || true
   fi
   # An optional wallpaper image on the volume wins over the gradient.
   if [[ -n "${DESKTOP_BACKGROUND:-}" && -f "${DESKTOP_BACKGROUND}" ]]; then
@@ -337,7 +351,7 @@ keys = {
     "session.screen0.toolbar.tools":
         "prevworkspace, workspacename, nextworkspace, iconbar, systemtray, clock",
     "session.screen0.workspaceNames":
-        "ورک‌اسپیس ۱, ورک‌اسپیس ۲, ورک‌اسپیس ۳, ورک‌اسپیس ۴",
+        "$( [[ "$DESKTOP_LANG" == "en" ]] && echo "Desktop 1, Desktop 2, Desktop 3, Desktop 4" || echo "ورک‌اسپیس ۱, ورک‌اسپیس ۲, ورک‌اسپیس ۳, ورک‌اسپیس ۴" )",
     "session.screen0.tabs.usePixmap": "false",
     # Windows-like stacking: a click focuses AND raises that one window, and
     # nothing raises itself just because the mouse slid over it. autoRaise:true
