@@ -400,6 +400,15 @@ class TestEntrypointBehaviour(unittest.TestCase):
             self.assertIn(flag, self.body, "missing Chrome flag: %s" % flag)
             self.assertIn(flag, colab, "Colab launcher changed: %s" % flag)
 
+    def test_no_sandbox_warning_bar_is_suppressed(self):
+        # Chrome pins "You are using an unsupported command-line flag:
+        # --no-sandbox" to every window unless --test-type is passed; no-sandbox
+        # itself is required inside Kata, so the suppression flag must ride
+        # along in BOTH launch blocks (main browser and agent browser).
+        flags = re.findall(r"(?m)^\s+--test-type\s*\\$", self.body)
+        self.assertEqual(len(flags), 2,
+                         "both Chrome launch blocks must carry --test-type")
+
     def test_refuses_an_unwritable_volume_with_a_useful_message(self):
         self.assertIn("is not writable", self.body)
         self.assertIn("/volumes/", self.body,

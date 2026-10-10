@@ -479,6 +479,7 @@ start_ai_browser() {
     spawn ai-chrome "$LOG_DIR/ai-chrome.log" \
       env DISPLAY="$AI_DISPLAY" HOME="${HOME:-/home/automation}" google-chrome \
         --no-sandbox \
+        --test-type \
         --disable-dev-shm-usage \
         --use-gl=swiftshader \
         --enable-unsafe-swiftshader \
@@ -503,12 +504,15 @@ start_ai_browser() {
 start_chrome() {
   # Same flags as the Colab launcher: software WebGL, no first-run dialogs, and
   # --disable-dev-shm-usage, which matters even more here because a Kubernetes
-  # pod's /dev/shm cannot be sized from the app settings.
+  # pod's /dev/shm cannot be sized from the app settings. --test-type hides
+  # the "unsupported command-line flag: --no-sandbox" warning bar Chrome would
+  # otherwise pin to every window (no-sandbox is required inside Kata).
   # EXTRA_CHROME_FLAGS is intentionally word-split into separate flags.
   # shellcheck disable=SC2086
   spawn chrome "$LOG_DIR/chrome.log" \
     env DISPLAY="$DISPLAY_ID" HOME="${HOME:-/home/automation}" google-chrome \
       --no-sandbox \
+      --test-type \
       --disable-dev-shm-usage \
       --use-gl=swiftshader \
       --enable-unsafe-swiftshader \

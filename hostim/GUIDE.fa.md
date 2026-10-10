@@ -1673,6 +1673,12 @@ settings، رد کوئری‌های نوشتاری/چنددستوری/ATTACH، �
 | ۷ | حذف جعبه‌ابزار چت | `automation.js` | کارت «🧩 ابزارهای دستیار» و دکمهٔ اشاره‌گر از تب چت حذف شد؛ خانهٔ یکتای پرامپت همان زیرتب «ایجنت همکار → پرامپت» است |
 | ۸ | فونت فارسی دسکتاپ | `automation/static/fonts-ttf/` + `hostim/Dockerfile` + entrypoint | Vazirmatn TTF (Regular/Bold + لایسنس OFL) مستقیم در image کپی و `fc-cache` قبل از حلقهٔ کاندیدای apt اجرا می‌شود؛ entrypoint اول family دقیق `Vazirmatn` را ترجیح می‌دهد؛ اگر نبود `DESKTOP_LANG=en` منوی انگلیسی (`hostim/fluxbox-menu-en`) و نام Workspace انگلیسی می‌دهد |
 
+پس‌نوشت همان دور: نوار هشدار «You are using an unsupported command-line flag:
+--no-sandbox» با افزودن `--test-type` به هر دو بلوک راه‌اندازی کروم در
+`docker-entrypoint.sh` حذف شد (`--no-sandbox` داخل Kata ضروری است؛ `--test-type`
+فقط همان اینفوبار را سرکوب می‌کند و تست `test_no_sandbox_warning_bar_is_suppressed`
+از آن نگهبانی می‌دهد).
+
 ### نکته‌های بازگشت‌ناپذیر (رگرسیون ممنوع)
 - ریدایرکت لخت **بدون پارامتر** = کارت رمز noVNC ظاهر نمی‌شود.
 - mirror ریشه باید دقیقاً hostim/Dockerfile باشد با note بعد از خط `# syntax`؛
