@@ -1406,8 +1406,8 @@ def _report_section(status: Dict[str, Any], public_base: str = "") -> str:
             lines.append("- %s · %s" % (_stamp(handoff.get("detectedAt")), " · ".join(details)))
 
     if results:
-        lines += ["", "| # | گام | نوع | نتیجه | زمان | تصویر | خطا |",
-                  "|---|------|------|-------|------|------|------|"]
+        lines += ["", "| # | گام | نوع | حرکت | نتیجه | زمان | تصویر | خطا |",
+                  "|---|------|------|-------|-------|------|------|------|"]
         for row in results:
             outcome = _RESULT_FA.get(row.get("status"), row.get("status"))
             duration = row.get("durationMs")
@@ -1426,9 +1426,10 @@ def _report_section(status: Dict[str, Any], public_base: str = "") -> str:
             if row.get("typingMode"):
                 step_type = "%s (%s, %sms/کلید)" % (
                     step_type, row["typingMode"], row.get("keyDelayMs", "-"))
-            lines.append("| %s | %s | %s | %s | %s | %s | %s |" % (
+            params = (row.get("params") or "-").replace("|", "/")[:120] or "-"
+            lines.append("| %s | %s | %s | %s | %s | %s | %s | %s |" % (
                 row.get("index"), (row.get("label") or "")[:60].replace("|", "/"),
-                step_type, outcome, duration, cell, error or "-"))
+                step_type, params or "-", outcome, duration, cell, error or "-"))
 
         last = results[-1]
         if status.get("status") in ("error", "stopped") and last:
@@ -1445,7 +1446,7 @@ def _report_section(status: Dict[str, Any], public_base: str = "") -> str:
                           str(text)[:4000], "```"]
 
     entries = [e for e in (status.get("entries") or [])
-               if e.get("level") in ("error", "warn", "ok", "step")][-40:]
+               if e.get("level") in ("error", "warn", "ok", "step", "info")][-80:]
     if entries:
         lines += ["", "### رویدادهای ثبت‌شده", "", "```"]
         for entry in entries:

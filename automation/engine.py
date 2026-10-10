@@ -309,6 +309,11 @@ class AutomationEngine:
         self._cdp_warned = False
         self._challenge_probe_unavailable = False
         self._challenge_probe_warned = False
+        # Fingerprints of evidence we already handed to a human (fp -> clock)
+        # and of text-only wording we already announced, so an unchanged page
+        # can never build a handoff loop (round-12 false-pause fix).
+        self._challenge_handoffs: Dict[Any, float] = {}
+        self._challenge_noticed: Set[Any] = set()
         # Screenshots are copied here so a run report can link them without a
         # token, which is what lets the model actually look at the page.
         self.public_dir = os.path.join(data_dir, "public")
@@ -344,6 +349,8 @@ class AutomationEngine:
             self._confirmed = None
             self._challenge_probe_unavailable = False
             self._challenge_probe_warned = False
+            self._challenge_handoffs = {}
+            self._challenge_noticed = set()
             self._wakeup.set()
             self._thread = threading.Thread(target=self._run, name="automation-%s" % run_id,
                                             daemon=True)
@@ -406,6 +413,28 @@ class AutomationEngine:
             if len(self._state.entries) > 2000:
                 self._state.entries = self._state.entries[-1500:]
 
+    @staticmethod
+    def _step_params(step: Dict[str, Any]) -> str:
+        """One short line of *what moved*: coordinates, keys, url, text.
+
+        Reports must show every motion of the mouse and keyboard, so each
+        result row carries the parameters the step actually used, truncated
+        hard so a pasted text can never bloat the report.
+        """
+        parts = []
+        for key in ("x", "y", "x1", "y1", "x2", "y2", "amount", "clicks", "button"):
+            if step.get(key) is not None:
+                parts.append("%s=%s" % (key, step[key]))
+        if step.get("keys"):
+            parts.append("keys=%s" % str(step["keys"])[:40])
+        if step.get("url"):
+            parts.append("url=%s" % str(step["url"])[:80])
+        if step.get("text"):
+            parts.append("text=%r" % str(step["text"])[:40])
+        if step.get("ms") is not None:
+            parts.append("ms=%s" % step["ms"])
+        return " ".join(parts)[:200]
+
     def _record(self, index: int, step: Dict[str, Any], status: str,
                 started_at: Optional[float] = None, duration_ms: int = 0,
                 rc: Optional[int] = None, error: Optional[str] = None,
@@ -423,6 +452,7 @@ class AutomationEngine:
                 "type": step.get("type"),
                 "label": step.get("label") or step.get("type"),
                 "stepId": step.get("id"),
+                "params": self._step_params(step),
                 "status": status,
                 "startedAt": round(started_at, 3) if started_at else None,
                 "durationMs": duration_ms,
@@ -554,14 +584,63 @@ class AutomationEngine:
 
         self._finish("done")
 
+    #: Steps allowed to run while a challenge is merely suspected: they only
+    #: look at the page or leave it, never touching the challenge itself.
+    SAFE_RECOVERY_TYPES = ("focus_window", "screenshot", "capture_text", "wait")
+    SAFE_RECOVERY_ORIGINS = frozenset({
+        "https://arena.ai", "https://www.google.com", "https://lmarena.ai",
+        "https://chat.deepseek.com", "https://deepseek.com",
+    })
+    #: Identical evidence within this window never raises a second handoff.
+    CHALLENGE_COOLDOWN = 120.0
+
+    def _is_safe_recovery(self, step: Dict[str, Any]) -> bool:
+        step_type = step.get("type")
+        if step_type in self.SAFE_RECOVERY_TYPES:
+            return True
+        if step_type == "key":
+            keys = str(step.get("keys") or "").lower()
+            return "ctrl+l" in keys or "control+l" in keys
+        if step_type == "goto_url":
+            return safe_origin(step.get("url")) in self.SAFE_RECOVERY_ORIGINS
+        return False
+
+    def _challenge_fingerprint(self, assessment: Dict[str, Any]) -> Any:
+        return (assessment.get("pageOrigin"),
+                tuple(assessment.get("signals") or ()),
+                assessment.get("textHash"))
+
+    def _challenge_notice(self, index: int, assessment: Dict[str, Any],
+                          fingerprint: Any) -> None:
+        """Words without a widget: inform, never block (progress notice)."""
+        with self._lock:
+            if fingerprint in self._challenge_noticed:
+                return
+            self._challenge_noticed.add(fingerprint)
+        self._log("info", "progress notice: wording that mentions CAPTCHA or a security "
+                          "check was seen, but no challenge widget is visible; the run "
+                          "continues without a pause",
+                  stepIndex=index, signals=assessment.get("signals"),
+                  evidence=assessment.get("evidence"),
+                  pageOrigin=assessment.get("pageOrigin"))
+
     def _pause_if_challenge(self, state: RunState, index: int, step: Dict[str, Any],
                             shot_dir: str) -> None:
-        """Pause before further automation when read-only CDP cues suggest a challenge.
+        """Pause before further automation when *structural* cues say challenge.
 
-        After the human acknowledges the handoff, probe again before the next
-        browser action. If the challenge is still visible, keep waiting rather
-        than letting the flow act on the challenge page.
+        Round-12 rules, after a real false-pause loop on a chat page whose old
+        text merely mentioned CAPTCHA:
+
+        * recovery steps (focus, address-bar, allowed goto_url, screenshot,
+          capture_text, wait) never wait on the detector - they are how a flow
+          leaves a stale page;
+        * wording-only signals become a non-blocking progress notice;
+        * identical evidence (origin+signals+text hash) inside the cooldown
+          never raises a second handoff, so Continue on an unchanged page
+          cannot loop.
         """
+        if self._is_safe_recovery(step):
+            return
         while True:
             if self._cdp is None or self._challenge_probe_unavailable:
                 return
@@ -578,15 +657,32 @@ class AutomationEngine:
                     self._log("warn", "automatic CAPTCHA/security-check detection is unavailable "
                                       "(page inspection through CDP failed); inspect the page manually")
                 return
+            fingerprint = self._challenge_fingerprint(assessment)
             if not assessment.get("detected"):
+                if assessment.get("signals"):
+                    self._challenge_notice(index, assessment, fingerprint)
                 return
-
+            now = self._clock()
+            with self._lock:
+                last = self._challenge_handoffs.get(fingerprint)
+            if last is not None and (now - last) < self.CHALLENGE_COOLDOWN:
+                self._log("warn", "challenge evidence is unchanged since the last handoff "
+                                  "(cooldown %ds); continuing without a new pause"
+                                  % self.CHALLENGE_COOLDOWN,
+                          stepIndex=index, signals=assessment.get("signals"),
+                          evidence=assessment.get("evidence"),
+                          pageOrigin=assessment.get("pageOrigin"))
+                return
             message = (
-                "سامانه نشانه‌هایی از CAPTCHA یا بررسی امنیتی دید و اجرای خودکار را متوقف کرد. "
-                "خودت صفحه را بررسی و در صورت مجاز بودن، مرحله را در مرورگر انجام بده؛ "
-                "کد یا پاسخ را برای هوش مصنوعی نفرست. فقط وقتی چالش رفع شده و صفحه عادی است ادامه بده."
+                "سامانه نشانه‌های ساختاری چالش (ویجت/iframe/title) دید و اجرای خودکار را "
+                "متوقف کرد. خودت صفحه را بررسی و در صورت مجاز بودن، مرحله را در مرورگر انجام "
+                "بده؛ کد یا پاسخ را برای هوش مصنوعی نفرست. فقط وقتی چالش رفع شده و صفحه عادی "
+                "است ادامه بده."
             )
+            with self._lock:
+                self._challenge_handoffs[fingerprint] = now
             self._create_handoff(state, index, step, shot_dir, "challenge", message, assessment)
+            return
 
     def _create_handoff(self, state: RunState, index: int, step: Dict[str, Any],
                         shot_dir: str, kind: str, message: str,
@@ -603,6 +699,7 @@ class AutomationEngine:
         public_name = self._publish(path)
         image = png_size(path) if path else None
         signals = list((assessment or {}).get("signals") or [])
+        evidence = list((assessment or {}).get("evidence") or [])
         page_origin = (assessment or {}).get("pageOrigin") or ""
         role = "challenge" if kind == "challenge" else "handoff"
         event = {
@@ -611,6 +708,9 @@ class AutomationEngine:
             "index": index,
             "label": label,
             "signals": signals,
+            "evidence": evidence,
+            "structural": bool((assessment or {}).get("structural")),
+            "textHash": (assessment or {}).get("textHash"),
             "pageOrigin": page_origin,
             "publicShot": public_name,
             "decision": "pending",
@@ -635,10 +735,12 @@ class AutomationEngine:
         log_message = ("possible CAPTCHA/security challenge detected; pausing for human review"
                        if kind == "challenge" else "pausing for the requested human verification")
         self._log("warn", log_message, stepIndex=index, signals=signals,
-                  pageOrigin=page_origin, publicShot=public_name)
+                  evidence=evidence, pageOrigin=page_origin,
+                  publicShot=public_name)
         pending = {
             "index": index, "label": label, "type": step.get("type"),
             "kind": kind, "message": message, "signals": signals,
+            "evidence": evidence, "structural": bool((assessment or {}).get("structural")),
             "pageOrigin": page_origin, "publicShot": public_name,
         }
         # The notifier is told before the wait begins, so a slow or dead

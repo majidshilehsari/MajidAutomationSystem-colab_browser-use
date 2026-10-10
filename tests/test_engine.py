@@ -377,7 +377,8 @@ class HumanHandoffTest(EngineTestBase):
         cdp = SequenceCdp([
             {"url": "https://example.com/home", "text": "Home", "hints": []},
             {"url": "https://example.com/check?session=private",
-             "text": "Verify you are human", "hints": []},
+             "text": "Verify you are human",
+             "hints": ["IFRAME g-recaptcha https://www.google.com/recaptcha/api2/anchor"]},
             {"url": "https://example.com/home", "text": "Home", "hints": []},
         ])
         engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
@@ -390,7 +391,7 @@ class HumanHandoffTest(EngineTestBase):
         self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"))
         waiting = engine.status()["awaitingConfirmation"]
         self.assertEqual(waiting["kind"], "challenge")
-        self.assertIn("CAPTCHA", waiting["message"])
+        self.assertIn("\u0686\u0627\u0644\u0634", waiting["message"])  # «چالش»
         self.assertEqual(waiting["pageOrigin"], "https://example.com")
         self.assertEqual([call[0] for call in self.backend.calls], ["click", "screenshot"],
                          "the second browser action must not run before human review")
@@ -405,30 +406,66 @@ class HumanHandoffTest(EngineTestBase):
         self.assertEqual(engine.status()["handoffs"][0]["decision"], "continued")
         self.assertTrue(all("token=secret" not in str(call) for call in cdp.calls))
 
-    def test_acknowledgement_does_not_resume_while_challenge_is_still_detected(self):
-        cdp = SequenceCdp([
-            {"url": "https://example.com/check", "text": "Verify you are human", "hints": []},
-            {"url": "https://example.com/check", "text": "Verify you are human", "hints": []},
-            {"url": "https://example.com/home", "text": "Home", "hints": []},
-        ])
+    def test_acknowledgement_on_unchanged_evidence_never_builds_a_second_handoff(self):
+        # Round-12 acceptance: Continue on a page whose evidence (origin,
+        # signals, text hash) did not change must NOT raise another handoff -
+        # that loop is exactly what trapped recovery flows.
+        widget = {"url": "https://example.com/check", "text": "Verify you are human",
+                  "hints": ["IFRAME g-recaptcha https://www.google.com/recaptcha/api2/anchor"]}
+        cdp = SequenceCdp([dict(widget), dict(widget)])
         engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
                                   clock=self.clock.time, cdp=cdp)
         self.engines.append(engine)
         engine.start(build_flow([{"type": "click", "x": 3, "y": 4}]))
         self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"))
+        self.assertEqual(len(engine.status()["handoffs"]), 1)
 
         engine.confirm(True)
-        self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"
-                                   and len(engine.status()["handoffs"]) == 2))
-        self.assertEqual(engine.status()["status"], "waiting")
-        self.assertEqual(self.backend.names, ["screenshot", "screenshot"],
-                         "no browser action may run while the challenge remains")
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"),
+                        "the run must continue instead of re-pausing on identical evidence")
+        self.assertEqual(len(engine.status()["handoffs"]), 1,
+                         "identical evidence created a handoff loop")
+        self.assertEqual(self.backend.names, ["screenshot", "click"])
+        self.assertIn("cooldown", str([entry for entry in engine.status()["entries"]
+                                       if "cooldown" in entry.get("message", "")]))
 
-        engine.confirm(True)
-        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"))
-        self.assertEqual(self.backend.names, ["screenshot", "screenshot", "click"])
-        self.assertEqual([event["decision"] for event in engine.status()["handoffs"]],
-                         ["continued", "continued"])
+    def test_chat_wording_about_captcha_is_a_notice_not_a_pause(self):
+        # The reported false positive: an ordinary chat page whose history
+        # discusses CAPTCHA / security verification, no widget anywhere.
+        chat = {"url": "https://arena.ai/c/old", "title": "Arena",
+                "text": "The previous answer explained reCAPTCHA and quoted "
+                        "'please verify you are human' inside the conversation.",
+                "hints": []}
+        cdp = SequenceCdp([dict(chat), dict(chat)])
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        engine.start(build_flow([{"type": "click", "x": 1, "y": 1},
+                                 {"type": "click", "x": 2, "y": 2}]))
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"),
+                        "wording-only pages must never pause: %s" % engine.status()["status"])
+        self.assertEqual(engine.status()["handoffs"], [])
+        notices = [entry for entry in engine.status()["entries"]
+                   if "progress notice" in entry.get("message", "")]
+        self.assertEqual(len(notices), 1, "exactly one non-blocking notice expected")
+        self.assertEqual(notices[0]["level"], "info")
+        self.assertTrue(notices[0].get("evidence"), "the notice must carry the evidence")
+
+    def test_recovery_steps_run_even_while_a_challenge_is_visible(self):
+        widget = {"url": "https://arena.ai/c/old", "text": "Verify you are human",
+                  "hints": ["IFRAME g-recaptcha https://www.google.com/recaptcha/api2/anchor"]}
+        cdp = SequenceCdp([dict(widget), dict(widget), dict(widget)])
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        engine.start(build_flow([
+            {"type": "key", "keys": "ctrl+l"},
+            {"type": "goto_url", "url": "https://arena.ai/"},
+            {"type": "capture_text"},
+        ]))
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"),
+                        "the safe recovery path must not wait on the detector")
+        self.assertEqual(engine.status()["handoffs"], [])
 
     def test_declining_a_challenge_handoff_stops_without_running_a_browser_action(self):
         cdp = SequenceCdp([{"url": "https://example.com/check", "text": "CAPTCHA challenge",

@@ -15,7 +15,7 @@ import {
 
 /** Tab order, and the tab the panel opens on. */
 const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages',
-  'db', 'settings', 'agent', 'log'];
+  'db', 'ops', 'settings', 'agent', 'log'];
 const DEFAULT_TAB = 'chat';
 
 /** The tab the panel opens on: the remembered one, else the first. */
@@ -26,6 +26,7 @@ function initialTab() {
 
 const LS = {
   token: 'mas.token', lang: 'mas.lang', flow: 'mas.flow', panel: 'mas.panelOpen',
+  clip: 'mas.clipSync',
   request: 'mas.userRequest', reply: 'mas.aiReply',
   provider: 'mas.chatProvider', context: 'mas.chatContext', tab: 'mas.tab',
   theme: 'mas.theme',
@@ -48,6 +49,11 @@ const state = {
   keyBuffer: { step: null, timer: null },
   logOffset: 0,
   lastRenderedIndex: -1,
+  opsSub: 'running',
+  clipSyncOn: false,
+  clipSyncTimer: null,
+  clipLastLocal: null,
+  clipLastRemote: null,
   lastResultsSig: '',
   // Timing for the step that is running right now, measured in the browser so a
   // clock difference with the Colab VM cannot make the counter go backwards.
@@ -189,11 +195,48 @@ function replace(node, ...children) {
   return node;
 }
 
-function toast(message, kind = 'info') {
+function toast(message, kind = 'info', options = {}) {
   const box = document.getElementById('mas-toast');
-  const item = el('div', { class: `mas-toast mas-toast-${kind}`, text: message });
+  const item = el('div', { class: `mas-toast mas-toast-${kind}`, title: message }, [
+    el('span', { class: 'mas-toast-text', text: message }),
+  ]);
+  item.appendChild(el('button', {
+    class: 'mas-toast-x', type: 'button', text: '✕', title: t('close'),
+    onClick: () => item.remove(),
+  }));
   box.appendChild(item);
-  setTimeout(() => item.remove(), 4200);
+  // Sticky lines (the report summary) stay until the operator closes them.
+  if (!options.sticky) setTimeout(() => item.remove(), 4200);
+}
+
+function startClipSync() {
+  if (state.clipSyncTimer) return;
+  state.clipSyncTimer = setInterval(async () => {
+    if (!state.clipSyncOn) return;
+    try {
+      const remote = ((await api('/clipboard')).text) || '';
+      if (remote !== state.clipLastRemote) {
+        state.clipLastRemote = remote;
+        if (remote && remote !== state.clipLastLocal
+            && navigator.clipboard && navigator.clipboard.writeText) {
+          try {
+            await navigator.clipboard.writeText(remote);
+            state.clipLastLocal = remote;
+          } catch (err) { /* permission or focus: skip this tick */ }
+        }
+      }
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        const local = await navigator.clipboard.readText();
+        if (local && local !== state.clipLastLocal) {
+          state.clipLastLocal = local;
+          if (local !== state.clipLastRemote) {
+            await api('/clipboard', { method: 'POST', body: { text: local } });
+            state.clipLastRemote = local;
+          }
+        }
+      }
+    } catch (error) { /* an offline tick is not an error worth surfacing */ }
+  }, 1500);
 }
 
 /* ------------------------------------------------------------------ *
@@ -248,6 +291,7 @@ function buildPanel() {
       el('section', { id: 'mas-tab-record', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-pages', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-db', class: 'mas-tabpane', hidden: true }),
+      el('section', { id: 'mas-tab-ops', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-settings', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-agent', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-log', class: 'mas-tabpane', hidden: true }),
@@ -339,6 +383,7 @@ function selectTab(name) {
   if (name === 'pages') renderPages();
   if (name === 'log') renderLog();
   if (name === 'db') renderDatabase();
+  if (name === 'ops') renderOps();
   if (name === 'settings') renderSettings();
   if (name === 'agent') renderAgent();
   if (name === 'flow') renderFlow();
@@ -362,11 +407,11 @@ async function refreshAgentTabs() {
   } catch (error) {
     missing = error.status === 404;
   }
-  for (const name of ['chat', 'library', 'db']) {
+  for (const name of ['chat', 'library', 'db', 'ops']) {
     const node = document.querySelector(`.mas-tab[data-tab="${name}"]`);
     if (node) node.hidden = missing;
   }
-  if (missing && ['chat', 'library', 'db'].includes(currentTab())) selectTab('flow');
+  if (missing && ['chat', 'library', 'db', 'ops'].includes(currentTab())) selectTab('flow');
   return !missing;
 }
 
@@ -579,13 +624,7 @@ function renderFlow() {
     ])
     : null;
 
-  const libraryBox = el('details', { class: 'mas-settings' }, [
-    el('summary', { text: '📚 ' + t('library') }),
-    el('div', { id: 'mas-library' }),
-  ]);
-
-  replace(pane, nameRow, addRow, errorBox, list, settingsBox, libraryBox, ioRow);
-  renderLibrary();
+  replace(pane, nameRow, addRow, errorBox, list, settingsBox, ioRow);
 }
 
 /* ------------------------------------------------------------------ *
@@ -593,7 +632,7 @@ function renderFlow() {
  * ------------------------------------------------------------------ */
 
 async function renderLibrary() {
-  const box = document.getElementById('mas-library');
+  const box = document.getElementById('mas-flows-lib');
   if (!box) return;
   replace(box, el('p', { class: 'mas-lib-empty', text: '…' }));
   let flows = [];
@@ -620,6 +659,7 @@ async function renderLibrary() {
       item.description ? el('span', { class: 'mas-lib-desc', text: item.description }) : null,
     ])),
     el('div', { class: 'mas-lib-actions' }, [
+      button('✎', () => openFlowModal(item), { title: t('flowEditTitle') }),
       button('⤓', () => openSavedFlow(item.name), { title: t('load') }),
       button('▶', () => runSavedFlow(item.name), { class: 'mas-btn mas-primary', title: t('run') }),
       button('🗑', () => deleteSavedFlow(item.name), { class: 'mas-btn mas-danger', title: t('delete') }),
@@ -639,6 +679,67 @@ async function openSavedFlow(name) {
   } catch (error) {
     toast(error.message, 'error');
   }
+}
+
+function modalCard(children) {
+  // One centred dialog layer; clicking the dim backdrop closes it.
+  let layer = null;
+  const close = () => { if (layer) layer.remove(); layer = null; };
+  layer = el('div', {
+    class: 'mas-modal',
+    onClick: (event) => { if (event.target === layer) close(); },
+  }, [el('div', { class: 'mas-modal-card mas-card' }, children)]);
+  document.body.appendChild(layer);
+  return close;
+}
+
+async function openFlowModal(item) {
+  let detail;
+  try {
+    detail = await api(`/flows/${encodeURIComponent(item.name)}`);
+  } catch (error) { toast(error.message, 'error'); return; }
+  const flow = detail.flow || {};
+  const nameInput = el('input', { class: 'mas-input', value: flow.name || item.name });
+  const descInput = el('textarea', {
+    class: 'mas-input', rows: 3, value: flow.description || '',
+  });
+  const close = modalCard([
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '✎ ' + t('flowEditTitle') })]),
+    el('p', { class: 'mas-hint',
+      text: `${(flow.steps || []).length} ${t('stepsWord')} · ${formatTime(item.updatedAt)}` }),
+    el('label', { class: 'mas-field' }, [el('span', { text: t('flowName') }), nameInput]),
+    el('label', { class: 'mas-field' }, [el('span', { text: t('flowDesc') }), descInput]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('💾 ' + t('save'), async () => {
+        const newName = nameInput.value.trim();
+        if (!newName) { toast(t('invalidFlow'), 'warn'); return; }
+        try {
+          const next = Object.assign({}, flow, {
+            name: newName, description: descInput.value,
+          });
+          await api(`/flows/${encodeURIComponent(newName)}`,
+            { method: 'PUT', body: { flow: next } });
+          if (newName !== item.name) {
+            await api(`/flows/${encodeURIComponent(item.name)}`, { method: 'DELETE' });
+          }
+          close();
+          toast(t('opSaved'), 'ok');
+          renderLibrary();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+      button('▶ ' + t('run'), () => { close(); runSavedFlow(item.name); }),
+      button('🗑 ' + t('delete'), async () => {
+        if (!window.confirm(t('deleteSavedConfirm').replace('{n}', item.name))) return;
+        try {
+          await api(`/flows/${encodeURIComponent(item.name)}`, { method: 'DELETE' });
+          close();
+          toast(t('flowDeleted'), 'ok');
+          renderLibrary();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-danger' }),
+      button(t('close'), () => close()),
+    ]),
+  ]);
 }
 
 async function runSavedFlow(name) {
@@ -666,8 +767,18 @@ async function deleteSavedFlow(name) {
 }
 
 /** The report with absolute screenshot links, so the model can open them. */
-function copyReport() {
-  return copyFrom('/report?base=' + encodeURIComponent(window.location.origin));
+async function copyReport() {
+  try {
+    const response = await fetch(API_PREFIX + '/report?base='
+      + encodeURIComponent(window.location.origin),
+    { headers: { 'X-Automation-Token': state.token } });
+    const text = await response.text();
+    copyText(text);
+    const line = text.split('\n').map((s) => s.trim()).filter(Boolean).join(' · ');
+    toast((line || t('copied')).slice(0, 400), 'info', { sticky: true });
+  } catch (error) {
+    toast(error.message, 'error');
+  }
 }
 
 /** Delete every step, after asking. One at a time gets old by step ten. */
@@ -3353,7 +3464,175 @@ async function renderOperations() {
     state.editingOperation ? operationEditor(state.editingOperation) : null,
     el('div', { class: 'mas-ops' }, cards.length ? cards
       : [el('p', { class: 'mas-empty', text: t('opNone') })]),
+    el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' }, [el('b', { text: '💾 ' + t('flowsLibTitle') })]),
+      el('p', { class: 'mas-hint', text: t('flowsLibHint') }),
+      el('div', { id: 'mas-flows-lib' }),
+    ]),
   );
+  renderLibrary();
+}
+
+/* ------------------------------------------------------------------ *
+ * Operations management: what runs now, what waits in the queue and
+ * what already finished - one list over engine runs and agent jobs.
+ * ------------------------------------------------------------------ */
+
+async function renderOps() {
+  const pane = document.getElementById('mas-tab-ops');
+  if (!pane) return;
+  const subs = ['running', 'queue', 'done'];
+  const active = subs.includes(state.opsSub) ? state.opsSub : 'running';
+  const host = el('div', { class: 'mas-subhost' });
+  replace(pane,
+    el('div', { class: 'mas-tabs mas-subtabs' }, subs.map((name) => el('button', {
+      class: 'mas-tab' + (name === active ? ' is-active' : ''),
+      dataset: { opsub: name }, type: 'button',
+      text: t('opsSub' + name.charAt(0).toUpperCase() + name.slice(1)),
+      onClick: () => { state.opsSub = name; renderOps(); },
+    }))),
+    host);
+  if (active === 'queue') return renderOpsQueue(host);
+  if (active === 'done') return renderOpsDone(host);
+  return renderOpsRunning(host);
+}
+
+async function renderOpsRunning(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let status;
+  let agent = null;
+  try {
+    status = await api('/status');
+  } catch (error) {
+    return replace(host, el('p', { class: 'mas-hint', text: error.message }));
+  }
+  try { agent = await api('/agent'); } catch (error) { agent = null; }
+  const results = status.results || [];
+  const last = results.length ? results[results.length - 1] : null;
+  const runningJob = agent && agent.scheduler ? agent.scheduler.runningJob : null;
+  const cards = [el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '⚙️ ' + t('opsSubRunning') })]),
+    agentTable(
+      [t('opsColRun'), t('opsColStatus'), t('opsColStep'), t('opsColMotion'), t('opsColTime')],
+      [[
+        status.runId || '-',
+        status.status || '-',
+        results.length ? `#${last.index + 1}/${status.stepCount || results.length}` : '-',
+        last ? `${last.label || last.type || '-'} ${last.params || ''}`.trim() : '-',
+        status.elapsedMs ? `${Math.round(status.elapsedMs / 1000)}s` : '-',
+      ]]),
+    runningJob
+      ? el('p', { class: 'mas-hint', text: `${t('opsJobRunning')}: ${runningJob}` })
+      : el('p', { class: 'mas-hint', text: t('opsNoJob') }),
+  ])];
+  const entries = (status.entries || []).slice(-8).reverse();
+  if (entries.length) {
+    cards.push(el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' }, [el('b', { text: '📜 ' + t('opsLastEvents') })]),
+      el('ul', { class: 'mas-log' }, entries.map((entry) => el('li', {
+        class: `mas-log-${entry.level || 'info'}`,
+        text: `${formatTime(entry.t)} · ${entry.message}`,
+      }))),
+    ]));
+  }
+  replace(host, ...cards);
+}
+
+async function renderOpsQueue(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let jobs = [];
+  let flows = [];
+  try {
+    jobs = (await api('/agent/jobs')).jobs || [];
+  } catch (error) {
+    return replace(host, el('p', { class: 'mas-hint', text: error.message }));
+  }
+  try { flows = (await api('/flows')).flows || []; } catch (error) { flows = []; }
+  const targetSel = el('select', { class: 'mas-input' },
+    flows.map((item) => el('option', { value: item.name, text: item.name })));
+  const kindSel = el('select', { class: 'mas-input' }, [
+    el('option', { value: 'at', text: 'at' }),
+    el('option', { value: 'every', text: 'every' }),
+    el('option', { value: 'cron', text: 'cron' }),
+  ]);
+  const scheduleInput = el('input', {
+    class: 'mas-input', placeholder: '2026-10-12 07:00 · 90 · 5m · 30 7 * * 6',
+  });
+  const form = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '⏰ ' + t('opsScheduleTitle') })]),
+    el('p', { class: 'mas-hint', text: t('opsScheduleHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [targetSel, kindSel, scheduleInput,
+      button('⏰ ' + t('opsSchedule'), async () => {
+        const target = targetSel.value;
+        if (!target || !scheduleInput.value.trim()) { toast(t('invalidFlow'), 'warn'); return; }
+        try {
+          await api('/agent/jobs', {
+            method: 'POST',
+            body: {
+              name: target, kind: kindSel.value, schedule: scheduleInput.value.trim(),
+              target, payload: { action: 'flow' },
+            },
+          });
+          toast(t('opSaved'), 'ok');
+          renderOps();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+    ]),
+  ]);
+  const table = agentTable(
+    [t('opsColName'), t('opsColSchedule'), t('opsColNext'), t('opsColLast'), ''],
+    jobs.map((job) => [
+      job.name || job.id,
+      `${job.kind}: ${job.schedule}`,
+      job.next_run_at ? formatTime(job.next_run_at) : '-',
+      job.last_status || '-',
+      el('div', { class: 'mas-row' }, [
+        button('▶', async () => {
+          try {
+            await api('/agent/job-run', { method: 'POST', body: { id: job.id } });
+            toast(t('opsStarted'), 'ok');
+            state.opsSub = 'running';
+            renderOps();
+          } catch (error) { toast(error.message, 'error'); }
+        }, { title: t('opsRunNow') }),
+        button(job.enabled ? '⏸' : '▶️', async () => {
+          try {
+            await api(`/agent/jobs/${encodeURIComponent(job.id)}`,
+              { method: 'PUT', body: { enabled: !job.enabled } });
+            renderOps();
+          } catch (error) { toast(error.message, 'error'); }
+        }, { title: t('opsToggle') }),
+        button('🗑', async () => {
+          try {
+            await api(`/agent/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
+            renderOps();
+          } catch (error) { toast(error.message, 'error'); }
+        }, { class: 'mas-btn mas-danger', title: t('delete') }),
+      ]),
+    ]));
+  replace(host, form,
+    jobs.length ? table : el('p', { class: 'mas-empty', text: t('opsNoJobs') }));
+}
+
+async function renderOpsDone(host) {
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let history = [];
+  try {
+    history = (await api('/runs')).history || [];
+  } catch (error) {
+    return replace(host, el('p', { class: 'mas-hint', text: error.message }));
+  }
+  const rows = history.slice().reverse().map((run) => [
+    run.runId || run.id || '-',
+    run.status || '-',
+    run.startedAt ? formatTime(run.startedAt) : '-',
+    run.finishedAt ? formatTime(run.finishedAt) : '-',
+    run.stepCount != null ? String(run.stepCount) : '-',
+  ]);
+  replace(host, rows.length
+    ? agentTable([t('opsColRun'), t('opsColStatus'), t('opsColStart'),
+      t('opsColEnd'), t('opsColSteps')], rows)
+    : el('p', { class: 'mas-empty', text: t('opsNoRuns') }));
 }
 
 /* ------------------------------------------------------------------ *
@@ -3596,8 +3875,10 @@ function renderLog() {
 
 function start() {
   const standalone = isStandalone();
+  state.clipSyncOn = localStorage.getItem(LS.clip) === '1';
   applyTheme(state.theme, { save: false });
   buildPanel();
+  startClipSync();
   if (standalone) {
     // One fixed header line: title, the tab row, the status dot and - at the
     // far left in RTL - the desktop-view button that opens a new tab.
@@ -4064,6 +4345,25 @@ async function renderSettings() {
     }))),
   ]);
 
+  const clipSyncCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '🔄 ' + t('clipSyncTitle') })]),
+    el('p', { class: 'mas-hint', text: t('clipSyncHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button(state.clipSyncOn ? '🟢 ' + t('clipSyncOn') : '⚪ ' + t('clipSyncOff'),
+        async () => {
+          state.clipSyncOn = !state.clipSyncOn;
+          localStorage.setItem(LS.clip, state.clipSyncOn ? '1' : '0');
+          if (state.clipSyncOn && navigator.clipboard && navigator.clipboard.readText) {
+            // The click is the user gesture Chrome wants before readText.
+            try { state.clipLastLocal = await navigator.clipboard.readText(); } catch (err) { /* denied */ }
+          }
+          startClipSync();
+          rerenderAll();
+          selectTab('settings');
+        }, { class: 'mas-btn' + (state.clipSyncOn ? ' mas-primary' : '') }),
+    ]),
+  ]);
+
   const langCard = el('div', { class: 'mas-box mas-card' }, [
     el('div', { class: 'mas-card-head' }, [el('b', { text: '🌐 ' + t('settingsLangTitle') })]),
     el('p', { class: 'mas-hint', text: t('settingsLangHint') }),
@@ -4162,7 +4462,7 @@ async function renderSettings() {
     ]),
   ]);
 
-  replace(pane, themeCard, langCard, clipCard, devlogCard, infoCard);
+  replace(pane, themeCard, langCard, clipSyncCard, clipCard, devlogCard, infoCard);
   if (hasAgent) loadDevlog();
 }
 

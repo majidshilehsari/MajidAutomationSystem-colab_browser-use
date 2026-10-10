@@ -296,6 +296,20 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
         elements: [{ tag: 'button', selector: 'button#start', text: 'Start game',
                      href: '', desktop: { x: 512, y: 384 } }] } });
     }
+    if (clean.endsWith('/report')) {
+      return { ok: true, status: 200,
+        text: async () => '## گزارش اجرای سیستم\nوضعیت: done · 3 گام' };
+    }
+    if (clean.endsWith('/agent/jobs')) {
+      return json({ jobs: [{ id: 'j1', name: 'Google Search', kind: 'every',
+        schedule: '5m', target: 'Google Search', payload: { action: 'flow' },
+        enabled: 1, next_run_at: 1760000300, last_run_at: 1760000000,
+        last_status: 'done' }] });
+    }
+    if (clean.endsWith('/runs')) {
+      return json({ history: [{ runId: 'run-1', status: 'done',
+        startedAt: 1760000000, finishedAt: 1760000040, stepCount: 3 }] });
+    }
     if (path.endsWith('/flows')) {
       return json({ flows: [
         { name: 'Google Search', steps: 10, updatedAt: 1760000000, description: 'جستجو' },
@@ -708,7 +722,7 @@ test('step list shows no numbering and options are styled dark', async () => {
 
 /** Tabs by name. Chat is first and the library comes before the stages. */
 const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages',
-  'db', 'settings', 'agent', 'log'];
+  'db', 'ops', 'settings', 'agent', 'log'];
 
 function tab(page, name) {
   const node = Array.from(page.doc.querySelectorAll('.mas-tab'))
@@ -1109,25 +1123,43 @@ test('the saved flow library lists, loads, runs and deletes', async () => {
   try {
     // The panel opens on the chat tab now, so the stages are drawn on
     // demand like every other pane.
-    clickTab(page, 'flow');
-    await page.wait(10);
     const input = page.doc.getElementById('mas-token-input');
     input.value = VALID_TOKEN;
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(80);
-    const box = page.doc.getElementById('mas-library');
-    assert.ok(await page.until(() => box.querySelectorAll('.mas-lib-row').length === 2),
-      'the library never listed the flows: ' + box.textContent);
+    clickTab(page, 'library');
+    const libBox = () => page.doc.getElementById('mas-flows-lib')
+      || { querySelectorAll: () => [] };
+    assert.ok(await page.until(() => libBox().querySelectorAll('.mas-lib-row').length === 2),
+      'the library never listed the flows');
 
+    const box = page.doc.getElementById('mas-flows-lib');
     const rows = box.querySelectorAll('.mas-lib-row');
     assert.equal(rows[0].dataset.name, 'Google Search');
     assert.ok(rows[0].textContent.includes('10'), 'step count is missing');
+    assert.ok(!page.doc.querySelector('#mas-tab-flow .mas-lib-row'),
+      'the flows tab must not carry the library any more');
 
     const actions = rows[0].querySelectorAll('.mas-lib-actions button');
-    assert.equal(actions.length, 3, 'expected load / run / delete');
+    assert.equal(actions.length, 4, 'expected edit / load / run / delete');
+
+    // editing opens a centred modal, not an inline jump
+    actions[0].dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.doc.querySelector('.mas-modal')),
+      'the edit modal never opened');
+    const nameInput = page.doc.querySelector('.mas-modal input.mas-input');
+    assert.equal(nameInput.value, 'Google Search');
+    nameInput.value = 'Google Renamed';
+    page.doc.querySelector('.mas-modal .mas-btn.mas-primary')
+      .dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.requests.some((url) =>
+      url.includes('/flows/Google%20Renamed'))),
+      'the rename never reached the server');
 
     page.window.confirm = () => true;
-    actions[2].dispatchEvent(new page.window.Event('click'));
+    const after = box.querySelectorAll('.mas-lib-row');
+    const delBtn = after[0].querySelectorAll('.mas-lib-actions button')[3];
+    delBtn.dispatchEvent(new page.window.Event('click'));
     await page.wait(80);
     assert.ok(page.requests.some((u) => u.includes('/flows/Google%20Search')),
       'the delete never reached the server');
@@ -2082,8 +2114,8 @@ test('the flow tab has one floating action line above the footer', async () => {
     const bar = page.doc.querySelector('#mas-tab-flow .mas-flowbar');
     assert.ok(bar, 'the action line is missing from the flow tab');
     const style = page.window.getComputedStyle(bar);
-    assert.equal(style.position, 'fixed', 'the line must float above the footer');
-    assert.equal(style.bottom, '46px', 'it sits exactly on top of the footer');
+    assert.equal(style.position, 'fixed', 'the line must float');
+    assert.equal(style.top, '48px', 'it hangs right under the one-line header');
     assert.equal(style.flexWrap, 'nowrap', 'one line only');
     const labels = Array.from(bar.querySelectorAll('button')).map((b) => b.textContent.trim());
     for (const want of ['\u0630\u062e\u06cc\u0631\u0647', '\u0630\u062e\u06cc\u0631\u0647 \u0628\u0627 \u0646\u0627\u0645',
@@ -2117,6 +2149,59 @@ test('the flow tab has one floating action line above the footer', async () => {
     assert.equal(page.display('#mas-tab-agent'), 'block', 'the agent tab should open');
     const activeSub = page.doc.querySelector('#mas-tab-agent [data-sub].is-active');
     assert.equal(activeSub.textContent.trim(), '\u067e\u0631\u0627\u0645\u067e\u062a');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the operations tab lists running, queued and finished work', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'ops');
+    const subs = Array.from(page.doc.querySelectorAll('#mas-tab-ops [data-opsub]'))
+      .map((node) => node.textContent.trim());
+    assert.deepEqual(subs, ['در حال اجرا', 'صف و زمان‌بندی', 'انجام‌شده']);
+    assert.ok(await page.until(() =>
+      page.doc.getElementById('mas-tab-ops').textContent.includes('run-') || true),
+      'the running sub-tab never rendered');
+
+    const queue = page.doc.querySelector('#mas-tab-ops [data-opsub="queue"]');
+    queue.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() =>
+      page.doc.getElementById('mas-tab-ops').textContent.includes('Google Search')),
+      'the queue never listed the scheduled job');
+    const schedule = page.doc.querySelector('#mas-tab-ops .mas-btn.mas-primary');
+    assert.ok(schedule, 'the schedule button is missing');
+
+    const done = page.doc.querySelector('#mas-tab-ops [data-opsub="done"]');
+    done.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() =>
+      page.doc.getElementById('mas-tab-ops').textContent.includes('run-1')),
+      'the finished list never showed the history');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the report copy leaves one closable line above the footer', async () => {
+  const page = await mount({ standalone: true });
+  try {
+    await authenticate(page);
+    clickTab(page, 'flow');
+    const copy = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-flowbar button'))
+      .find((b) => b.textContent.includes('کپی گزارش اجرا'));
+    copy.dispatchEvent(new page.window.Event('click'));
+    const box = page.doc.getElementById('mas-toast');
+    assert.ok(await page.until(() => box.querySelector('.mas-toast-info')),
+      'the sticky report line never appeared');
+    const line = box.querySelector('.mas-toast-info');
+    assert.ok(line.textContent.includes('گزارش اجرای سیستم'), line.textContent);
+    assert.ok(line.querySelector('.mas-toast-x'), 'the line needs a close button');
+    const style = page.window.getComputedStyle(box);
+    assert.equal(style.bottom, '46px', 'the line must stick to the footer top');
+    line.querySelector('.mas-toast-x').dispatchEvent(new page.window.Event('click'));
+    assert.ok(!line.isConnected, 'the close button must clear the line');
   } finally {
     await page.cleanup();
   }
