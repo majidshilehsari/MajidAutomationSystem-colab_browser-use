@@ -115,7 +115,8 @@ export const STEP_DEFS = [
     { key: 'policy', kind: AREA },
     { key: 'output', kind: TEXT, optional: true }] },
   { type: 'secure_http_request', group: 'secret', fields: [
-    { key: 'handle', kind: TEXT },
+    { key: 'secretRef', kind: TEXT, optional: true },
+    { key: 'handle', kind: TEXT, optional: true },
     { key: 'method', kind: SELECT, options: ['GET', 'POST'], optional: true },
     { key: 'url', kind: TEXT },
     { key: 'json', kind: AREA, optional: true },
@@ -149,7 +150,7 @@ export const STEP_DEFAULTS = {
   progress_notice: { title: '' },
   interactive_form: { title: '', fields: [] },
   secure_input: { title: '', fields: [], policy: { allowedHosts: [], allowedPaths: ['/'] } },
-  secure_http_request: { handle: '', method: 'GET', url: '' },
+  secure_http_request: { secretRef: '', method: 'GET', url: '' },
 };
 
 export function stepDef(type) {
@@ -640,7 +641,7 @@ export const STRINGS = {
     noteHint: 'متنی را که می‌خواهی نگه داری اینجا بنویس و «ذخیره یادداشت» را بزن',
     noteEmpty: 'متنی ننوشتی', saveNote: 'ذخیره یادداشت', saved: 'ذخیره شد',
     deleteTextConfirm: 'این متن پاک شود؟', refresh: 'تازه‌سازی', copy: 'کپی',
-    flowName: 'نام مجموعه', addStep: 'افزودن گام', stepsEmpty: 'هنوز گامی ندارید.',
+    flowName: 'نام عملیات', addStep: 'افزودن گام', stepsEmpty: 'هنوز گامی ندارید.',
     run: 'اجرا', pause: 'توقف موقت', resume: 'ادامه', stop: 'قطع', stepOver: 'یک گام',
     save: 'ذخیره', saveAs: 'ذخیره با نام', load: 'بارگذاری', delete: 'حذف', duplicate: 'تکرار',
     settings: 'تنظیمات', defaultDelay: 'مکث پیش‌فرض (میلی‌ثانیه)', repeat: 'تعداد دفعات',
@@ -1068,7 +1069,7 @@ export const STRINGS = {
     noteHint: 'Write text you want to keep, then press Save note',
     noteEmpty: 'You did not write anything', saveNote: 'Save note', saved: 'Saved',
     deleteTextConfirm: 'Delete this text?', refresh: 'Refresh', copy: 'Copy',
-    flowName: 'Flow name', addStep: 'Add step', stepsEmpty: 'No steps yet.',
+    flowName: 'Operation name', addStep: 'Add step', stepsEmpty: 'No steps yet.',
     run: 'Run', pause: 'Pause', resume: 'Resume', stop: 'Stop', stepOver: 'Step',
     save: 'Save', saveAs: 'Save as', load: 'Load', delete: 'Delete', duplicate: 'Duplicate',
     settings: 'Settings', defaultDelay: 'Default delay (ms)', repeat: 'Repeat',

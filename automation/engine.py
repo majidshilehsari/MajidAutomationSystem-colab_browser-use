@@ -480,13 +480,73 @@ class AutomationEngine:
                 return
         node[path[-1]] = value
 
+    @staticmethod
+    def _validate_form_values(schema: Dict[str, Any], raw: Any) -> Dict[str, Any]:
+        """Check one submission against the schema the human actually saw.
+
+        Required, maxLength, options and numeric bounds are enforced here (not
+        only in the panel), values are coerced to the field type, and anything
+        the schema does not declare is refused outright - a submit call must
+        never smuggle keys into the run's namespace.
+        """
+        if not isinstance(raw, dict):
+            raise ValueError("values must be an object of field id to value")
+        fields = [f for f in (schema.get("fields") or []) if isinstance(f, dict)]
+        known = {str(f.get("id")): f for f in fields if f.get("id")}
+        unknown = [key for key in raw if key not in known]
+        if unknown:
+            raise ValueError("unknown field id(s): %s" % ", ".join(sorted(unknown)))
+        values: Dict[str, Any] = {}
+        for field_id, field in known.items():
+            ftype = str(field.get("type") or "text")
+            value = raw.get(field_id, field.get("default"))
+            if ftype == "checkbox":
+                value = bool(value)
+            elif ftype in ("radio", "select"):
+                allowed = [str(o.get("value")) for o in (field.get("options") or [])
+                           if isinstance(o, dict)]
+                value = "" if value is None else str(value)
+                if value and allowed and value not in allowed:
+                    raise ValueError("field %r: %r is not one of the options"
+                                     % (field_id, value))
+            elif ftype == "number":
+                if value not in ("", None):
+                    try:
+                        value = float(value) if "." in str(value) else int(value)
+                    except (TypeError, ValueError):
+                        raise ValueError("field %r must be a number" % field_id)
+                    if field.get("min") is not None and value < field["min"]:
+                        raise ValueError("field %r is below the minimum" % field_id)
+                    if field.get("max") is not None and value > field["max"]:
+                        raise ValueError("field %r is above the maximum" % field_id)
+                else:
+                    value = ""
+            else:
+                value = "" if value is None else str(value)
+                limit = field.get("maxLength")
+                if limit and len(value) > int(limit):
+                    raise ValueError("field %r is longer than %s characters"
+                                     % (field_id, limit))
+            required = bool(field.get("required"))
+            if required and value in ("", None, False):
+                raise ValueError("field %r is required" % field_id)
+            values[field_id] = value
+        return values
+
     def submit_form(self, form_id: str, values: Dict[str, Any]) -> None:
         """A human submitted a pending interactive form."""
         with self._lock:
             pending = self._state.awaiting_confirmation if self._state else None
             if not pending or pending.get("formId") != form_id:
                 raise RuntimeError("no pending form with id %r" % form_id)
-            self._form_values = values if isinstance(values, dict) else {}
+            if pending.get("consumed"):
+                raise RuntimeError("form %r was already submitted" % form_id)
+            clean = self._validate_form_values(pending.get("formSchema") or {},
+                                               values)
+            self._form_values = clean
+            # Marked under the same lock as the wakeup, so a second submit in
+            # the polling race gets a clear error instead of silently queuing.
+            pending["consumed"] = True
             self._confirmed = True
             self._wakeup.set()
 
@@ -503,12 +563,20 @@ class AutomationEngine:
                 raise RuntimeError("no pending form with id %r" % form_id)
             schema = pending.get("formSchema") or {}
             policy = schema.get("policy") or {}
+            if pending.get("consumed"):
+                raise RuntimeError("form %r was already submitted" % form_id)
+            filled = {key: val for key, val in (secrets or {}).items() if val}
+            if not filled:
+                # Round-14 letter, problem 2: refuse BEFORE resuming, so the
+                # card stays waiting and the human can type the value. A
+                # confirmed-but-empty submit is what produced rc=0 stdout={}.
+                raise ValueError("no secret value was entered; nothing reached "
+                                 "the vault and the card stays open")
             handles: Dict[str, Any] = {}
-            for field_id, raw in (secrets or {}).items():
-                if not raw:
-                    continue
+            for field_id, raw in filled.items():
                 handles[field_id] = self._vault.create(str(raw), policy, actor=actor)
             self._form_values = handles
+            pending["consumed"] = True
             self._confirmed = True
             self._wakeup.set()
             return handles
@@ -518,6 +586,9 @@ class AutomationEngine:
             pending = self._state.awaiting_confirmation if self._state else None
             if not pending or pending.get("formId") != form_id:
                 raise RuntimeError("no pending form with id %r" % form_id)
+            if pending.get("consumed"):
+                raise RuntimeError("form %r was already submitted" % form_id)
+            pending["consumed"] = True
             self._confirmed = False
             self._wakeup.set()
 
@@ -590,6 +661,12 @@ class AutomationEngine:
             pending, index=index, label=label, type="secure_input",
             message=step.get("message") or step.get("title") or ""))
         handles = self._take_form_values()
+        if not handles:
+            # No value, no handle, no success: a step that quietly returned {}
+            # is what broke the chain to secure_http_request in run
+            # run-1791705532781 (rc=0, stdout={}).
+            return 2, "", ("no secret reached the vault: every submitted value was "
+                           "empty, so no handle was created")
         out = step.get("output")
         namespace = ((out.get("handle") if isinstance(out, dict) else out)
                      or ("form.sec%03d" % index))
@@ -597,8 +674,36 @@ class AutomationEngine:
         # Only masked metadata is ever returned or logged.
         return 0, json.dumps(handles, ensure_ascii=False)[:600], ""
 
+    @staticmethod
+    def _resolve_secret_ref(ref: str, state: RunState) -> str:
+        """Resolve ``creds.api_key`` (run-scoped) to a live vault handle.
+
+        The reference walks this run's form outputs, which hold only masked
+        handle metadata, and lifts the fullHandle out of it.  A ref that misses
+        yields an empty string; the vault then refuses with a clear error
+        instead of the step silently picking something else up.
+        """
+        node: Any = state.form_outputs
+        for part in str(ref or "").split("."):
+            if not part or part == "form":
+                continue
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            else:
+                return ""
+        if isinstance(node, dict):
+            return str(node.get("fullHandle") or "")
+        return str(node or "")
+
     def _run_secure_http(self, state: RunState, step: Dict[str, Any]) -> "tuple[int, str, str]":
         handle = str(step.get("handle") or "")
+        if not handle and step.get("secretRef"):
+            handle = self._resolve_secret_ref(str(step["secretRef"]), state)
+            if not handle:
+                return 2, "", ("secretRef %r did not resolve: the secure_input step "
+                               "must run before this one" % step["secretRef"])
+        if not handle:
+            return 2, "", "the step needs either a handle or a secretRef"
         method = str(step.get("method") or "GET").upper()
         url = str(step.get("url") or "")
         try:

@@ -640,7 +640,11 @@ function renderFlow() {
     ])
     : null;
 
-  replace(pane, nameRow, addRow, errorBox, list, settingsBox, ioRow);
+  // The action line comes FIRST in the DOM: it is sticky at top:0, so it must
+  // start right under the header. When it sat last, sticky anchored it to its
+  // natural place - the bottom of the pane - which is exactly where the user
+  // kept finding it (round 14).
+  replace(pane, ioRow, nameRow, addRow, errorBox, list, settingsBox);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1185,20 +1189,29 @@ function renderStatus() {
         const schema = waiting.formSchema || {};
         approve.textContent = schema.submitLabel || t('approve');
         refuse.textContent = schema.cancelLabel || t('refuse');
-        const bits = [el('p', { class: 'mas-hint', text: schema.message || '' })];
-        if (kind === 'secret') {
-          const policy = schema.policy || {};
-          bits.push(el('p', { class: 'mas-form-warn', text: t('secretWarn') }));
-          bits.push(el('p', {
-            class: 'mas-form-policy',
-            text: `${t('secretScope')}: ${(policy.allowedHosts || []).join('، ')} · `
-              + `${(policy.allowedPaths || []).join('، ')} · `
-              + `${(policy.methods || []).join('/')} · TTL ${policy.ttlSeconds || 900}s · `
-              + `max ${policy.maxUses || 20}`,
-          }));
+        // Same formId => the fields already on screen ARE the local state;
+        // rebuilding them is what reset the human's edits every poll tick.
+        if (formHost.dataset.formId !== waiting.formId) {
+          draftRestore(waiting.formId);
+          const bits = [el('p', { class: 'mas-hint', text: schema.message || '' })];
+          if (kind === 'secret') {
+            const policy = schema.policy || {};
+            bits.push(el('p', { class: 'mas-form-warn', text: t('secretWarn') }));
+            bits.push(el('p', {
+              class: 'mas-form-policy',
+              text: `${t('secretScope')}: ${(policy.allowedHosts || []).join('، ')} · `
+                + `${(policy.allowedPaths || []).join('، ')} · `
+                + `${(policy.methods || []).join('/')} · TTL ${policy.ttlSeconds || 900}s · `
+                + `max ${policy.maxUses || 20}`,
+            }));
+          }
+          (schema.fields || []).forEach((field) => bits.push(formFieldNode(field, schema)));
+          formHost.dataset.formId = waiting.formId;
+          replace(formHost, ...bits);
         }
-        (schema.fields || []).forEach((field) => bits.push(formFieldNode(field)));
-        replace(formHost, ...bits);
+      } else if (formHost.dataset.formId) {
+        formHost.dataset.formId = '';
+        formDraft = { id: null, values: {}, touched: {} };
       }
     }
   }
@@ -1207,33 +1220,93 @@ function renderStatus() {
   renderRunPanel(raw, label);
 }
 
-function formFieldNode(field) {
+// Round 14, problem 1: the panel polls ~1/s and used to rebuild the form card
+// on every tick, which reset whatever the human had typed. The draft below is
+// the card's local state: defaults apply once (first mount of a formId), every
+// edit marks the field touched/dirty, and a same-formId poll never remounts.
+// Non-secret drafts survive a page refresh through sessionStorage; a secret
+// value NEVER touches any browser storage.
+let formDraft = { id: null, values: {}, touched: {} };
+
+function draftRestore(formId) {
+  formDraft = { id: formId, values: {}, touched: {} };
+  try {
+    const raw = window.sessionStorage.getItem('mas.formdraft');
+    const saved = raw ? JSON.parse(raw) : null;
+    if (saved && saved.id === formId && saved.values && typeof saved.values === 'object') {
+      formDraft.values = saved.values;
+      formDraft.touched = saved.touched && typeof saved.touched === 'object'
+        ? saved.touched : {};
+    }
+  } catch (error) { /* storage is best-effort, the form still works */ }
+}
+
+function draftPersist(schema) {
+  try {
+    const values = {};
+    const touched = {};
+    (schema.fields || []).forEach((field) => {
+      if ((field.type || 'text') === 'secret') return;  // never stored
+      if (formDraft.values[field.id] !== undefined) values[field.id] = formDraft.values[field.id];
+      if (formDraft.touched[field.id]) touched[field.id] = true;
+    });
+    window.sessionStorage.setItem('mas.formdraft',
+      JSON.stringify({ id: formDraft.id, values, touched }));
+  } catch (error) { /* best-effort */ }
+}
+
+function draftClear() {
+  formDraft = { id: null, values: {}, touched: {} };
+  try {
+    window.sessionStorage.removeItem('mas.formdraft');
+  } catch (error) { /* best-effort */ }
+}
+
+function draftNote(schema, fieldId, value) {
+  formDraft.values[fieldId] = value;
+  formDraft.touched[fieldId] = true;
+  draftPersist(schema);
+}
+
+function formFieldNode(field, schema) {
   const id = 'mas-ff-' + field.id;
   const type = field.type || 'text';
+  const saved = formDraft.values[field.id];
   let input = null;
   if (type === 'checkbox') {
-    input = el('input', { id, type: 'checkbox', checked: !!field.default });
+    input = el('input', {
+      id, type: 'checkbox',
+      checked: saved !== undefined ? !!saved : !!field.default,
+      onChange: (event) => draftNote(schema, field.id, event.target.checked),
+    });
   } else if (type === 'radio' || type === 'select') {
+    const wanted = saved !== undefined ? saved : field.default;
     input = el('div', { class: 'mas-form-opts' }, (field.options || []).map((opt) => el('label', {
       class: 'mas-check',
     }, [
       el('input', {
         type: 'radio', name: id, value: opt.value,
-        checked: opt.value === field.default,
+        checked: opt.value === wanted,
+        onChange: () => draftNote(schema, field.id, opt.value),
       }),
       el('span', { text: opt.label || opt.value }),
     ])));
   } else if (type === 'textarea') {
     input = el('textarea', {
-      id, class: 'mas-input', rows: 3, value: field.default || '',
+      id, class: 'mas-input', rows: 3,
+      value: saved !== undefined ? saved : (field.default || ''),
       placeholder: field.placeholder || '',
+      onInput: (event) => draftNote(schema, field.id, event.target.value),
     });
   } else {
     const htmlType = type === 'secret' ? 'password'
       : (['number', 'date', 'time', 'url', 'email'].includes(type) ? type : 'text');
     input = el('input', {
-      id, class: 'mas-input', type: htmlType, value: field.default || '',
+      id, class: 'mas-input', type: htmlType,
+      // a secret is never restored from anywhere: it starts empty every mount
+      value: type === 'secret' ? '' : (saved !== undefined ? saved : (field.default || '')),
       placeholder: field.placeholder || '', maxLength: field.maxLength || undefined,
+      onInput: (event) => draftNote(schema, field.id, event.target.value),
     });
   }
   const children = [el('span', {
@@ -1262,14 +1335,22 @@ function collectFormValues(schema) {
     const id = 'mas-ff-' + field.id;
     const type = field.type || 'text';
     if (type === 'checkbox') {
-      values[field.id] = !!document.getElementById(id).checked;
+      const node = document.getElementById(id);
+      values[field.id] = node ? !!node.checked : !!formDraft.values[field.id];
     } else if (type === 'radio' || type === 'select') {
       const picked = document.querySelector(`input[name="${id}"]:checked`);
-      values[field.id] = picked ? picked.value : '';
+      values[field.id] = picked ? picked.value
+        : (formDraft.values[field.id] !== undefined ? formDraft.values[field.id] : '');
     } else {
-      values[field.id] = document.getElementById(id).value;
+      const node = document.getElementById(id);
+      values[field.id] = node ? node.value
+        : (formDraft.values[field.id] !== undefined ? formDraft.values[field.id] : '');
     }
-    if (field.required && (values[field.id] === '' || values[field.id] == null)) {
+    // a required checkbox that is not ticked counts as empty, same as the
+    // server-side validation in engine._validate_form_values
+    const empty = values[field.id] === '' || values[field.id] == null
+      || values[field.id] === false;
+    if (field.required && empty) {
       throw new Error(`${t('formRequired')}: ${field.label || field.id}`);
     }
   }
@@ -1290,6 +1371,7 @@ async function submitPendingForm(kind) {
   const path = base + encodeURIComponent(waiting.formId) + '/submit';
   try {
     await api(path, { method: 'POST', body: { values } });
+    draftClear();
   } catch (error) {
     toast(error.message, 'error');
   }
@@ -1300,6 +1382,7 @@ async function cancelPendingForm() {
   const path = '/forms/' + encodeURIComponent(waiting.formId) + '/cancel';
   try {
     await api(path, { method: 'POST', body: {} });
+    draftClear();
   } catch (error) {
     toast(error.message, 'error');
   }

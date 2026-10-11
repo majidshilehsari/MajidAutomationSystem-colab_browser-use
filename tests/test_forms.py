@@ -246,3 +246,210 @@ class FormApiTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+CHAIN_FLOW = {
+    "name": "chain",
+    "steps": [
+        {"type": "progress_notice", "title": "شروع", "level": "info"},
+        {"type": "interactive_form", "title": "مشخصات",
+         "fields": [
+             {"id": "city", "type": "text", "label": "شهر", "required": True,
+              "default": "اصفهان"},
+             {"id": "count", "type": "number", "label": "تعداد", "required": True},
+             {"id": "express", "type": "checkbox", "label": "فوری", "default": True},
+             {"id": "kind", "type": "radio", "label": "نوع", "default": "a",
+              "options": [{"value": "a"}, {"value": "b"}]}],
+         "output": {"namespace": "req"}},
+        {"type": "secure_input", "title": "کلید",
+         "fields": [{"id": "api_key", "type": "secret", "label": "کلید"}],
+         "policy": dict(POLICY), "output": {"handle": "creds"}},
+        {"type": "secure_http_request", "secretRef": "creds.api_key",
+         "method": "GET", "url": "https://api.example.dev/v1/data",
+         "saveAs": "resp"},
+    ],
+}
+
+
+class SubmitValidationTests(unittest.TestCase):
+    """The submit endpoint must enforce the schema the human actually saw."""
+
+    SCHEMA = {"fields": [
+        {"id": "city", "type": "text", "required": True, "maxLength": 10},
+        {"id": "count", "type": "number", "required": True, "min": 1, "max": 9},
+        {"id": "express", "type": "checkbox"},
+        {"id": "kind", "type": "radio", "options": [{"value": "a"}, {"value": "b"}]},
+    ]}
+
+    def validate(self, values):
+        return AutomationEngine._validate_form_values(self.SCHEMA, values)
+
+    def test_valid_submission_is_coerced(self):
+        clean = self.validate({"city": "تهران", "count": "5",
+                               "express": True, "kind": "b"})
+        self.assertEqual(clean, {"city": "تهران", "count": 5,
+                                 "express": True, "kind": "b"})
+
+    def test_required_maxlength_options_and_unknown_keys_are_enforced(self):
+        for bad in (
+            {"city": "", "count": 2},                              # required
+            {"city": "x" * 11, "count": 2},                        # maxLength
+            {"city": "x", "count": 2, "kind": "z"},                # options
+            {"city": "x", "count": 2, "smuggled": 1},              # unknown key
+            {"city": "x", "count": 99},                            # max bound
+            {"city": "x", "count": "abc"},                         # number type
+        ):
+            with self.assertRaises(ValueError, msg=str(bad)):
+                self.validate(bad)
+
+
+class RoundFourteenChainTests(unittest.TestCase):
+    """The letter's mandatory end-to-end scenario through the real router."""
+
+    TOKEN = "tok-e2e"
+    # the server layer lowercases header names before dispatch
+    HEADERS = {"x-automation-token": "tok-e2e"}
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.clock = FakeClock()
+        self.backend = FakeBackend()
+        self.engine = AutomationEngine(self.backend, self.tmp,
+                                       sleep=self.clock.sleep, clock=self.clock.time)
+        self.api = AutomationApi(self.engine, FlowStore(self.tmp),
+                                 data_dir=self.tmp, token=self.TOKEN)
+        self.opener = FakeOpener()
+
+    def tearDown(self):
+        if self.engine.busy():
+            self.engine.stop()
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def dispatch(self, method, path, payload=None):
+        body = json.dumps(payload).encode() if payload is not None else b""
+        return self.api.handle(method, path, body=body, headers=dict(self.HEADERS))
+
+    def wait_pending(self, kind):
+        ok = wait_until(lambda: (self.engine.status().get("awaitingConfirmation")
+                                 or {}).get("kind") == kind)
+        self.assertTrue(ok, "the %s card never surfaced" % kind)
+        return self.engine.status()["awaitingConfirmation"]
+
+    def wait_done(self):
+        ok = wait_until(lambda: self.engine.status()["status"] in TERMINAL_STATES)
+        self.assertTrue(ok, "the run never finished")
+        return self.engine.status()
+
+    def test_every_registered_route_pattern_really_matches(self):
+        # The letter's problem 3: the table knew /forms/*/submit but the old
+        # matcher only understood a trailing '*', so it 404'd in production.
+        from automation.api import _match
+        for method, pattern, _handler in self.api.routes:
+            sample = "".join("/" + ("sample-1" if seg == "*" else seg)
+                             for seg in pattern.split("/") if seg)
+            self.assertIsNotNone(_match(pattern, sample),
+                                 "dead route in the table: %s %s" % (method, pattern))
+
+    def test_the_full_chain_notice_form_secret_connector(self):
+        with mock.patch("urllib.request.build_opener", return_value=self.opener):
+            self.engine.start(CHAIN_FLOW)
+
+            # 1+2: notice passes without stopping, the form card opens
+            pending = self.wait_pending("form")
+            form_id = pending["formId"]
+
+            # a duplicate/unknown submit is refused with a clear error
+            missing = self.dispatch("POST", "/forms/form-other-999/submit",
+                                    {"values": {"city": "x"}})
+            self.assertEqual(missing[0], 404)
+
+            # 3+4+5: text changed, checkbox switched off, radio moved to 'b',
+            #        submitted through the real router -> HTTP 200
+            answer = self.dispatch("POST", "/forms/%s/submit" % form_id,
+                                   {"values": {"city": "تهران", "count": 5,
+                                               "express": False, "kind": "b"}})
+            self.assertEqual(answer[0], 200, answer[2])
+            again = self.dispatch("POST", "/forms/%s/submit" % form_id,
+                                  {"values": {"city": "تهران", "count": 5}})
+            self.assertIn(again[0], (404, 409), "a second submit must be refused")
+
+            # server-side validation reaches the router as 400
+            pending2 = self.wait_pending("secret")
+
+            # an empty secret submit is refused and the card STAYS open
+            empty = self.dispatch("POST", "/secrets/%s/submit" % pending2["formId"],
+                                  {"values": {"api_key": ""}})
+            self.assertEqual(empty[0], 400)
+            self.assertEqual((self.engine.status().get("awaitingConfirmation")
+                              or {}).get("kind"), "secret")
+
+            # 7+8: the real submit only answers masked metadata
+            answer = self.dispatch("POST", "/secrets/%s/submit" % pending2["formId"],
+                                   {"values": {"api_key": "SUPERSECRET"}})
+            self.assertEqual(answer[0], 200, answer[2])
+            self.assertNotIn(b"SUPERSECRET", answer[2])
+            handles = json.loads(answer[2].decode())["handles"]["api_key"]
+            handle = handles["fullHandle"]
+            self.assertTrue(handle.startswith("sec_"))
+
+            # 9: the connector resolves secretRef -> GET with the policy header
+            status = self.wait_done()
+            self.assertEqual(status["status"], "done",
+                             json.dumps(status["results"], ensure_ascii=False,
+                                        default=str))
+            self.assertEqual(self.opener.req.get_header("Authorization"),
+                             "Bearer SUPERSECRET")
+            self.assertEqual(self.opener.req.get_method(), "GET")
+
+            # 6: the namespace carries exactly the values the human chose
+            outputs = self.engine._state.form_outputs
+            self.assertEqual(outputs["req"], {"city": "تهران", "count": 5,
+                                              "express": False, "kind": "b"})
+            self.assertEqual(outputs["resp"], {"ok": True})
+
+            # 10: the use counter moved and status shows it, masked
+            answer = self.dispatch("GET", "/secrets/%s/status" % handle)
+            self.assertEqual(answer[0], 200)
+            body = json.loads(answer[2].decode())
+            self.assertEqual(body["uses"], 1)
+            self.assertEqual(body["maxUses"], POLICY["maxUses"])
+            self.assertNotIn("SUPERSECRET", answer[2].decode())
+
+            # 11: revoke, then the next acquire is refused for good
+            answer = self.dispatch("POST", "/secrets/%s/revoke" % handle)
+            self.assertEqual(answer[0], 200)
+            from automation.vault import VaultError
+            with self.assertRaises(VaultError) as ctx:
+                self.engine.vault.acquire(handle, "GET",
+                                          "https://api.example.dev/v1/data")
+            self.assertEqual(ctx.exception.status, 410)
+
+            # 12: the secret appears in no observable output
+            sweep = json.dumps({
+                "status": self.engine.status(),
+                "results": self.engine._state.results,
+                "entries": self.engine._state.entries,
+                "outputs": self.engine._state.form_outputs,
+            }, ensure_ascii=False, default=str)
+            self.assertNotIn("SUPERSECRET", sweep)
+
+    def test_secret_ref_that_never_ran_is_a_clear_error(self):
+        self.engine.start({"name": "lonely-connector", "steps": [
+            {"type": "secure_http_request", "secretRef": "creds.api_key",
+             "method": "GET", "url": "https://api.example.dev/v1/data"},
+        ]})
+        status = self.wait_done()
+        self.assertEqual(status["status"], "error")
+        self.assertIn("did not resolve", status["results"][0]["error"])
+
+    def test_secure_input_never_reports_success_without_a_handle(self):
+        # Defense in depth: even if a submit reached the step empty, the step
+        # fails instead of handing {} to the next stage (run-1791705532781).
+        self.engine.start(SECRET_FLOW)
+        form_id = self.wait_pending("secret")["formId"]
+        self.engine._form_values = {}
+        self.engine._confirmed = True
+        self.engine._wakeup.set()
+        status = self.wait_done()
+        self.assertEqual(status["status"], "error")
+        self.assertIn("no secret reached the vault", status["results"][0]["error"])

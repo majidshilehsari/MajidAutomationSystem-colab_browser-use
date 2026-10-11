@@ -2328,3 +2328,95 @@ test('the secret card warns, masks the value and posts only to the vault', async
     await page.cleanup();
   }
 });
+
+test('form values survive five polling cycles without a remount', async () => {
+  const status = {
+    runId: 'r3', status: 'running', stepCount: 1, stepIndex: 0,
+    currentStep: null,
+    awaitingConfirmation: {
+      index: 0, label: 'form', type: 'interactive_form', kind: 'form',
+      formId: 'form-r3-001',
+      formSchema: {
+        title: 'فرم نظرسنجی', message: 'مقادیر را عوض کنید',
+        fields: [
+          { id: 'city', type: 'text', label: 'شهر', required: true, default: 'اصفهان' },
+          { id: 'express', type: 'checkbox', label: 'فوری', default: true },
+          { id: 'kind', type: 'radio', label: 'نوع', default: 'a',
+            options: [{ value: 'a', label: 'الف' }, { value: 'b', label: 'ب' }] },
+        ],
+      },
+    },
+    entries: [], results: [], handoffs: [],
+  };
+  const page = await mount({ status });
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    const confirm = page.doc.getElementById('mas-confirm');
+    assert.ok(await page.until(() => !confirm.hidden), 'the form card did not appear');
+    const city = page.doc.getElementById('mas-ff-city');
+    const express = page.doc.getElementById('mas-ff-express');
+    const radioB = page.doc.querySelector('input[name="mas-ff-kind"][value="b"]');
+    assert.equal(city.value, 'اصفهان', 'the default must apply on first mount');
+    assert.equal(express.checked, true);
+
+    // the human edits: text changed, checkbox switched off, radio moved to b
+    city.value = 'تهران';
+    city.dispatchEvent(new page.window.Event('input', { bubbles: true }));
+    express.checked = false;
+    express.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+    radioB.checked = true;
+    radioB.dispatchEvent(new page.window.Event('change', { bubbles: true }));
+
+    // the panel polls status every 900ms; five cycles must not reset anything
+    const cityNodeBefore = city;
+    await page.wait(4900);
+    assert.equal(page.doc.getElementById('mas-ff-city'), cityNodeBefore,
+      'the field was remounted even though the formId never changed');
+    assert.equal(city.value, 'تهران', 'the poll reset the text field');
+    assert.equal(express.checked, false, 'the poll re-ticked the checkbox');
+    assert.ok(radioB.checked, 'the poll moved the radio back to its default');
+
+    // submit sends exactly what is on screen
+    page.doc.getElementById('mas-confirm-approve').dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    const posted = page.posts.find((p) => p.url.endsWith('/forms/form-r3-001/submit'));
+    assert.ok(posted, 'the submit never fired');
+    assert.deepEqual(JSON.parse(posted.body).values,
+      { city: 'تهران', express: false, kind: 'b' });
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the flow action line sits first, right under the header, and the name label reads عملیات', async () => {
+  const page = await mount({ standalone: true });
+  try {
+    await authenticate(page);
+    clickTab(page, 'flow');
+    const pane = page.doc.getElementById('mas-tab-flow');
+    const bar = pane.querySelector('.mas-flowbar');
+    assert.ok(bar, 'the action line is missing');
+    assert.equal(pane.firstElementChild, bar,
+      'the sticky line must be the FIRST child so it hugs the header');
+    const nameLabel = Array.from(pane.querySelectorAll('.mas-label'))
+      .find((node) => node.textContent.includes('نام'));
+    assert.ok(nameLabel, 'the name label disappeared');
+    assert.equal(nameLabel.textContent, 'نام عملیات');
+    assert.ok(!pane.textContent.includes('نام مجموعه'), 'the old wrong label is still there');
+    assert.equal(bar.compareDocumentPosition(nameLabel)
+      & page.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      page.window.Node.DOCUMENT_POSITION_FOLLOWING,
+      'the name row must come AFTER the action line');
+
+    // the wide-screen rules: full monitor width and the bar spans the grid
+    assert.ok(/max-width: none;/.test(CSS), 'the body cap is still limiting the width');
+    assert.ok(CSS.includes('#mas-tab-flow > .mas-flowbar'),
+      'the grid span rule for the action line is missing');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});

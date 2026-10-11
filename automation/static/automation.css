@@ -706,7 +706,8 @@ body.mas-standalone #mas-root .mas-foot,
 body.mas-standalone #mas-root .mas-head,
 body.mas-standalone #mas-root .mas-tabs {
   width: 100%;
-  max-width: 1180px;
+  /* Round 14: was 1180px - the step list must use the full monitor width. */
+  max-width: none;
   margin-left: auto;
   margin-right: auto;
 }
@@ -926,6 +927,10 @@ body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9
     align-items: start;
   }
 
+  body.mas-standalone #mas-root #mas-tab-flow > .mas-flowbar {
+    grid-column: 1 / -1;
+    grid-row: 1;
+  }
   body.mas-standalone #mas-root #mas-tab-flow > .mas-steps { grid-column: 1; }
   body.mas-standalone #mas-root #mas-tab-flow > .mas-settings {
     grid-column: 2;

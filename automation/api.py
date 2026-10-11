@@ -1301,30 +1301,33 @@ class ApiError(Exception):
 
 
 def _match(pattern: str, path: str) -> Optional[Dict[str, str]]:
-    """Tiny router: literal segments plus a single ``*`` capture.
+    """Tiny router: literal segments plus ``*`` captures anywhere in the path.
 
-    A captured segment never contains ``/``, so ``/flows/a/b`` cannot be read as
-    flow ``a/b`` and no path escapes one level of the route table.
+    Round 14: this used to understand a ``*`` only at the very end (plus one
+    hardcoded ``/*/log`` case), which is why the registered ``/forms/*/submit``
+    routes answered 404 in production - the table knew them, the matcher did
+    not.  Now every pattern is walked segment by segment: a ``*`` captures
+    exactly one validated segment (never a ``/``), so ``/flows/a/b`` still
+    cannot be read as flow ``a/b`` and no path escapes one level of the table.
     """
     if pattern == path:
         return {}
-
-    suffix = "/*/log"
-    if pattern.endswith(suffix):
-        literal = pattern[:-len(suffix)]
-        if path.startswith(literal + "/") and path.endswith("/log"):
-            captured = _capture(path[len(literal) + 1:-len("/log")])
-            if captured is not None:
-                return {"*": captured}
+    pat_parts = [part for part in pattern.split("/") if part]
+    path_parts = [part for part in path.split("/") if part]
+    if len(pat_parts) != len(path_parts):
         return None
-
-    if pattern.endswith("/*"):
-        literal = pattern[:-2]
-        if path.startswith(literal + "/"):
-            captured = _capture(path[len(literal) + 1:])
-            if captured is not None:
-                return {"*": captured}
-    return None
+    params: Dict[str, str] = {}
+    for pat_seg, path_seg in zip(pat_parts, path_parts):
+        if pat_seg == "*":
+            captured = _capture(path_seg)
+            if captured is None:
+                return None
+            # Every current route carries a single capture; keep the historical
+            # "*" key so no handler has to change.
+            params["*"] = captured
+        elif pat_seg != path_seg:
+            return None
+    return params
 
 
 def _capture(raw: str) -> Optional[str]:

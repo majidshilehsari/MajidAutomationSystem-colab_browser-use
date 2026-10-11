@@ -78,8 +78,11 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
                                       "position", "timeoutMs", "output"]},
     "secure_input": {"required": ["title", "fields", "policy"],
                      "optional": ["message", "position", "timeoutMs", "output"]},
-    "secure_http_request": {"required": ["handle", "method", "url"],
-                            "optional": ["json", "saveAs", "timeout"]},
+    # handle OR secretRef: a run-scoped reference like "creds.api_key" keeps
+    # handle text out of the flow entirely (round-14 letter, problem 2).
+    "secure_http_request": {"required": ["method", "url"],
+                            "optional": ["handle", "secretRef", "json", "saveAs",
+                                         "timeout"]},
 }
 
 #: Fields accepted on every step regardless of type.
@@ -154,10 +157,12 @@ STEP_DOCS: Dict[str, Dict[str, str]] = {
         "en": "Confidential input: the value goes only to the memory vault and the "
               "step receives a masked handle; never in logs/reports/screenshots."},
     "secure_http_request": {
-        "fa": "درخواست HTTP با handle خزانه: فقط میزبان/مسیر/متد مجاز، بدون "
-              "redirect، با TTL/maxUses و ثبتِ hash به‌جای مقدار.",
-        "en": "HTTP request using a vault handle: allowed host/path/method only, no "
-              "redirects, TTL/maxUses enforced, hash logged instead of the value."},
+        "fa": "درخواست HTTP با handle خزانه یا secretRef (مثل creds.api_key): فقط "
+              "میزبان/مسیر/متد مجاز، بدون redirect، با TTL/maxUses و ثبتِ hash "
+              "به‌جای مقدار.",
+        "en": "HTTP request using a vault handle or a secretRef (like "
+              "creds.api_key): allowed host/path/method only, no redirects, "
+              "TTL/maxUses enforced, hash logged instead of the value."},
 }
 
 
