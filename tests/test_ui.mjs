@@ -2114,8 +2114,8 @@ test('the flow tab has one floating action line above the footer', async () => {
     const bar = page.doc.querySelector('#mas-tab-flow .mas-flowbar');
     assert.ok(bar, 'the action line is missing from the flow tab');
     const style = page.window.getComputedStyle(bar);
-    assert.equal(style.position, 'fixed', 'the line must float');
-    assert.equal(style.top, '48px', 'it hangs right under the one-line header');
+    assert.equal(style.position, 'sticky', 'the line must stick under the header');
+    assert.equal(style.top, '0px', 'it sticks to the top of the pane scroller');
     assert.equal(style.flexWrap, 'nowrap', 'one line only');
     const labels = Array.from(bar.querySelectorAll('button')).map((b) => b.textContent.trim());
     for (const want of ['\u0630\u062e\u06cc\u0631\u0647', '\u0630\u062e\u06cc\u0631\u0647 \u0628\u0627 \u0646\u0627\u0645',
@@ -2199,9 +2199,131 @@ test('the report copy leaves one closable line above the footer', async () => {
     assert.ok(line.textContent.includes('گزارش اجرای سیستم'), line.textContent);
     assert.ok(line.querySelector('.mas-toast-x'), 'the line needs a close button');
     const style = page.window.getComputedStyle(box);
-    assert.equal(style.bottom, '46px', 'the line must stick to the footer top');
+    assert.equal(style.bottom, '44px', 'the line must stick flush to the footer top');
     line.querySelector('.mas-toast-x').dispatchEvent(new page.window.Event('click'));
     assert.ok(!line.isConnected, 'the close button must clear the line');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the interactive form card renders bottom-right and submits values', async () => {
+  const status = {
+    runId: 'r1', status: 'running', stepCount: 1, stepIndex: 0,
+    currentStep: null,
+    awaitingConfirmation: {
+      index: 0, label: 'form', type: 'interactive_form', kind: 'form',
+      formId: 'form-r1-000',
+      formSchema: {
+        title: 'اطلاعات شهر', message: 'لطفاً پر کنید',
+        fields: [
+          { id: 'city', type: 'text', label: 'شهر', required: true },
+          { id: 'ok', type: 'checkbox', label: 'تأیید' },
+          { id: 'kind', type: 'radio', label: 'نوع',
+            options: [{ value: 'a', label: 'الف' }, { value: 'b', label: 'ب' }],
+            default: 'a' },
+        ],
+        submitLabel: 'ثبت فرم', cancelLabel: 'بی‌خیال',
+      },
+    },
+    entries: [], results: [], handoffs: [],
+  };
+  const page = await mount({ status });
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    const confirm = page.doc.getElementById('mas-confirm');
+    assert.ok(await page.until(() => !confirm.hidden), 'the form card did not appear');
+    assert.ok(confirm.classList.contains('mas-confirm-form'),
+      'the form card must use the bottom-right placement');
+    assert.ok(!confirm.classList.contains('mas-confirm-handoff'));
+    assert.equal(page.doc.getElementById('mas-confirm-form').hidden, false);
+    assert.equal(page.doc.getElementById('mas-confirm-approve').textContent, 'ثبت فرم');
+    assert.equal(page.doc.getElementById('mas-confirm-refuse').textContent, 'بی‌خیال');
+    const city = page.doc.getElementById('mas-ff-city');
+    assert.ok(city, 'the text field did not render');
+    assert.ok(page.doc.getElementById('mas-ff-ok'), 'the checkbox did not render');
+    assert.ok(page.doc.querySelector('input[name="mas-ff-kind"][value="a"]').checked,
+      'the radio default did not apply');
+
+    // a required field left empty must warn and never post
+    page.doc.getElementById('mas-confirm-approve').dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    assert.ok(!page.posts.some((p) => p.url.endsWith('/submit')),
+      'an incomplete form must not be submitted');
+    assert.ok(page.doc.querySelector('.mas-toast'), 'the missing-field warning did not show');
+
+    city.value = 'تهران';
+    page.doc.getElementById('mas-ff-ok').checked = true;
+    page.doc.getElementById('mas-confirm-approve').dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    const posted = page.posts.find((p) => p.url.endsWith('/forms/form-r1-000/submit'));
+    assert.ok(posted, 'the submit button did not call the form route');
+    assert.deepEqual(JSON.parse(posted.body).values, { city: 'تهران', ok: true, kind: 'a' });
+
+    page.doc.getElementById('mas-confirm-refuse').dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    assert.ok(page.posts.some((p) => p.url.endsWith('/forms/form-r1-000/cancel')),
+      'the cancel button did not call the cancel route');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the secret card warns, masks the value and posts only to the vault', async () => {
+  const status = {
+    runId: 'r2', status: 'running', stepCount: 1, stepIndex: 0,
+    currentStep: null,
+    awaitingConfirmation: {
+      index: 0, label: 'secret', type: 'secure_input', kind: 'secret',
+      formId: 'form-r2-000',
+      formSchema: {
+        title: 'کلید API',
+        fields: [{ id: 'api_key', type: 'secret', label: 'کلید' }],
+        policy: { allowedHosts: ['api.example.dev'], allowedPaths: ['/v1'],
+                  methods: ['GET'], ttlSeconds: 600, maxUses: 5 },
+      },
+    },
+    entries: [], results: [], handoffs: [],
+  };
+  const page = await mount({ status });
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
+    const confirm = page.doc.getElementById('mas-confirm');
+    assert.ok(await page.until(() => !confirm.hidden), 'the secret card did not appear');
+    assert.ok(confirm.classList.contains('mas-confirm-form'));
+    const warn = confirm.querySelector('.mas-form-warn');
+    assert.ok(warn && warn.textContent.includes('وارد چت'),
+      'the explicit never-enters-chat warning must show');
+    const policy = confirm.querySelector('.mas-form-policy');
+    assert.ok(policy && policy.textContent.includes('api.example.dev'),
+      'the human-approval scope display must list the allowed hosts');
+    assert.ok(policy.textContent.includes('TTL 600s'));
+
+    const secret = page.doc.getElementById('mas-ff-api_key');
+    assert.equal(secret.type, 'password', 'the field must render masked');
+    const peek = page.byText('button', '👁 نگه‌دار برای نمایش');
+    peek.dispatchEvent(new page.window.MouseEvent('mousedown', { bubbles: true }));
+    assert.equal(secret.type, 'text', 'holding the peek button must reveal');
+    peek.dispatchEvent(new page.window.MouseEvent('mouseup', { bubbles: true }));
+    assert.equal(secret.type, 'password', 'releasing must mask again');
+
+    secret.value = 'abc123';
+    page.byText('button', '🧹 پاک کردن').dispatchEvent(new page.window.Event('click'));
+    assert.equal(secret.value, '', 'the clear button must empty the field');
+    secret.value = 'abc123';
+    page.doc.getElementById('mas-confirm-approve').dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    const posted = page.posts.find((p) => p.url.endsWith('/secrets/form-r2-000/submit'));
+    assert.ok(posted, 'the secret must be submitted to the vault route');
+    assert.deepEqual(JSON.parse(posted.body).values, { api_key: 'abc123' });
+    assert.ok(!page.posts.some((p) => p.url.endsWith('/control')),
+      'a secret card must never use the generic confirm route');
+    assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
   }

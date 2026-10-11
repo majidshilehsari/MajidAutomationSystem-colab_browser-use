@@ -91,6 +91,36 @@ export const STEP_DEFS = [
     { key: 'autoClick', kind: 'bool', optional: true },
     { key: 'notify', kind: 'bool', optional: true },
     { key: 'shot', kind: TEXT, optional: true }] },
+  // Round 13 - human input family: a non-blocking notice, a blocking form and
+  // the two secret-aware steps. Field schemas are validated loosely on purpose;
+  // the panel renders whatever the schema carries.
+  { type: 'progress_notice', group: 'human', fields: [
+    { key: 'title', kind: TEXT },
+    { key: 'message', kind: AREA, optional: true },
+    { key: 'level', kind: SELECT, options: ['info', 'success', 'warning', 'error'], optional: true },
+    { key: 'durationMs', kind: INT, optional: true },
+    { key: 'dismissible', kind: 'bool', optional: true }] },
+  { type: 'interactive_form', group: 'human', fields: [
+    { key: 'title', kind: TEXT },
+    { key: 'message', kind: AREA, optional: true },
+    { key: 'fields', kind: AREA },
+    { key: 'submitLabel', kind: TEXT, optional: true },
+    { key: 'cancelLabel', kind: TEXT, optional: true },
+    { key: 'timeoutMs', kind: INT, optional: true },
+    { key: 'output', kind: TEXT, optional: true }] },
+  { type: 'secure_input', group: 'secret', fields: [
+    { key: 'title', kind: TEXT },
+    { key: 'message', kind: AREA, optional: true },
+    { key: 'fields', kind: AREA },
+    { key: 'policy', kind: AREA },
+    { key: 'output', kind: TEXT, optional: true }] },
+  { type: 'secure_http_request', group: 'secret', fields: [
+    { key: 'handle', kind: TEXT },
+    { key: 'method', kind: SELECT, options: ['GET', 'POST'], optional: true },
+    { key: 'url', kind: TEXT },
+    { key: 'json', kind: AREA, optional: true },
+    { key: 'saveAs', kind: TEXT, optional: true },
+    { key: 'timeout', kind: INT, optional: true }] },
 ];
 
 export const STEP_DEFAULTS = {
@@ -116,6 +146,10 @@ export const STEP_DEFAULTS = {
   agent_open: {},
   agent_ask: { prompt: '' },
   captcha_solve: {},
+  progress_notice: { title: '' },
+  interactive_form: { title: '', fields: [] },
+  secure_input: { title: '', fields: [], policy: { allowedHosts: [], allowedPaths: ['/'] } },
+  secure_http_request: { handle: '', method: 'GET', url: '' },
 };
 
 export function stepDef(type) {
@@ -159,6 +193,10 @@ export function labelFor(step) {
       + `${step.url ? ' ' + truncate(step.url, 40) : ''}`;
     case 'agent_ask': return `ask agent ${quote(step.prompt)}`;
     case 'captcha_solve': return `solve captcha${step.label ? ' ' + truncate(step.label, 20) : ''}`;
+    case 'progress_notice': return `notice ${quote(step.title)}`;
+    case 'interactive_form': return `form ${quote(step.title)}`;
+    case 'secure_input': return `secret input ${quote(step.title)}`;
+    case 'secure_http_request': return `secure ${step.method || 'GET'} ${truncate(step.url, 40)}`;
     default: return step.type;
   }
 }
@@ -827,6 +865,10 @@ export const STRINGS = {
     clipSyncTitle: 'پل کلیپبورد زنده',
     clipSyncHint: 'هر ۱٫۵ ثانیه: آنچه در ویندوز کپی می‌کنی به کلیپبورد مرورگر سرور می‌رسد و آنچه آن‌جا کپی شود به این‌جا. بار اول مرورگر یک‌بار اجازه می‌خواهد.',
     clipSyncOn: 'روشن', clipSyncOff: 'خام',
+    formRequired: 'این فیلد لازم است',
+    secretWarn: 'این مقدار فقط به خزانهٔ حافظه‌ای می‌رود؛ وارد چت، پرامپت، کلیپ‌بورد، اسکرین‌شات یا صفحهٔ ثالث نمی‌شود.',
+    holdShow: 'نگه‌دار برای نمایش', clearValue: 'پاک کردن',
+    secretScope: 'دامنهٔ مجاز',
     flowClipBad: 'کلیپبورد JSON معتبرِ جریان نداشت', flowClipLoaded: 'جریان کلیپبورد',
     dbSubBackups: 'پشتیبان‌گیری', dbSubShots: 'اسکرین‌شات‌ها', dbSubTexts: 'متون استخراج‌شده',
     settingsLangTitle: 'زبان پنل', settingsLangHint: 'زبان و تم هر دو این‌جا زندگی می‌کنند؛ هدر فقط یک خط می‌ماند.',
@@ -1251,6 +1293,10 @@ export const STRINGS = {
     clipSyncTitle: 'live clipboard bridge',
     clipSyncHint: 'every 1.5s: what you copy on Windows reaches the server browser clipboard, and what is copied there reaches you. the browser asks for permission once.',
     clipSyncOn: 'on', clipSyncOff: 'off',
+    formRequired: 'this field is required',
+    secretWarn: 'this value goes only into the memory vault; never into chat, prompt, clipboard, screenshot or a third-party page.',
+    holdShow: 'hold to show', clearValue: 'clear',
+    secretScope: 'allowed scope',
     flowClipBad: 'the clipboard did not hold a valid flow JSON', flowClipLoaded: 'clipboard flow',
     dbSubBackups: 'backups', dbSubShots: 'screenshots', dbSubTexts: 'extracted texts',
     settingsLangTitle: 'panel language', settingsLangHint: 'language and theme both live here; the header stays one line.',

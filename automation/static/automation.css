@@ -2122,3 +2122,59 @@ body.mas-standalone #mas-root .mas-toast {
   padding: 18px 20px;
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
 }
+
+
+/* ================================================================== *
+ * Phase 13 — the flow action line becomes sticky INSIDE the scrolling
+ * body (it can never cover the steps: they flow under it in layout),
+ * and the report line sits flush on the footer with the scroll region
+ * padded above it while the line is visible.
+ * ================================================================== */
+
+body.mas-standalone .mas-flowbar {
+  position: sticky;
+  top: 0;
+  bottom: auto;
+  z-index: 30;
+  margin: 0 0 12px;
+}
+body.mas-standalone #mas-root #mas-tab-flow { padding-top: 4px; }
+
+body.mas-standalone #mas-root .mas-toast-box { bottom: 44px; }
+body.mas-standalone #mas-root .mas-toast {
+  margin: 0;
+  border-radius: 0;
+  border-left-width: 4px;
+}
+/* while a sticky line is on screen the scrolling region stops above it */
+body.mas-standalone.mas-toastline #mas-root .mas-body { padding-bottom: 92px; }
+
+/* -- form / secret cards: bottom-right, richer handoff language ------- */
+#mas-root .mas-confirm.mas-confirm-form {
+  inset: auto 12px 56px auto;
+  justify-content: flex-end;
+  align-items: flex-end;
+  background: transparent;
+  pointer-events: none;
+}
+#mas-root .mas-confirm.mas-confirm-form .mas-confirm-box {
+  pointer-events: auto;
+  width: min(560px, calc(100vw - 24px));
+  max-height: 70vh;
+  overflow: auto;
+  border-color: var(--mas-accent);
+  border-radius: 12px;
+  box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
+}
+#mas-root .mas-form-field { margin: 0 0 10px; display: block; }
+#mas-root .mas-form-field > span { display: block; margin: 0 0 4px; font-size: 12.5px; color: var(--mas-dim); }
+#mas-root .mas-form-opts { display: flex; flex-wrap: wrap; gap: 6px 14px; }
+#mas-root .mas-form-warn {
+  margin: 8px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--mas-warn);
+  border-radius: 8px;
+  font-size: 12px;
+  color: var(--mas-warn);
+}
+#mas-root .mas-form-policy { font-size: 11.5px; color: var(--mas-dim); margin: 0 0 8px; }

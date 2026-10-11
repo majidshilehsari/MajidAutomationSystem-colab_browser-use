@@ -195,18 +195,33 @@ function replace(node, ...children) {
   return node;
 }
 
+function refreshToastLine(doc = document) {
+  // The scrolling region must stop above a sticky line, so the body carries
+  // a class while one is on screen. Timers pass their own document: after a
+  // jsdom teardown the global one is already gone.
+  if (!doc || !doc.body) return;
+  const sticky = doc.querySelector('#mas-toast .mas-toast-sticky');
+  doc.body.classList.toggle('mas-toastline', !!sticky);
+}
+
 function toast(message, kind = 'info', options = {}) {
   const box = document.getElementById('mas-toast');
-  const item = el('div', { class: `mas-toast mas-toast-${kind}`, title: message }, [
+  const item = el('div', {
+    class: `mas-toast mas-toast-${kind}` + (options.sticky ? ' mas-toast-sticky' : ''),
+    title: message,
+  }, [
     el('span', { class: 'mas-toast-text', text: message }),
   ]);
   item.appendChild(el('button', {
     class: 'mas-toast-x', type: 'button', text: '✕', title: t('close'),
-    onClick: () => item.remove(),
+    onClick: () => { item.remove(); refreshToastLine(item.ownerDocument); },
   }));
   box.appendChild(item);
+  refreshToastLine();
   // Sticky lines (the report summary) stay until the operator closes them.
-  if (!options.sticky) setTimeout(() => item.remove(), 4200);
+  if (!options.sticky) {
+    setTimeout(() => { item.remove(); refreshToastLine(item.ownerDocument); }, 4200);
+  }
 }
 
 function startClipSync() {
@@ -326,16 +341,17 @@ function buildPanel() {
         id: 'mas-confirm-shot', hidden: true, target: '_blank', rel: 'noopener',
         class: 'mas-confirm-shot', text: t('viewChallengeShot'),
       }),
+      el('div', { id: 'mas-confirm-form', hidden: true }),
       el('div', { class: 'mas-row' }, [
         el('button', {
           id: 'mas-confirm-approve',
           class: 'mas-btn mas-primary', type: 'button', text: t('approve'),
-          onClick: () => control('confirm', { approve: true }),
+          onClick: () => confirmAction(true),
         }),
         el('button', {
           id: 'mas-confirm-refuse',
           class: 'mas-btn', type: 'button', text: t('refuse'),
-          onClick: () => control('confirm', { approve: false }),
+          onClick: () => confirmAction(false),
         }),
       ]),
     ]),
@@ -1142,8 +1158,10 @@ function renderStatus() {
     const waiting = status.awaitingConfirmation;
     const kind = waiting && waiting.kind;
     const humanHandoff = kind === 'challenge' || kind === 'manual_verification';
+    const formKind = kind === 'form' || kind === 'secret';
     confirm.hidden = !waiting;
     confirm.classList.toggle('mas-confirm-handoff', Boolean(humanHandoff));
+    confirm.classList.toggle('mas-confirm-form', Boolean(formKind));
     if (waiting) {
       const title = document.getElementById('mas-confirm-title');
       const labelText = document.getElementById('mas-confirm-label');
@@ -1161,11 +1179,140 @@ function renderStatus() {
       shot.hidden = !waiting.publicShot;
       shot.href = waiting.publicShot
         ? `${API_PREFIX}/public/shot/${encodeURIComponent(waiting.publicShot)}` : '';
+      const formHost = document.getElementById('mas-confirm-form');
+      formHost.hidden = !formKind;
+      if (formKind) {
+        const schema = waiting.formSchema || {};
+        approve.textContent = schema.submitLabel || t('approve');
+        refuse.textContent = schema.cancelLabel || t('refuse');
+        const bits = [el('p', { class: 'mas-hint', text: schema.message || '' })];
+        if (kind === 'secret') {
+          const policy = schema.policy || {};
+          bits.push(el('p', { class: 'mas-form-warn', text: t('secretWarn') }));
+          bits.push(el('p', {
+            class: 'mas-form-policy',
+            text: `${t('secretScope')}: ${(policy.allowedHosts || []).join('، ')} · `
+              + `${(policy.allowedPaths || []).join('، ')} · `
+              + `${(policy.methods || []).join('/')} · TTL ${policy.ttlSeconds || 900}s · `
+              + `max ${policy.maxUses || 20}`,
+          }));
+        }
+        (schema.fields || []).forEach((field) => bits.push(formFieldNode(field)));
+        replace(formHost, ...bits);
+      }
     }
   }
   const run = document.getElementById('mas-run');
   if (run) run.disabled = isRunning();
   renderRunPanel(raw, label);
+}
+
+function formFieldNode(field) {
+  const id = 'mas-ff-' + field.id;
+  const type = field.type || 'text';
+  let input = null;
+  if (type === 'checkbox') {
+    input = el('input', { id, type: 'checkbox', checked: !!field.default });
+  } else if (type === 'radio' || type === 'select') {
+    input = el('div', { class: 'mas-form-opts' }, (field.options || []).map((opt) => el('label', {
+      class: 'mas-check',
+    }, [
+      el('input', {
+        type: 'radio', name: id, value: opt.value,
+        checked: opt.value === field.default,
+      }),
+      el('span', { text: opt.label || opt.value }),
+    ])));
+  } else if (type === 'textarea') {
+    input = el('textarea', {
+      id, class: 'mas-input', rows: 3, value: field.default || '',
+      placeholder: field.placeholder || '',
+    });
+  } else {
+    const htmlType = type === 'secret' ? 'password'
+      : (['number', 'date', 'time', 'url', 'email'].includes(type) ? type : 'text');
+    input = el('input', {
+      id, class: 'mas-input', type: htmlType, value: field.default || '',
+      placeholder: field.placeholder || '', maxLength: field.maxLength || undefined,
+    });
+  }
+  const children = [el('span', {
+    text: (field.label || field.id) + (field.required ? ' *' : ''),
+  }), input];
+  if (type === 'secret') {
+    // Peek only while the mouse is held, and a clear button: the value never
+    // sits on screen longer than the human chooses.
+    children.push(el('div', { class: 'mas-row' }, [
+      button('👁 ' + t('holdShow'), () => {}, {
+        class: 'mas-btn mas-mini',
+        onMouseDown: () => { input.type = 'text'; },
+        onMouseUp: () => { input.type = 'password'; },
+        onMouseLeave: () => { input.type = 'password'; },
+      }),
+      button('🧹 ' + t('clearValue'), () => { input.value = ''; input.focus(); },
+        { class: 'mas-btn mas-mini' }),
+    ]));
+  }
+  return el('label', { class: 'mas-form-field' }, children);
+}
+
+function collectFormValues(schema) {
+  const values = {};
+  for (const field of (schema.fields || [])) {
+    const id = 'mas-ff-' + field.id;
+    const type = field.type || 'text';
+    if (type === 'checkbox') {
+      values[field.id] = !!document.getElementById(id).checked;
+    } else if (type === 'radio' || type === 'select') {
+      const picked = document.querySelector(`input[name="${id}"]:checked`);
+      values[field.id] = picked ? picked.value : '';
+    } else {
+      values[field.id] = document.getElementById(id).value;
+    }
+    if (field.required && (values[field.id] === '' || values[field.id] == null)) {
+      throw new Error(`${t('formRequired')}: ${field.label || field.id}`);
+    }
+  }
+  return values;
+}
+
+async function submitPendingForm(kind) {
+  const waiting = state.status.awaitingConfirmation || {};
+  const schema = waiting.formSchema || {};
+  let values;
+  try {
+    values = collectFormValues(schema);
+  } catch (error) {
+    toast(error.message, 'warn');
+    return;
+  }
+  const base = kind === 'secret' ? '/secrets/' : '/forms/';
+  const path = base + encodeURIComponent(waiting.formId) + '/submit';
+  try {
+    await api(path, { method: 'POST', body: { values } });
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+async function cancelPendingForm() {
+  const waiting = state.status.awaitingConfirmation || {};
+  const path = '/forms/' + encodeURIComponent(waiting.formId) + '/cancel';
+  try {
+    await api(path, { method: 'POST', body: {} });
+  } catch (error) {
+    toast(error.message, 'error');
+  }
+}
+
+function confirmAction(approve) {
+  const waiting = state.status.awaitingConfirmation || {};
+  if (waiting.kind === 'form' || waiting.kind === 'secret') {
+    if (approve) submitPendingForm(waiting.kind);
+    else cancelPendingForm();
+    return;
+  }
+  control('confirm', { approve });
 }
 
 /** The always-visible run board: progress, clock, current step, report. */

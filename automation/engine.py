@@ -23,7 +23,14 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
+import hashlib
+import re as _re
+import urllib.error
+import urllib.request
+from urllib.parse import urlsplit as _urlsplit
+
 from .challenge import CHALLENGE_SCRIPT, assess_page, safe_origin
+from .vault import MAX_BODY_BYTES, SecretVault, VaultError
 
 DEFAULT_DISPLAY = ":1"
 # Fixed, deterministic delays chosen for input reliability only. These are not
@@ -241,6 +248,10 @@ class ControlBackend:
 
 class RunState:
     def __init__(self, run_id: str, flow: Dict[str, Any]):
+        # ${form.namespace.field} values collected by interactive_form steps;
+        # run-scoped on purpose, and never able to hold a secret (those live
+        # in the vault behind opaque handles).
+        self.form_outputs: Dict[str, Any] = {}
         self.run_id = run_id
         self.flow = flow
         self.status = "running"
@@ -314,11 +325,16 @@ class AutomationEngine:
         # can never build a handoff loop (round-12 false-pause fix).
         self._challenge_handoffs: Dict[Any, float] = {}
         self._challenge_noticed: Set[Any] = set()
+        # Memory-only secret vault (automation.vault) and the values a human
+        # just submitted through a pending form card.
+        self._form_values: Optional[Dict[str, Any]] = None
         # Screenshots are copied here so a run report can link them without a
         # token, which is what lets the model actually look at the page.
         self.public_dir = os.path.join(data_dir, "public")
         self._sleep = sleep
         self._clock = clock
+        # Created after the clock: the vault timestamps every handle with it.
+        self._vault = SecretVault(clock=self._clock)
         self._lock = threading.RLock()
         self._wakeup = threading.Event()
         self._state: Optional[RunState] = None
@@ -412,6 +428,221 @@ class AutomationEngine:
             self._state.entries.append(entry)
             if len(self._state.entries) > 2000:
                 self._state.entries = self._state.entries[-1500:]
+
+    @property
+    def vault(self) -> SecretVault:
+        return self._vault
+
+    # -- interactive forms and secrets ----------------------------------
+    def _interpolate(self, value: Any, state: RunState) -> Any:
+        """Resolve ${form.ns.field} from this run's form outputs.
+
+        Secret values can never appear here: form outputs only ever hold
+        plain form values and masked handle metadata.
+        """
+        if not isinstance(value, str) or "${form." not in value:
+            return value
+
+        def repl(match: "Any") -> str:
+            path = match.group(1).split(".")
+            if path and path[0] == "form":
+                path = path[1:]
+            node: Any = state.form_outputs
+            for part in path:
+                if isinstance(node, dict) and part in node:
+                    node = node[part]
+                else:
+                    return ""
+            return node if isinstance(node, str) else json.dumps(node, ensure_ascii=False)
+
+        return _re.sub(r"\$\{form\.([^}]+)\}", repl, value)
+
+    def _interpolate_step(self, step: Dict[str, Any], state: RunState) -> Dict[str, Any]:
+        out = dict(step)
+        for key, value in list(out.items()):
+            if isinstance(value, str):
+                out[key] = self._interpolate(value, state)
+            elif isinstance(value, dict):
+                out[key] = {k: self._interpolate(v, state) if isinstance(v, str) else v
+                            for k, v in value.items()}
+        return out
+
+    def _set_output(self, state: RunState, namespace: str, value: Any) -> None:
+        path = [part for part in str(namespace or "").split(".") if part]
+        if path and path[0] == "form":
+            path = path[1:]
+        if not path:
+            return
+        node = state.form_outputs
+        for part in path[:-1]:
+            node = node.setdefault(part, {})
+            if not isinstance(node, dict):
+                return
+        node[path[-1]] = value
+
+    def submit_form(self, form_id: str, values: Dict[str, Any]) -> None:
+        """A human submitted a pending interactive form."""
+        with self._lock:
+            pending = self._state.awaiting_confirmation if self._state else None
+            if not pending or pending.get("formId") != form_id:
+                raise RuntimeError("no pending form with id %r" % form_id)
+            self._form_values = values if isinstance(values, dict) else {}
+            self._confirmed = True
+            self._wakeup.set()
+
+    def submit_secret(self, form_id: str, secrets: Dict[str, str],
+                      actor: str = "operator") -> Dict[str, Any]:
+        """A human typed secrets into a pending secure_input card.
+
+        The raw values go straight into the vault; the pending step only ever
+        sees the masked handle metadata returned here.
+        """
+        with self._lock:
+            pending = self._state.awaiting_confirmation if self._state else None
+            if not pending or pending.get("formId") != form_id:
+                raise RuntimeError("no pending form with id %r" % form_id)
+            schema = pending.get("formSchema") or {}
+            policy = schema.get("policy") or {}
+            handles: Dict[str, Any] = {}
+            for field_id, raw in (secrets or {}).items():
+                if not raw:
+                    continue
+                handles[field_id] = self._vault.create(str(raw), policy, actor=actor)
+            self._form_values = handles
+            self._confirmed = True
+            self._wakeup.set()
+            return handles
+
+    def cancel_form(self, form_id: str) -> None:
+        with self._lock:
+            pending = self._state.awaiting_confirmation if self._state else None
+            if not pending or pending.get("formId") != form_id:
+                raise RuntimeError("no pending form with id %r" % form_id)
+            self._confirmed = False
+            self._wakeup.set()
+
+    def form_status(self, form_id: str) -> Optional[Dict[str, Any]]:
+        with self._lock:
+            pending = self._state.awaiting_confirmation if self._state else None
+            if not pending or pending.get("formId") != form_id:
+                return None
+            return {"formId": form_id, "kind": pending.get("kind"),
+                    "schema": pending.get("formSchema"),
+                    "status": "waiting"}
+
+    def _take_form_values(self) -> Dict[str, Any]:
+        with self._lock:
+            values = self._form_values or {}
+            self._form_values = None
+            return values
+
+    def _run_progress_notice(self, step: Dict[str, Any]) -> "tuple[int, str, str]":
+        level = str(step.get("level") or "info")
+        if level not in ("info", "success", "warning", "error"):
+            level = "info"
+        title = str(step.get("title") or "")
+        message = str(step.get("message") or "")
+        # Non-blocking by definition: a notice never waits for anyone.
+        self._log(level, "progress notice: %s%s" % (title, (" - " + message) if message else ""),
+                  durationMs=int(step.get("durationMs") or 0),
+                  dismissible=bool(step.get("dismissible", True)))
+        return 0, title, ""
+
+    def _pending_form(self, state: RunState, index: int, step: Dict[str, Any],
+                      kind: str) -> Dict[str, Any]:
+        form_id = "form-%s-%03d" % (state.run_id, index)
+        schema = {key: step[key] for key in
+                  ("title", "message", "fields", "submitLabel", "cancelLabel",
+                   "position", "timeoutMs") if key in step}
+        if kind == "secret":
+            schema["policy"] = step.get("policy") or {}
+        return {"formId": form_id, "kind": kind, "formSchema": schema}
+
+    def _run_interactive_form(self, state: RunState, index: int,
+                              step: Dict[str, Any]) -> "tuple[int, str, str]":
+        pending = self._pending_form(state, index, step, "form")
+        label = step.get("label") or step.get("title") or "form"
+        self._log("warn", "interactive form is waiting for a human",
+                  stepIndex=index, formId=pending["formId"],
+                  fields=[f.get("id") for f in (step.get("fields") or [])
+                          if isinstance(f, dict)])
+        self._wait_for_human(state, label, dict(
+            pending, index=index, label=label, type="interactive_form",
+            message=step.get("message") or step.get("title") or ""))
+        values = self._take_form_values()
+        out = step.get("output")
+        namespace = ((out.get("namespace") if isinstance(out, dict) else out)
+                     or ("form.step%03d" % index))
+        self._set_output(state, namespace, values)
+        summary = json.dumps(values, ensure_ascii=False)[:600]
+        return 0, summary, ""
+
+    def _run_secure_input(self, state: RunState, index: int,
+                          step: Dict[str, Any]) -> "tuple[int, str, str]":
+        pending = self._pending_form(state, index, step, "secret")
+        label = step.get("label") or step.get("title") or "secret"
+        self._log("warn", "secure input is waiting for a human; the value will only "
+                          "enter the memory vault",
+                  stepIndex=index, formId=pending["formId"],
+                  scope=((step.get("policy") or {}).get("scope")),
+                  allowedHosts=((step.get("policy") or {}).get("allowedHosts")))
+        self._wait_for_human(state, label, dict(
+            pending, index=index, label=label, type="secure_input",
+            message=step.get("message") or step.get("title") or ""))
+        handles = self._take_form_values()
+        out = step.get("output")
+        namespace = ((out.get("handle") if isinstance(out, dict) else out)
+                     or ("form.sec%03d" % index))
+        self._set_output(state, namespace, handles)
+        # Only masked metadata is ever returned or logged.
+        return 0, json.dumps(handles, ensure_ascii=False)[:600], ""
+
+    def _run_secure_http(self, state: RunState, step: Dict[str, Any]) -> "tuple[int, str, str]":
+        handle = str(step.get("handle") or "")
+        method = str(step.get("method") or "GET").upper()
+        url = str(step.get("url") or "")
+        try:
+            secret, policy = self._vault.acquire(handle, method, url)
+        except VaultError as exc:
+            return 2, "", "vault refused: %s" % exc
+        header_name, _, header_value = policy["headerTemplate"].partition(":")
+        headers = {header_name.strip(): (header_value or "{{secret}}").strip()
+                   .replace("{{secret}}", secret)}
+        data = json.dumps(step["json"], ensure_ascii=False).encode("utf-8")             if step.get("json") is not None else None
+        request = urllib.request.Request(url, data=data, headers=headers, method=method)
+
+        class _NoRedirect(urllib.request.HTTPRedirectHandler):
+            def redirect_request(self, *args: Any, **kwargs: Any) -> Any:
+                return None
+
+        opener = (urllib.request.build_opener(_NoRedirect())
+                  if not policy["allowRedirect"] else urllib.request.build_opener())
+        timeout = float(step.get("timeout") or 30)
+        try:
+            with opener.open(request, timeout=timeout) as response:
+                raw = response.read(MAX_BODY_BYTES + 1)
+                code = int(getattr(response, "status", 200) or 200)
+        except urllib.error.HTTPError as exc:
+            code = exc.code
+            raw = exc.read(MAX_BODY_BYTES + 1)
+        except Exception as exc:  # noqa: BLE001 - never leak the secret in errors
+            return 2, "", "connector request failed: %s" % type(exc).__name__
+        if len(raw) > MAX_BODY_BYTES:
+            return 2, "", "response larger than the %d byte cap" % MAX_BODY_BYTES
+        digest = hashlib.sha256(raw).hexdigest()[:12]
+        parsed: Any = raw.decode("utf-8", "replace")[:20000]
+        if raw[:1] in (b"{", b"["):
+            try:
+                parsed = json.loads(raw.decode("utf-8", "replace"))
+            except ValueError:
+                pass
+        if step.get("saveAs"):
+            self._set_output(state, str(step["saveAs"]), parsed)
+        safe_url = _urlsplit(url)
+        self._log("ok", "secure request %s %s%s -> %d (%d bytes, sha256:%s)"
+                  % (method, safe_url.hostname, safe_url.path, code, len(raw), digest),
+                  handle=handle[:8], scope=policy["scope"], uses=None)
+        return (0 if 200 <= code < 300 else 2), "status %d sha256:%s" % (code, digest), ""
 
     @staticmethod
     def _step_params(step: Dict[str, Any]) -> str:
@@ -818,8 +1049,19 @@ class AutomationEngine:
             typing_mode = step.get("typingMode", settings.get("typingMode", "normal"))
             key_delay_ms = TYPING_DELAYS_MS.get(typing_mode, TYPING_DELAYS_MS["normal"])
 
+        step = self._interpolate_step(step, state)
+        kind = step.get("type")
+
         started = self._clock()
-        if kind == "pause_for_human_verification":
+        if kind == "progress_notice":
+            rc, out, err = self._run_progress_notice(step)
+        elif kind == "interactive_form":
+            rc, out, err = self._run_interactive_form(state, index, step)
+        elif kind == "secure_input":
+            rc, out, err = self._run_secure_input(state, index, step)
+        elif kind == "secure_http_request":
+            rc, out, err = self._run_secure_http(state, step)
+        elif kind == "pause_for_human_verification":
             self._create_handoff(state, index, step, shot_dir, "manual_verification",
                                  step["prompt"])
             rc, out, err = 0, "human verification confirmed", ""

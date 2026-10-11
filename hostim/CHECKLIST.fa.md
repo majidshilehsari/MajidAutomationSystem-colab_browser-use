@@ -285,3 +285,23 @@ PYTHONPATH=/home/user/.pylibs ./run_tests.sh
 - پل کلیپبورد زنده روی HTTPS واقعی (مجوز مرورگر) و حلقهٔ جدید detector روی صفحهٔ واقعی Arena.
 - تب مدیریت عملیات با jobهای واقعی Scheduler روی Kata.
 - بقیهٔ فهرست دورهای قبل (تسک‌بار/ساعت، xclip، autoRaise، فونت Vazirmatn در fluxbox).
+
+## ۱۴. دور سیزدهم (۱۴۰۵/۰۷/۱۹) — دو اصلاح UI + سامانهٔ فرم تعاملی/سکرت/کانکتور (نامهٔ ایجنت همکار)
+
+| # | خواسته | چه شد | چطور بررسی کنی |
+|---|---|---|---|
+| ۱ | سطر شناور مراحل روی گام‌ها نیفتد؛ بقیه زیرش باشند | `.mas-flowbar` از `fixed top:48px` به `position:sticky; top:0` **داخل اسکرولر خودِ تب** تغییر کرد؛ محتوا همیشه زیر نوار جریان دارد و هرگز پوشیده نمی‌شود | تب مراحل را اسکرول کن: نوار زیر هدر می‌چسبد، گام‌ها زیرش رد می‌شوند و هیچ‌وقت زیر نوار نمی‌مانند |
+| ۲ | خط «📋 کپی گزارش اجرا» کاملاً مماس بر فوتر + ناحیه اسکرول بالای آن | جعبهٔ توست `bottom:44px` (ارتفاع دقیق فوتر) با margin/radius صفر؛ وقتی خط چسبان هست کلاس `mas-toastline` روی body می‌آید و `padding-bottom:92px` باعث می‌شود اسکرولر **بالای** خط بایستد | گزارش کپی کن: خط بدون فاصله روی فوتر؛ تا ته اسکرول کن: آخرین ردیف کامل پیداست |
+| ۳ | `progress_notice` — اعلان پیشرفت غیرمسدودکننده | گام جدید: title/message/level(info,success,warning,error)/durationMs/dismissible؛ اجرا هرگز متوقف نمی‌شود | یک flow با فقط این گام اجرا کن: فوراً done می‌شود |
+| ۴ | `interactive_form` — ورودی ساختاریافتهٔ انسانی | گام مسدودکننده با fields (text/textarea/number/checkbox/radio/select/date/time/url/email/password/secret)، required، default؛ کارت پایین-راست؛ خروجی با `${form.namespace.field}` در گام‌های بعدی قابل ارجاع؛ لغو = توقف امن | فرم بگذار، پر کن و ثبت کن؛ گام بعدی با `${form.…}` مقدار را می‌گیرد |
+| ۵ | `secure_input` + خزانهٔ حافظه‌ای | `automation/vault.py`: SecretVault فقط حافظه‌ای؛ مقدار خام هرگز وارد flow JSON/لاگ/گزارش/status/پاسخ API نمی‌شود؛ خروجی گام فقط handle ماسک‌شده (`sec_…`) + digest + انقضا + شمارنده؛ TTL≤۱۲ ساعت، maxUses≤۱۰۰۰، ابطال فوری | تست‌ها: tests/test_vault.py (۹) و tests/test_forms.py |
+| ۶ | `secure_http_request` — کانکتور امن | فقط host/path/method های policy؛ بدون ریدایرکت بین‌دامنه (مگر allowRedirect)؛ کف SSRF: IP خصوصی/loopback هم در policy هم موقع acquire رد می‌شود + **بررسی DNS-rebinding با getaddrinfo**؛ userinfo در URL ممنوع؛ سقف پاسخ ۲MB؛ تایم‌اوت؛ لاگ فقط host+path+status+bytes+sha256؛ نتیجه با `saveAs` در خروجی‌های فرم | تست کانکتور: هدر policy دقیقاً ساخته می‌شود؛ URL خارج scope → «vault refused» و هیچ درخواستی ساخته نمی‌شود |
+| ۷ | ۶ مسیر API + فهرست ایجنت | POST `/forms/*/submit`، `/forms/*/cancel`، `/secrets/*/submit`، `/secrets/*/revoke` (فقط رمز اپراتور)؛ GET `/forms/*/status`، `/secrets/*/status` (با کلید ایجنت هم)؛ api-index ایجنت ۶ ردیف فارسی/انگلیسی گرفت | GET /agent/api-index با کلید ایجنت |
+| ۸ | کارت UI پایین-راست | همان الگوی handoff اما غنی‌تر: `mas-confirm-form` پایین-راست؛ فیلدها کامل؛ سکرت = password + «👁 نگه‌دار برای نمایش» + «🧹 پاک کردن» + هشدار «وارد چت… نمی‌شود» + نمایش scope (hosts/paths/methods/TTL/maxUses) برای تأیید انسانی | تست‌های UI جدید در tests/test_ui.mjs |
+| ۹ | مرز اختیارها | ایجنت فقط schema می‌سازد و handle می‌گیرد؛ ثبت/لغو/ابطال فقط با رمز اپراتور (۴۰۳ با کلید ایجنت)؛ سکرت ساختاراً غیرقابل درج در `${form.…}` است چون form_outputs فقط handle ماسک‌شده دارد | route_form_submit و _require_operator |
+| ۱۰ | فاز ۴ (به تعویق، اعلام‌شده) | ورودی فایل، فیلد شرطی، قالب فرم قابل استفادهٔ مجدد، پنل مدیریت کانکتورها در UI — انجام نشد؛ زیرساخت آمادهٔ پذیرششان است | — |
+
+### تأییدنشده‌ها (تا روی Hostim نبینم)
+- کارت فرم/سکرت در مرورگر واقعی (فقط jsdom) و رفتار sticky نوار مراحل در اسکرول واقعی.
+- درخواست واقعی کانکتور از egress کاتای Hostim به یک API بیرونی.
+- فهرست قبلی تأییدنشده‌ها (پل کلیپبورد روی HTTPS، detector روی صفحهٔ واقعی، تسک‌بار و فونت).

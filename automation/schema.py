@@ -66,6 +66,20 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     # proposal unless captcha.autoClick is on, exactly like the captcha pane.
     "captcha_solve": {"required": [],
                       "optional": ["label", "autoClick", "notify", "shot"]},
+    # Round 13 - the interactive human-input family from the coworker
+    # agent's letter: a non-blocking notice, a blocking structured form and
+    # the two secret-aware steps. Only schema and non-sensitive results ever
+    # reach logs; secret values live in automation.vault behind a handle.
+    "progress_notice": {"required": ["title"],
+                        "optional": ["message", "level", "durationMs",
+                                     "dismissible", "position"]},
+    "interactive_form": {"required": ["title", "fields"],
+                         "optional": ["message", "submitLabel", "cancelLabel",
+                                      "position", "timeoutMs", "output"]},
+    "secure_input": {"required": ["title", "fields", "policy"],
+                     "optional": ["message", "position", "timeoutMs", "output"]},
+    "secure_http_request": {"required": ["handle", "method", "url"],
+                            "optional": ["json", "saveAs", "timeout"]},
 }
 
 #: Fields accepted on every step regardless of type.
@@ -126,6 +140,24 @@ STEP_DOCS: Dict[str, Dict[str, str]] = {
                   "en": "Type a prompt into the agent chat and read the answer."},
     "captcha_solve": {"fa": "اسکرین‌شات + زنجیرهٔ حل کپچا؛ خروجی پیشنهاد است.",
                       "en": "Screenshot + captcha chain; the outcome is a proposal."},
+    "progress_notice": {
+        "fa": "اعلان پیشرفت غیرمسدودکننده: چه شد و مرحلهٔ بعد چیست، بدون توقف اجرا.",
+        "en": "Non-blocking progress notice: what happened and what comes next."},
+    "interactive_form": {
+        "fa": "فرم تعاملی مسدودکننده: انسان متن/انتخاب/تأیید می‌دهد؛ خروجی در "
+              "${form.namespace.field} مراحل بعد.",
+        "en": "Blocking interactive form: a human supplies text/choices/consent; "
+              "output is readable as ${form.namespace.field} later."},
+    "secure_input": {
+        "fa": "ورودی محرمانه: مقدار فقط به خزانهٔ حافظه‌ای می‌رود و step یک handle "
+              "ماسک‌شده می‌گیرد؛ هرگز در لاگ/گزارش/اسکرین‌شات نیست.",
+        "en": "Confidential input: the value goes only to the memory vault and the "
+              "step receives a masked handle; never in logs/reports/screenshots."},
+    "secure_http_request": {
+        "fa": "درخواست HTTP با handle خزانه: فقط میزبان/مسیر/متد مجاز، بدون "
+              "redirect، با TTL/maxUses و ثبتِ hash به‌جای مقدار.",
+        "en": "HTTP request using a vault handle: allowed host/path/method only, no "
+              "redirects, TTL/maxUses enforced, hash logged instead of the value."},
 }
 
 

@@ -20,6 +20,7 @@ from . import schema
 from . import clipboard
 from .agent import AgentError
 from .engine import TERMINAL_STATES, png_size
+from .vault import VaultError
 
 API_PREFIX = "/automation/api"
 
@@ -157,6 +158,16 @@ class AutomationApi:
             ("DELETE", "/flows/*", self.route_flow_delete),
             ("GET", "/runs", self.route_runs_list),
             ("GET", "/runs/*/log", self.route_run_log),
+            # Round 13: interactive forms and the secret vault. Submitting or
+            # revoking is operator-only (a human decision); reading a pending
+            # schema or a masked secret status is ordinary authenticated use,
+            # so the coworker agent can watch a form it created.
+            ("POST", "/forms/*/submit", self.route_form_submit),
+            ("POST", "/forms/*/cancel", self.route_form_cancel),
+            ("GET", "/forms/*/status", self.route_form_status),
+            ("POST", "/secrets/*/submit", self.route_secret_submit),
+            ("POST", "/secrets/*/revoke", self.route_secret_revoke),
+            ("GET", "/secrets/*/status", self.route_secret_status),
             ("POST", "/screenshot", self.route_screenshot),
             ("GET", "/artifact", self.route_artifact),
             ("GET", "/public/shot/*", self.route_public_shot),
@@ -515,6 +526,68 @@ class AutomationApi:
         if not self.store.delete(params["*"]):
             raise ApiError(404, "no flow named %r" % params["*"])
         return json_response(200, {"ok": True})
+
+    # -- interactive forms and the secret vault -------------------------
+    def _form_engine(self) -> Any:
+        if self.engine is None:
+            raise ApiError(409, "no automation engine is attached")
+        return self.engine
+
+    def route_form_submit(self, *, params: Dict[str, str], body: bytes = b"",
+                          **_: Any) -> Response:
+        self._require_operator()
+        payload = json.loads(body.decode("utf-8") or "{}")
+        try:
+            self._form_engine().submit_form(params["*"], payload.get("values") or {})
+        except RuntimeError as exc:
+            raise ApiError(404, str(exc))
+        return json_response(200, {"ok": True})
+
+    def route_form_cancel(self, *, params: Dict[str, str], **_: Any) -> Response:
+        self._require_operator()
+        try:
+            self._form_engine().cancel_form(params["*"])
+        except RuntimeError as exc:
+            raise ApiError(404, str(exc))
+        return json_response(200, {"ok": True})
+
+    def route_form_status(self, *, params: Dict[str, str], **_: Any) -> Response:
+        status = self._form_engine().form_status(params["*"])
+        if status is None:
+            raise ApiError(404, "no pending form with that id")
+        return json_response(200, status)
+
+    def route_secret_submit(self, *, params: Dict[str, str], body: bytes = b"",
+                            **_: Any) -> Response:
+        self._require_operator()
+        payload = json.loads(body.decode("utf-8") or "{}")
+        values = payload.get("values") or {}
+        if not isinstance(values, dict):
+            raise ApiError(400, "values must be an object of field id to secret")
+        try:
+            handles = self._form_engine().submit_secret(
+                params["*"], values, actor=self._actor())
+        except RuntimeError as exc:
+            raise ApiError(404, str(exc))
+        except VaultError as exc:
+            raise ApiError(exc.status, str(exc))
+        # The response carries masked metadata only, never a value.
+        return json_response(200, {"ok": True, "handles": handles})
+
+    def route_secret_revoke(self, *, params: Dict[str, str], **_: Any) -> Response:
+        self._require_operator()
+        try:
+            status = self._form_engine().vault.revoke(params["*"], actor=self._actor())
+        except VaultError as exc:
+            raise ApiError(exc.status, str(exc))
+        return json_response(200, status)
+
+    def route_secret_status(self, *, params: Dict[str, str], **_: Any) -> Response:
+        try:
+            status = self._form_engine().vault.status(params["*"])
+        except VaultError as exc:
+            raise ApiError(exc.status, str(exc))
+        return json_response(200, status)
 
     def route_runs_list(self, **_: Any) -> Response:
         status = self.engine.status()
