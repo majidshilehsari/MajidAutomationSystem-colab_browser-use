@@ -4408,6 +4408,17 @@ async function renderBackups(host) {
       backups.map((row) => [
         row.name, row.sizeText, tehranWhen(row.created_at || row.createdAt),
         el('span', { class: 'mas-row' }, [
+          button('♻️ ' + t('dbRestore'), async () => {
+            // The operator's rule: wherever a backup button lives, a restore
+            // button lives beside it. Restoring replaces the live database,
+            // so the server restarts itself right after (same pid).
+            if (!window.confirm(t('dbConfirmRestore'))) return;
+            try {
+              await api('/agent/backup-restore', { method: 'POST', body: { name: row.name } });
+              toast(t('dbRestoring'), 'warn', { sticky: true });
+              supaReloadSoon();
+            } catch (error) { toast(error.message, 'error'); }
+          }),
           button('📥 ' + t('dbDownload'), () => downloadBackup(row.name)),
           button('📤 ' + t('dbSendTg'), async () => {
             sendDraft.name = row.name;
@@ -4449,6 +4460,121 @@ async function renderBackups(host) {
       }, { class: 'mas-btn mas-danger' }),
     ]),
   ]);
+
+  /* -- cloud backups (round 17): the Supabase snapshot lives HERE, next to
+        the local backups, with the full version list and per-version
+        restore. Configuration = agent settings (supabase.*, key is a
+        SECRET); a fresh machine's boot restore reads the SUPABASE_* env. */
+  const supaConn = el('input', { class: 'mas-input', dir: 'ltr', placeholder: t('supaConnPh') });
+  const supaBucket = el('input', { class: 'mas-input', dir: 'ltr', placeholder: 'mas-snapshots' });
+  const supaEvery = el('input', { class: 'mas-input', type: 'number', min: '1', max: '1440', placeholder: '10' });
+  const supaStatus = el('p', { class: 'mas-hint', text: '…' });
+  const supaHistoryHost = el('div', {});
+  const supaRestore = async (name) => {
+    if (!window.confirm(name ? t('supaConfirmVersion') : t('supaConfirmRestore'))) return;
+    try {
+      await api('/supabase/restore', { method: 'POST', body: name ? { name } : {} });
+      toast(t('supaRestoring'), 'warn', { sticky: true });
+      supaReloadSoon();
+    } catch (error) { toast(error.message, 'error'); }
+  };
+  const loadSupa = async () => {
+    let st;
+    try {
+      st = await api('/supabase/status');
+    } catch (error) { supaStatus.textContent = error.message; return; }
+    if (st.bucket) supaBucket.value = st.bucket;
+    supaEvery.value = st.everyMin || 10;
+    const bits = [];
+    if (st.url) bits.push(`🔗 ${st.url}${st.key ? ` · ${st.key}` : ''}`);
+    bits.push(`${t('supaState')}: ${st.enabled ? '🟢' : '⚪'}${st.source ? ` (${st.source})` : ''}`);
+    if (st.lastSyncAt) bits.push(`${t('supaLast')}: ${tehranWhen(st.lastSyncAt)}`);
+    if (st.lastError) bits.push(`❌ ${st.lastError}`);
+    else if (st.lastResult && st.lastResult.uploaded) {
+      bits.push(`✅ ${(st.lastResult.uploaded / 1024).toFixed(0)} KB`);
+    }
+    if (st.restoredAt) bits.push(`${t('supaRestored')}: ${tehranWhen(st.restoredAt)}`);
+    supaStatus.textContent = bits.join(' · ');
+    if (!st.configured) {
+      replace(supaHistoryHost, el('p', { class: 'mas-hint', text: t('supaConnHint') }));
+      return;
+    }
+    replace(supaHistoryHost, el('p', { class: 'mas-hint', text: '…' }));
+    let rows = [];
+    try {
+      rows = ((await api('/supabase/history')).history) || [];
+    } catch (error) {
+      replace(supaHistoryHost, el('p', { class: 'mas-warn', text: error.message }));
+      return;
+    }
+    replace(supaHistoryHost,
+      el('b', { class: 'mas-subhead', text: `🗂 ${t('supaHistoryTitle')} (${rows.length})` }),
+      el('p', { class: 'mas-hint', text: t('supaHistoryHint') }),
+      rows.length ? agentTable(
+        [t('dbColWhen'), t('dbColSize'), t('dbColActions')],
+        rows.map((row) => [
+          (row.createdAt
+            ? tehranWhen(Math.floor(Date.parse(row.createdAt) / 1000)) : '')
+            || row.name,
+          `${((row.size || 0) / 1024).toFixed(0)} KB`,
+          el('span', { class: 'mas-row' }, [
+            button('♻️ ' + t('supaRestoreVersion'), () => supaRestore(row.name)),
+          ]),
+        ])) : el('p', { class: 'mas-hint', text: t('supaHistoryEmpty') }));
+  };
+  const supaCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '☁️ ' + t('supaTitle') })]),
+    el('p', { class: 'mas-hint', text: t('supaHint') }),
+    el('p', { class: 'mas-hint', text: t('supaConnHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      supaConn,
+      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '🔗 ' + t('supaConnectBtn'), onClick: async () => {
+        const value = supaConn.value.trim();
+        if (!value) { toast(t('supaConnEmpty'), 'warn'); return; }
+        try {
+          const res = await api('/supabase/connect', { method: 'POST', body: {
+            connection: value,
+            bucket: supaBucket.value.trim() || 'mas-snapshots',
+            everyMin: parseInt(supaEvery.value, 10) || 10,
+          } });
+          supaConn.value = '';
+          if (res.restarting) {
+            toast(t('supaRestoring'), 'warn', { sticky: true });
+            supaReloadSoon();
+          } else {
+            toast(res.restored ? t('supaConnectedRestore') : t('supaConnected'), 'ok');
+            loadSupa();
+          }
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+    ]),
+    el('div', { class: 'mas-row mas-wrap' }, [supaBucket, supaEvery]),
+    supaStatus,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '📤 ' + t('supaBackup'), onClick: async () => {
+        try {
+          const res = await api('/supabase/sync', { method: 'POST', body: { force: true } });
+          toast(`${t('supaBackupDone')} (${((res.result || {}).uploaded / 1024 || 0).toFixed(0)} KB)`, 'ok');
+          loadSupa();
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+      el('button', { class: 'mas-btn', type: 'button', text: '📥 ' + t('supaRestore'), onClick: () => supaRestore('') }),
+      el('button', { class: 'mas-btn', type: 'button', text: '💾 ' + t('supaSave'), onClick: async () => {
+        const body = {
+          'supabase.bucket': supaBucket.value.trim() || 'mas-snapshots',
+          'supabase.enabled': true,
+          'supabase.everyMin': parseInt(supaEvery.value, 10) || 10,
+        };
+        try {
+          await api('/agent/settings', { method: 'POST', body });
+          toast(t('supaSaved'), 'ok');
+          loadSupa();
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+    ]),
+    supaHistoryHost,
+  ]);
+  loadSupa();
 
   const autoCard = el('div', { class: 'mas-box mas-card' }, [
     el('div', { class: 'mas-card-head' }, [el('b', { text: '⏰ ' + t('dbAutoTitle') })]),
@@ -4543,7 +4669,7 @@ async function renderBackups(host) {
     }, { class: 'mas-btn mas-primary' }),
   ]);
 
-  replace(pane, statsCard, listCard, autoCard, sendCard);
+  replace(pane, statsCard, listCard, supaCard, autoCard, sendCard);
 }
 
 /* ------------------------------------------------------------------ *
@@ -4811,90 +4937,6 @@ async function renderSettings() {
     devBody,
   ]) : null;
 
-  // Round 15: Supabase snapshot card. Configuration lives in the agent
-  // settings (supabase.* keys; the key itself is a SECRET setting), while the
-  // boot restore on a fresh machine reads the SUPABASE_* environment.
-  const supaConn = el('input', { class: 'mas-input', dir: 'ltr', placeholder: t('supaConnPh') });
-  const supaBucket = el('input', { class: 'mas-input', dir: 'ltr', placeholder: 'mas-snapshots' });
-  const supaEvery = el('input', { class: 'mas-input', type: 'number', min: '1', max: '1440', placeholder: '10' });
-  const supaStatus = el('p', { class: 'mas-hint', text: '…' });
-  const loadSupa = async () => {
-    try {
-      const st = await api('/supabase/status');
-      if (st.bucket) supaBucket.value = st.bucket;
-      supaEvery.value = st.everyMin || 10;
-      const bits = [];
-      if (st.url) bits.push(`🔗 ${st.url}${st.key ? ` · ${st.key}` : ''}`);
-      bits.push(`${t('supaState')}: ${st.enabled ? '🟢' : '⚪'}${st.source ? ` (${st.source})` : ''}`);
-      if (st.lastSyncAt) bits.push(`${t('supaLast')}: ${tehranWhen(st.lastSyncAt)}`);
-      if (st.lastError) bits.push(`❌ ${st.lastError}`);
-      else if (st.lastResult && st.lastResult.uploaded) {
-        bits.push(`✅ ${(st.lastResult.uploaded / 1024).toFixed(0)} KB`);
-      }
-      if (st.restoredAt) bits.push(`${t('supaRestored')}: ${tehranWhen(st.restoredAt)}`);
-      supaStatus.textContent = bits.join(' · ');
-    } catch (error) { supaStatus.textContent = error.message; }
-  };
-  const supaCard = el('div', { class: 'mas-box mas-card' }, [
-    el('div', { class: 'mas-card-head' }, [el('b', { text: '☁️ ' + t('supaTitle') })]),
-    el('p', { class: 'mas-hint', text: t('supaHint') }),
-    el('p', { class: 'mas-hint', text: t('supaConnHint') }),
-    el('div', { class: 'mas-row mas-wrap' }, [
-      supaConn,
-      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '🔗 ' + t('supaConnectBtn'), onClick: async () => {
-        const value = supaConn.value.trim();
-        if (!value) { toast(t('supaConnEmpty'), 'warn'); return; }
-        try {
-          const res = await api('/supabase/connect', { method: 'POST', body: {
-            connection: value,
-            bucket: supaBucket.value.trim() || 'mas-snapshots',
-            everyMin: parseInt(supaEvery.value, 10) || 10,
-          } });
-          supaConn.value = '';
-          if (res.restarting) {
-            toast(t('supaRestoring'), 'warn', { sticky: true });
-            supaReloadSoon();
-          } else {
-            toast(res.restored ? t('supaConnectedRestore') : t('supaConnected'), 'ok');
-            loadSupa();
-          }
-        } catch (error) { toast(error.message, 'error'); }
-      } }),
-    ]),
-    el('div', { class: 'mas-row mas-wrap' }, [supaBucket, supaEvery]),
-    supaStatus,
-    el('div', { class: 'mas-row mas-wrap' }, [
-      el('button', { class: 'mas-btn', type: 'button', text: '💾 ' + t('supaSave'), onClick: async () => {
-        const body = {
-          'supabase.bucket': supaBucket.value.trim() || 'mas-snapshots',
-          'supabase.enabled': true,
-          'supabase.everyMin': parseInt(supaEvery.value, 10) || 10,
-        };
-        try {
-          await api('/agent/settings', { method: 'POST', body });
-          toast(t('supaSaved'), 'ok');
-          loadSupa();
-        } catch (error) { toast(error.message, 'error'); }
-      } }),
-      el('button', { class: 'mas-btn', type: 'button', text: '📤 ' + t('supaBackup'), onClick: async () => {
-        try {
-          const res = await api('/supabase/sync', { method: 'POST', body: { force: true } });
-          toast(`${t('supaBackupDone')} (${((res.result || {}).uploaded / 1024 || 0).toFixed(0)} KB)`, 'ok');
-          loadSupa();
-        } catch (error) { toast(error.message, 'error'); }
-      } }),
-      el('button', { class: 'mas-btn', type: 'button', text: '📥 ' + t('supaRestore'), onClick: async () => {
-        if (!window.confirm(t('supaConfirmRestore'))) return;
-        try {
-          await api('/supabase/restore', { method: 'POST', body: {} });
-          toast(t('supaRestoring'), 'warn', { sticky: true });
-          supaReloadSoon();
-        } catch (error) { toast(error.message, 'error'); }
-      } }),
-    ]),
-  ]);
-  if (state.token) loadSupa();
-
   const infoBody = el('div', {}, [el('p', { class: 'mas-hint', text: '…' })]);
   (async () => {
     try {
@@ -4917,7 +4959,7 @@ async function renderSettings() {
     ]),
   ]);
 
-  replace(pane, themeCard, langCard, clipSyncCard, clipCard, supaCard, devlogCard, infoCard);
+  replace(pane, themeCard, langCard, clipSyncCard, clipCard, devlogCard, infoCard);
   if (hasAgent) loadDevlog();
 }
 

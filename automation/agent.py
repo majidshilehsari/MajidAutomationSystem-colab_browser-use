@@ -214,8 +214,10 @@ API_INDEX = [
      "One-paste Supabase connect: takes the key (or url+key), validates and stores it, and when the local data is empty restores the snapshot and restarts the server (operator only)."),
     ("POST", "/supabase/sync", "☁️ پشتیبان‌گیری فوری snapshot داده‌ها در Supabase Storage (فقط اپراتور).",
      "Take an immediate data snapshot to Supabase Storage (operator only)."),
-    ("POST", "/supabase/restore", "♻️ بازیابی آخرین snapshot از Supabase و راه‌اندازی مجدد سرور (فقط اپراتور؛ هنگام اجرای فعال رد می‌شود).",
-     "Restore the latest Supabase snapshot and restart the server (operator only; refused while a run is active)."),
+    ("POST", "/supabase/restore", "♻️ بازیابی snapshot از Supabase (پیش‌فرض آخرین نسخه؛ با name می‌توان یک نسخهٔ قدیمی‌تر از فهرست را برگرداند) و راه‌اندازی مجدد سرور (فقط اپراتور؛ هنگام اجرای فعال رد می‌شود).",
+     "Restore a Supabase snapshot (latest by default; pass name to pick an older version from the history) and restart the server (operator only; refused while a run is active)."),
+    ("GET", "/supabase/history", "🗂 فهرست نسخه‌های snapshot نگه‌داشته‌شده در Supabase: نام، اندازه و زمان — برای بازیابی یک نسخهٔ قدیمی‌تر (فقط اپراتور).",
+     "List of the snapshot versions kept in Supabase: name, size and time — for restoring an older one (operator only)."),
     ("GET", "/supabase/status", "وضعیت همگام‌سازی Supabase: پیکربندی ماسک‌شده، آخرین نتیجه، دورهٔ زمانی (فقط اپراتور).",
      "Supabase sync status: masked config, last result, interval (operator only)."),
     ("POST", "/agent/chat", "💬 پرسش مستقیم از ایجنت با زمینهٔ اتوماسیون؛ جواب "
@@ -311,6 +313,8 @@ API_INDEX = [
      "Take one backup right now (a tar.gz on the volume)."),
     ("GET", "/agent/backup-download", "📥 دانلود یک پشتیبان برای نگهداری بیرون.",
      "Download one backup archive."),
+    ("POST", "/agent/backup-restore", "♻️ بازیابی یک پشتیبان محلی (جایگزینی دیتابیس و فلوها با همان نسخه) و راه‌اندازی مجدد سرور (فقط اپراتور؛ هنگام اجرای فعال رد می‌شود).",
+     "Restore one local backup (database and flows return to that version) and restart the server (operator only; refused while a run is active)."),
     ("POST", "/agent/backup-delete", "🗄 حذف یک پشتیبان.", "Delete one backup."),
     ("POST", "/agent/backup-send", "🗄 فرستادن یک پشتیبان به تلگرام (کانال/چت "
                                    "دلخواه).",
@@ -964,6 +968,12 @@ class AgentHub:
     def backup_delete(self, name: str, actor: str = "operator") -> Dict[str, Any]:
         try:
             return self.backups.delete(name, actor=actor)
+        except BackupError as exc:
+            raise AgentError(str(exc), exc.status)
+
+    def backup_restore(self, name: str, actor: str = "operator") -> Dict[str, Any]:
+        try:
+            return self.backups.restore(name, actor=actor)
         except BackupError as exc:
             raise AgentError(str(exc), exc.status)
 

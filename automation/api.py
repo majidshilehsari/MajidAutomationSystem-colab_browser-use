@@ -191,6 +191,7 @@ class AutomationApi:
             ("POST", "/supabase/connect", self.route_supabase_connect),
             ("POST", "/supabase/sync", self.route_supabase_sync),
             ("POST", "/supabase/restore", self.route_supabase_restore),
+            ("GET", "/supabase/history", self.route_supabase_history),
             ("GET", "/supabase/status", self.route_supabase_status),
             ("POST", "/screenshot", self.route_screenshot),
             ("GET", "/artifact", self.route_artifact),
@@ -289,6 +290,7 @@ class AutomationApi:
             ("GET", "/agent/backups", self.route_agent_backups_list),
             ("POST", "/agent/backups", self.route_agent_backups_create),
             ("GET", "/agent/backup-download", self.route_agent_backup_download),
+            ("POST", "/agent/backup-restore", self.route_agent_backup_restore),
             ("POST", "/agent/backup-delete", self.route_agent_backup_delete),
             ("POST", "/agent/backup-send", self.route_agent_backup_send),
             ("POST", "/agent/backup-config", self.route_agent_backup_config),
@@ -632,15 +634,17 @@ class AutomationApi:
         if self.engine is not None and self.engine.busy():
             raise ApiError(409, "یک اجرا در جریان است؛ اول متوقفش کن و بعد بازیابی کن.")
         payload = self.read_json(body)
+        name = str(payload.get("name") or "").strip()
         cfg = self.supabase.config()
         if not cfg["enabled"]:
             raise ApiError(409, "Supabase تنظیم نشده؛ اول نشانی و کلید را بده.")
         try:
-            archive = self.supabase.download_latest(cfg)
+            archive = self.supabase.download(cfg, name)
         except SupabaseError as exc:
             raise ApiError(exc.status, str(exc))
         if archive is None:
-            raise ApiError(404, "هیچ snapshot‌ای در باکت پیدا نشد.")
+            raise ApiError(404, "هیچ snapshot‌ای با این نام در باکت پیدا نشد."
+                           if name else "هیچ snapshot‌ای در باکت پیدا نشد.")
         try:
             count = self.supabase.restore(archive)
         except SupabaseError as exc:
@@ -738,6 +742,19 @@ class AutomationApi:
                         or st.list_notes(limit=1) or st.list_operations())
         except Exception:  # noqa: BLE001 - doubt means "not empty"
             return False
+
+    def route_supabase_history(self, **_: Any) -> Response:
+        self._require_operator()
+        if self.supabase is None:
+            raise ApiError(409, "همگام‌سازی Supabase در این سرور فعال نیست.")
+        cfg = self.supabase.config()
+        if not cfg["enabled"]:
+            raise ApiError(409, "Supabase تنظیم نشده؛ اول اتصال را ذخیره کن.")
+        try:
+            history = self.supabase.list_history(cfg)
+        except SupabaseError as exc:
+            raise ApiError(exc.status, str(exc))
+        return json_response(200, {"history": history})
 
     def route_supabase_status(self, **_: Any) -> Response:
         self._require_operator()
@@ -1267,6 +1284,18 @@ class AutomationApi:
         return 200, {"Content-Type": "application/gzip",
                      "Content-Disposition": 'attachment; filename="%s"' % name,
                      "Cache-Control": "no-store"}, data
+
+    def route_agent_backup_restore(self, *, body: bytes = b"", **_: Any) -> Response:
+        """Restore one local backup and restart.  Operator-only: this replaces
+        the live database, so it is a human decision, never the coworker's."""
+        self._require_operator()
+        if self.engine is not None and self.engine.busy():
+            raise ApiError(409, "یک اجرا در جریان است؛ اول متوقفش کن و بعد بازیابی کن.")
+        payload = self.read_json(body)
+        info = self.agent.backup_restore(str(payload.get("name") or ""))
+        _restart_later()
+        return json_response(200, {"ok": True, "restored": info.get("restored"),
+                                   "files": info.get("files"), "restarting": True})
 
     def route_agent_backup_delete(self, *, body: bytes = b"", **_: Any) -> Response:
         payload = self.read_json(body)

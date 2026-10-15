@@ -288,7 +288,8 @@ class ApiRouteTests(unittest.TestCase):
         for call in (lambda: self.api.route_supabase_status(),
                      lambda: self.api.route_supabase_sync(body=b"{}"),
                      lambda: self.api.route_supabase_restore(body=b"{}"),
-                     lambda: self.api.route_supabase_connect(body=b"{}")):
+                     lambda: self.api.route_supabase_connect(body=b"{}"),
+                     lambda: self.api.route_supabase_history()):
             with self.assertRaises(ApiError) as ctx:
                 call()
             self.assertEqual(ctx.exception.status, 403)
@@ -386,6 +387,24 @@ class InjectSettingsTests(unittest.TestCase):
             self.assertEqual(rows["supabase.key"], "sb-secret-y:1")
         finally:
             shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_restore_clears_stale_wal_files(self):
+        src = make_data_dir()
+        dst = make_empty_dir()
+        try:
+            archive = SupabaseSync(src).build_archive()
+            db = os.path.join(dst, "automation", "agent.db")
+            for suffix in ("", "-wal", "-shm"):
+                with open(db + suffix, "w", encoding="utf-8"):
+                    pass
+            SupabaseSync(dst).restore(archive)
+            # a stale WAL replayed onto the fresh db could corrupt it
+            self.assertFalse(os.path.exists(db + "-wal"))
+            self.assertFalse(os.path.exists(db + "-shm"))
+            self.assertGreater(os.path.getsize(db), 0)
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+            shutil.rmtree(dst, ignore_errors=True)
 
     def test_restore_injects_credentials_into_the_staged_db(self):
         src = make_data_dir()
@@ -536,3 +555,104 @@ class ConnectRouteTests(unittest.TestCase):
             self.assertFalse(json.loads(raw2.decode())["dataEmpty"])
         finally:
             shutil.rmtree(populated, ignore_errors=True)
+
+
+class HistoryTests(unittest.TestCase):
+    """The operator can list the kept versions and restore any of them."""
+
+    def setUp(self):
+        self.tmp = make_data_dir()
+        self.sync = SupabaseSync(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_list_history_maps_names_and_filters_junk(self):
+        rows = json.dumps([
+            {"name": "snapshot-20261015-101010.tar.gz", "size": 20480,
+             "created_at": "2026-10-15T10:10:10Z"},
+            {"name": "unexpected.txt", "size": 5, "created_at": ""},
+            {"name": "snapshot-../evil.tar.gz", "size": 5, "created_at": ""},
+            "not-even-a-dict",
+        ]).encode()
+        fake = FakeUrlopen({("POST", "/object/list/"): FakeResponse(rows)})
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch("urllib.request.urlopen", fake):
+            history = self.sync.list_history(self.sync.config())
+        self.assertEqual([row["name"] for row in history],
+                         ["history/snapshot-20261015-101010.tar.gz"])
+        self.assertEqual(history[0]["size"], 20480)
+        self.assertEqual(fake.calls[0]["method"], "POST")
+        self.assertIn(b'"prefix": "history/"', fake.calls[0]["data"])
+
+    def test_list_history_survives_a_missing_bucket(self):
+        fake = FakeUrlopen({("POST", "/object/list/"): 404})
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch("urllib.request.urlopen", fake):
+            self.assertEqual(self.sync.list_history(self.sync.config()), [])
+
+    def test_download_refuses_anything_that_is_not_a_snapshot_name(self):
+        with mock.patch.dict(os.environ, ENV):
+            cfg = self.sync.config()
+            for bad in ("../x.tar.gz", "history/x/../../y.tar.gz",
+                        "snapshot-latest.tar.gz.bak", "latest.tar.gz",
+                        "history/snapshot-a b.tar.gz", "history/snapshot-"):
+                with self.assertRaises(SupabaseError) as ctx:
+                    self.sync.download(cfg, bad)
+                self.assertEqual(ctx.exception.status, 400)
+
+
+class HistoryRouteTests(unittest.TestCase):
+    def setUp(self):
+        self.tmp = make_data_dir()
+        self.sync = SupabaseSync(self.tmp)
+        self.api = AutomationApi(None, FlowStore(self.tmp), data_dir=self.tmp,
+                                 token="tok", supabase=self.sync)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_history_needs_configuration(self):
+        env = {k: v for k, v in os.environ.items()
+               if not k.startswith("SUPABASE_")}
+        with mock.patch.dict(os.environ, env, clear=True):
+            with self.assertRaises(ApiError) as ctx:
+                self.api.route_supabase_history()
+        self.assertEqual(ctx.exception.status, 409)
+
+    def test_restore_by_name_fetches_exactly_that_version(self):
+        src = make_data_dir()
+        try:
+            archive = SupabaseSync(src).build_archive()
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+        name = "history/snapshot-20261015-101010.tar.gz"
+        fake = FakeUrlopen({
+            ("GET", name): FakeResponse(archive),
+            ("POST", "/object/list/"): FakeResponse(json.dumps([
+                {"name": name.split("/", 1)[1], "size": len(archive),
+                 "created_at": "2026-10-15T10:10:10Z"}]).encode()),
+        })
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch("urllib.request.urlopen", fake), \
+                mock.patch("automation.api._restart_later") as restart:
+            status, _headers, raw = self.api.route_supabase_history()
+            self.assertEqual(status, 200)
+            listed = json.loads(raw.decode())["history"]
+            self.assertEqual(listed[0]["name"], name)
+            status, _headers, raw = self.api.route_supabase_restore(
+                body=json.dumps({"name": name}).encode())
+        self.assertEqual(status, 200)
+        payload = json.loads(raw.decode())
+        self.assertTrue(payload["restarting"])
+        self.assertGreater(payload["restored"], 0)
+        restart.assert_called_once()
+        self.assertTrue(any(name in call["url"] and call["method"] == "GET"
+                            for call in fake.calls),
+                        "the chosen version was never downloaded")
+
+    def test_restore_rejects_a_hostile_name(self):
+        with mock.patch.dict(os.environ, ENV):
+            with self.assertRaises(ApiError) as ctx:
+                self.api.route_supabase_restore(body=b'{"name": "../evil"}')
+        self.assertEqual(ctx.exception.status, 400)

@@ -1628,6 +1628,35 @@ class AgentApiTest(TempDirCase):
         self.assertTrue(payload["audit"], "nothing was audited")
         self.assertNotIn("sk-", json.dumps(payload))
 
+    def test_backup_restore_route_swaps_the_data_and_restarts(self):
+        import sqlite3
+        from unittest import mock
+        self.api.agent.store.set_setting("restore.marker", "v1")
+        status, info = self.call("POST", "/agent/backups", {})
+        self.assertEqual(status, 201)
+        self.api.agent.store.set_setting("restore.marker", "v2")
+        with mock.patch("automation.api._restart_later") as restart:
+            status, payload = self.call("POST", "/agent/backup-restore",
+                                        {"name": info["name"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["restored"], info["name"])
+        self.assertTrue(payload["restarting"])
+        restart.assert_called_once()
+        # the swapped-in file (not the old open handle) holds the old value
+        conn = sqlite3.connect(self.api.agent.store.db_path)
+        rows = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+        conn.close()
+        self.assertIn("v1", str(rows.get("restore.marker")))
+
+    def test_backup_restore_refuses_the_agent_key(self):
+        # called directly (like the supabase route tests): api.handle would
+        # simply re-authenticate the operator header and overwrite the verdict
+        from automation.api import ApiError
+        self.api._last_verdict = "agent"
+        with self.assertRaises(ApiError) as ctx:
+            self.api.route_agent_backup_restore(body=b'{"name": "x"}')
+        self.assertEqual(ctx.exception.status, 403)
+
     def test_telegram_is_off_by_default_and_says_what_to_do(self):
         status, payload = self.call("GET", "/agent/telegram/status")
         self.assertEqual(payload["mode"], "off")
@@ -2612,6 +2641,42 @@ class BackupManagerTest(TempDirCase):
         with_secrets = self.manager.create(include_secrets=True)
         with tarfile.open(with_secrets["path"]) as archive:
             self.assertIn("agent-secrets.json", archive.getnames())
+
+    def test_restore_round_trip_and_stale_wal_cleanup(self) -> None:
+        from automation.agent_store import AgentStore
+        self.store.set_setting("restore.marker", "v1")
+        info = self.manager.create()
+        self.store.set_setting("restore.marker", "v2")
+        os.remove(os.path.join(self.flows, "jaryan.json"))
+        wal = str(self.manager.db_path) + "-wal"
+        with open(wal, "w", encoding="utf-8") as handle:
+            handle.write("stale")
+        result = self.manager.restore(info["name"])
+        self.assertEqual(result["restored"], info["name"])
+        # the flow and the setting rolled back…
+        self.assertTrue(os.path.exists(os.path.join(self.flows, "jaryan.json")))
+        fresh = AgentStore(self.tmp)
+        self.addCleanup(fresh.close)
+        self.assertEqual(fresh.get_setting("restore.marker"), "v1")
+        # …and the stale WAL that could corrupt the fresh db is gone
+        self.assertFalse(os.path.exists(wal))
+
+    def test_restore_refuses_unknown_names_and_hostile_members(self) -> None:
+        import io
+        from automation.backup import BackupError
+        with self.assertRaises(BackupError) as missing:
+            self.manager.restore("nope.tar.gz")
+        self.assertEqual(missing.exception.status, 404)
+        self.manager.ensure_dir()
+        evil = self.manager.dir / "evil.tar.gz"
+        with tarfile.open(str(evil), "w:gz") as archive:
+            data = b"pwned"
+            member = tarfile.TarInfo("../evil.txt")
+            member.size = len(data)
+            archive.addfile(member, io.BytesIO(data))
+        with self.assertRaises(BackupError) as hostile:
+            self.manager.restore("evil.tar.gz")
+        self.assertEqual(hostile.exception.status, 400)
 
     def test_send_uploads_through_the_notifier(self) -> None:
         from automation.backup import BackupError

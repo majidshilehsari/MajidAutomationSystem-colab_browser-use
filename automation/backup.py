@@ -320,6 +320,74 @@ class BackupManager:
         except OSError as exc:
             raise BackupError("the backup could not be read: %s" % exc, 500)
 
+    def restore(self, name: str, actor: str = "operator") -> Dict[str, Any]:
+        """Pour one backup tar.gz back over the live data.
+
+        ``agent.db`` returns to the database path, ``flows/*.json`` to the
+        flows directory and — when the backup carried one — the secrets file
+        to its old 0600 place.  The caller MUST restart the process right
+        after this: the open SQLite connection cannot follow the file swap.
+        """
+        path = self.safe_path(name)
+        staged = Path(tempfile.mkdtemp(prefix="mas-restore-"))
+        try:
+            count = 0
+            with tarfile.open(str(path), "r:gz") as archive:
+                for member in archive.getmembers():
+                    if not member.isfile():
+                        continue
+                    rel = member.name.replace("\\", "/")
+                    if rel.startswith("/") or ".." in rel.split("/"):
+                        raise BackupError(
+                            "the backup contains an unsafe path: %s" % rel, 400)
+                    source = archive.extractfile(member)
+                    if source is None:
+                        continue
+                    target = staged / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with source, open(str(target), "wb") as out:
+                        shutil.copyfileobj(source, out)
+                    count += 1
+            db_src = staged / "agent.db"
+            if not db_src.exists():
+                raise BackupError("that backup holds no agent.db", 400)
+            os.replace(str(db_src), str(self.db_path))
+            # The snapshot db is self-contained; a stale -wal/-shm pair from
+            # the previous database would be replayed onto it at the next
+            # open and could corrupt the restore.
+            for suffix in ("-wal", "-shm"):
+                try:
+                    os.remove(str(self.db_path) + suffix)
+                except OSError:
+                    pass
+            flows_src = staged / "flows"
+            if self.flows_dir is not None and flows_src.exists():
+                self.flows_dir.mkdir(parents=True, exist_ok=True)
+                for flow in flows_src.glob("*.json"):
+                    os.replace(str(flow), str(self.flows_dir / flow.name))
+            secrets = self.secrets_path()
+            secrets_src = staged / secrets.name if secrets is not None else None
+            if secrets_src is not None and secrets_src.exists():
+                os.replace(str(secrets_src), str(secrets))
+                try:
+                    os.chmod(str(secrets), 0o600)
+                except OSError:
+                    pass
+        except tarfile.TarError as exc:
+            raise BackupError("the backup could not be opened: %s" % exc, 500)
+        except OSError as exc:
+            raise BackupError("the backup could not be restored: %s" % exc, 500)
+        finally:
+            shutil.rmtree(str(staged), ignore_errors=True)
+        # Best effort: the audit row lands in the pre-restore database image,
+        # which the restart replaces — honesty about the limits of auditing a
+        # restore that overwrites the audit log itself.
+        try:
+            self.store.audit(actor, "backup.restored", path.name)
+        except Exception:  # noqa: BLE001
+            pass
+        return {"restored": path.name, "files": count}
+
     def delete(self, name: str, actor: str = "operator") -> Dict[str, Any]:
         path = self.safe_path(name)
         size = int(path.stat().st_size)

@@ -24,7 +24,7 @@ const VALID_TOKEN = 'tok123';
 
 /** Stands in for the server: /info is open, everything else needs the token. */
 function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
-                supaEmpty = false,
+                supaEmpty = false, supaOn = false,
                  clipText = null) {
   return async (url, options = {}) => {
     const path = String(url);
@@ -42,10 +42,28 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
                     engineBusy: false, detector: 'x11+cdp', cdpAvailable: false });
     }
     if (clean.endsWith('/supabase/status')) {
-      return json({ configured: false, enabled: false, url: '', bucket: '',
-                    key: '', source: '', everyMin: 10, running: false,
-                    lastSyncAt: null, lastResult: null, lastError: null,
-                    restoredAt: null, uploads: 0, dataEmpty: supaEmpty });
+      return json(supaOn
+        ? { configured: true, enabled: true, url: 'https://proj.supabase.co',
+            bucket: 'mas-snapshots', key: 'sb-sec\u2026cdef', source: 'settings',
+            everyMin: 10, running: true, lastSyncAt: 1760000000,
+            lastResult: { uploaded: 20480 }, lastError: null, restoredAt: null,
+            uploads: 1, dataEmpty: false }
+        : { configured: false, enabled: false, url: '', bucket: '',
+            key: '', source: '', everyMin: 10, running: false,
+            lastSyncAt: null, lastResult: null, lastError: null,
+            restoredAt: null, uploads: 0, dataEmpty: supaEmpty });
+    }
+    if (clean.endsWith('/supabase/history')) {
+      return json({ history: [
+        { name: 'history/snapshot-20261015-101010.tar.gz', size: 20480,
+          createdAt: '2026-10-15T10:10:10.000Z' },
+        { name: 'history/snapshot-20261014-091010.tar.gz', size: 19456,
+          createdAt: '2026-10-14T09:10:10.000Z' },
+      ] });
+    }
+    if (clean.endsWith('/agent/backup-restore')) {
+      return json({ ok: true, restored: 'mas-backup-test.tar.gz', files: 3,
+                    restarting: true });
     }
     if (clean.endsWith('/supabase/connect')) {
       return json({ ok: true, restored: 0, restarting: false,
@@ -340,7 +358,7 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
 async function mount({ readyStateComplete = true, standalone = false, flow = null,
                       status: statusPayload = null, noAgent = false,
-                      clipText = null, supaEmpty = false } = {}) {
+                      clipText = null, supaEmpty = false, supaOn = false } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -379,7 +397,7 @@ async function mount({ readyStateComplete = true, standalone = false, flow = nul
     }),
     requestAnimationFrame: window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window) : (fn) => setTimeout(fn, 0),
-    fetch: fakeApi(requests, posts, statusPayload, noAgent, supaEmpty, clipText),
+    fetch: fakeApi(requests, posts, statusPayload, noAgent, supaEmpty, supaOn, clipText),
     // Tracked so cleanup() can stop the sidebar's poll loops, otherwise the
     // test process never exits. Bound to the originals: referencing the global
     // here would recurse into this very wrapper.
@@ -2438,14 +2456,21 @@ test('the flow action line sits first, right under the header, and the name labe
   }
 });
 
-test('the supabase card connects with one paste, saves the knobs, backs up and restores', async () => {
+test('the supabase card lives in the database backups sub-tab and fully works there', async () => {
   const page = await mount({});
   try {
     await authenticate(page);
+    // it moved out of settings: the operator asked for every backup section
+    // to live under the database tab's backups sub-tab
     clickTab(page, 'settings');
-    const pane = page.doc.getElementById('mas-tab-settings');
+    const settings = page.doc.getElementById('mas-tab-settings');
+    await page.wait(30);
+    assert.ok(!settings.textContent.includes('پشتیبان‌گیری ابری Supabase'),
+      'the supabase card must no longer render inside settings');
+    clickTab(page, 'db');
+    const pane = page.doc.getElementById('mas-tab-db');
     assert.ok(await page.until(() => pane.textContent.includes('پشتیبان‌گیری ابری Supabase')),
-      'the supabase card did not render');
+      'the supabase card did not render in the backups sub-tab');
     const connInput = Array.from(pane.querySelectorAll('input'))
       .find((node) => (node.placeholder || '').includes('sb_secret'));
     assert.ok(connInput, 'the one-paste connection input is missing');
@@ -2643,6 +2668,47 @@ test('the mode select on the telegram status card saves itself immediately', asy
     const posted = page.posts.filter((item) => item.url.endsWith('/agent/settings')).pop();
     assert.ok(posted, 'changing the mode never reached the server — the old trap');
     assert.equal(JSON.parse(posted.body)['telegram.mode'], 'bot');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('cloud versions are listed and each one can be restored, local backups too', async () => {
+  const page = await mount({ supaOn: true });
+  try {
+    await authenticate(page);
+    clickTab(page, 'db');
+    const pane = page.doc.getElementById('mas-tab-db');
+    assert.ok(await page.until(() => pane.textContent.includes('نسخه‌های ابری (2)')),
+      'the cloud version list never rendered');
+    assert.ok(pane.textContent.includes('20 KB'), 'the size column is missing');
+
+    const asked = [];
+    const original = page.window.confirm;
+    page.window.confirm = (message) => { asked.push(message); return true; };
+
+    // restore one specific (older) cloud version
+    const versionButton = page.byText('button', '♻️ بازیابی این نسخه');
+    versionButton.dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    const versionPost = page.posts.find((item) => item.url.endsWith('/supabase/restore'));
+    assert.ok(versionPost, 'the per-version restore never reached the server');
+    assert.equal(JSON.parse(versionPost.body).name,
+      'history/snapshot-20261015-101010.tar.gz');
+    assert.ok(asked.some((message) => message.includes('نسخهٔ قدیمی‌تر')),
+      'restoring an old version must warn first');
+
+    // and the local backup row carries its own restore button, right beside
+    // download/send — the operator's rule for every backup list
+    const localButton = page.byText('button', '♻️ بازیابی');
+    localButton.dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    const localPost = page.posts.find((item) => item.url.endsWith('/agent/backup-restore'));
+    assert.ok(localPost, 'the local restore button never reached the server');
+    assert.equal(JSON.parse(localPost.body).name, 'mas-backup-test.tar.gz');
+
+    page.window.confirm = original;
     assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();

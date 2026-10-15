@@ -36,7 +36,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
-from typing import Any, Callable, Dict, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 LOG = logging.getLogger("automation.supabase")
 
@@ -332,18 +332,64 @@ class SupabaseSync:
         except Exception:  # noqa: BLE001
             LOG.warning("pruning old snapshots failed; keeping them")
 
-    def download_latest(self, cfg: Dict[str, Any]) -> Optional[bytes]:
-        url = "%s/storage/v1/object/%s/%s" % (cfg["url"], cfg["bucket"], LATEST_NAME)
+    #: Only these object names may ever be downloaded/restored.
+    _NAME_RE = re.compile(r"^history/snapshot-[\w.\-]+\.tar\.gz$")
+
+    def download(self, cfg: Dict[str, Any], name: str = "") -> Optional[bytes]:
+        """Fetch one snapshot by object name (default: the latest)."""
+        path = str(name or "").strip() or LATEST_NAME
+        if path != LATEST_NAME and not self._NAME_RE.match(path):
+            raise SupabaseError("that is not a snapshot name: %r" % path, 400)
+        url = "%s/storage/v1/object/%s/%s" % (cfg["url"], cfg["bucket"], path)
         try:
             with _http(url, "GET", cfg["key"], timeout=120) as response:
                 data = response.read()
         except urllib.error.HTTPError as exc:
             if exc.code in (400, 404):
-                return None  # no snapshot yet
+                return None  # no such snapshot (yet)
             raise SupabaseError("download failed: HTTP %d" % exc.code, 502)
         except Exception as exc:  # noqa: BLE001
             raise SupabaseError("download failed: %s" % type(exc).__name__, 502)
         return data
+
+    def download_latest(self, cfg: Dict[str, Any]) -> Optional[bytes]:
+        return self.download(cfg, LATEST_NAME)
+
+    def list_history(self, cfg: Dict[str, Any]) -> List[Dict[str, Any]]:
+        """Every kept snapshot, newest first, so the operator can pick one.
+
+        Restoring an older version is a first-class operation: the bucket
+        keeps the last ``HISTORY_KEEP`` uploads next to ``snapshot-latest``.
+        """
+        url = "%s/storage/v1/object/list/%s" % (cfg["url"], cfg["bucket"])
+        body = json.dumps({
+            "prefix": "history/", "limit": 200,
+            "sortBy": [{"column": "created_at", "order": "desc"}],
+        }).encode("utf-8")
+        try:
+            with _http(url, "POST", cfg["key"], data=body,
+                       headers={"Content-Type": "application/json"},
+                       timeout=30) as response:
+                rows = json.loads(response.read().decode("utf-8") or "[]")
+        except urllib.error.HTTPError as exc:
+            if exc.code in (400, 404):
+                return []  # bucket not there yet: no history, no drama
+            raise SupabaseError("listing snapshots failed: HTTP %d" % exc.code, 502)
+        except Exception as exc:  # noqa: BLE001
+            raise SupabaseError(
+                "listing snapshots failed: %s" % type(exc).__name__, 502)
+        out: List[Dict[str, Any]] = []
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            name = str(row.get("name") or "")
+            full = "history/" + name
+            if not self._NAME_RE.match(full):
+                continue  # anything unexpected in the bucket is ignored
+            out.append({"name": full,
+                        "size": int(row.get("size") or 0),
+                        "createdAt": row.get("created_at") or ""})
+        return out
 
     # -- restore ------------------------------------------------------------
     @staticmethod
@@ -388,6 +434,15 @@ class SupabaseSync:
                     dst = os.path.join(self.data_dir, rel)
                     os.makedirs(os.path.dirname(dst), exist_ok=True)
                     os.replace(src, dst)
+            # The snapshot's db is WAL-checkpointed and self-contained; a
+            # stale -wal/-shm pair from the previous database would otherwise
+            # be replayed onto it at the next open and could corrupt it.
+            db_path = os.path.join(self.data_dir, DB_REL)
+            for suffix in ("-wal", "-shm"):
+                try:
+                    os.remove(db_path + suffix)
+                except OSError:
+                    pass
         with self._lock:
             self._state["restoredAt"] = self._clock()
             self._last_fingerprint = _fingerprint(self.data_dir)
