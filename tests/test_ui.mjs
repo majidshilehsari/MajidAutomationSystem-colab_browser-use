@@ -2627,3 +2627,24 @@ test('deleting a telegram target sticks and the draft can be reset', async () =>
     await page.cleanup();
   }
 });
+
+test('the mode select on the telegram status card saves itself immediately', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'تلگرام');
+    assert.ok(await page.until(() =>
+      page.doc.querySelectorAll('#mas-agent-sub select').length > 0));
+    const modes = page.doc.querySelectorAll('#mas-agent-sub select')[0];
+    assert.deepEqual(Array.from(modes.options).map((node) => node.value),
+      ['off', 'bot', 'account', 'both'], 'both channels must be selectable');
+    modes.value = 'bot';
+    modes.dispatchEvent(new page.window.Event('change'));
+    await page.wait(40);
+    const posted = page.posts.filter((item) => item.url.endsWith('/agent/settings')).pop();
+    assert.ok(posted, 'changing the mode never reached the server — the old trap');
+    assert.equal(JSON.parse(posted.body)['telegram.mode'], 'bot');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});

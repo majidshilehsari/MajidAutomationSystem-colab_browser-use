@@ -2707,7 +2707,27 @@ async function renderAgentTelegram(host) {
         { value: 'bot', label: t('tgModeBot') },
         { value: 'account', label: t('tgModeAccount') },
         { value: 'both', label: t('tgModeBoth') },
-      ], draft.mode, (event) => { draft.mode = event.target.value; })),
+      ], draft.mode, async (event) => {
+        const next = event.target.value;
+        draft.mode = next;
+        // A control this prominent has to save itself. The old code only
+        // touched the local draft, the save button lives on another sub-tab
+        // and every sub-tab switch re-renders from the server — so the choice
+        // evaporated and telegram.mode could not be changed from the UI at
+        // all. Changing this select now persists it on the spot.
+        try {
+          await api('/agent/settings', { method: 'POST',
+                                         body: { 'telegram.mode': next } });
+          if ((next === 'account' || next === 'both')
+              && !(channels.account || {}).sessionExists) {
+            toast(t('tgModeSavedNoAccount'), 'warn', { sticky: true });
+          } else {
+            toast(t('agentSaved'), 'ok');
+          }
+          renderAgentSub('telegram');
+        } catch (error) { toast(error.message, 'error'); }
+      })),
+      el('span', { class: 'mas-hint', text: t('tgModeInstantHint') }),
       el('span', { class: 'mas-hint', text: t('tgLastUpdate') + ' ' + tehranWhen(Math.floor(Date.now() / 1000)) }),
     ]),
     el('details', { class: 'mas-help' }, [
