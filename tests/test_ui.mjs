@@ -2547,3 +2547,83 @@ test('the onboarding modal can be dismissed and never nags a machine with data',
     await busy.cleanup();
   }
 });
+
+test('a manually added telegram target survives the re-render, feeds the recipient picker and saves', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'تلگرام');
+    clickTgSub(page, 'targets');
+    const sub = () => page.doc.getElementById('mas-agent-sub');
+    assert.ok(await page.until(() => Array.from(sub().querySelectorAll('.mas-target-row input'))
+      .some((node) => node.value === 'گروه من')));
+
+    const addInputs = () => Array.from(sub().querySelectorAll('.mas-target-add input'));
+    assert.ok(await page.until(() => addInputs().length >= 2));
+    addInputs()[0].value = '-100999';
+    addInputs()[0].dispatchEvent(new page.window.Event('input'));
+    addInputs()[1].value = 'گروه تست';
+    addInputs()[1].dispatchEvent(new page.window.Event('input'));
+    page.byText('button', '➕ افزودن').dispatchEvent(new page.window.Event('click'));
+
+    // the regression that broke the whole section: the row used to evaporate
+    assert.ok(await page.until(() => Array.from(sub().querySelectorAll('.mas-target-row input'))
+      .some((node) => node.value === '-100999')),
+      'the added row did not survive the re-render');
+    assert.ok(sub().textContent.includes('(2)'), 'the counter did not follow the draft');
+    assert.ok(sub().textContent.includes('تغییرات ذخیره‌نشده'),
+      'there is no unsaved-changes signal');
+
+    // even before saving, the fresh target must be selectable as a recipient
+    clickTgSub(page, 'status');
+    assert.ok(await page.until(() => Array.from(sub().querySelectorAll('select option'))
+      .some((option) => option.value === '-100999')),
+      'the fresh target never reached the test recipient picker');
+
+    clickTgSub(page, 'targets');
+    assert.ok(await page.until(() => sub().textContent.includes('ذخیرهٔ مقصدها')));
+    const save = Array.from(sub().querySelectorAll('button'))
+      .find((node) => node.textContent.includes('ذخیرهٔ مقصدها'));
+    save.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const posted = page.posts.filter((item) => item.url.endsWith('/agent/settings')).pop();
+    assert.ok(posted, 'the targets were never saved');
+    const body = JSON.parse(posted.body);
+    const rows = body['telegram.targets'] || [];
+    assert.deepEqual(rows.map((row) => row.id), [-100123, -100999]);
+    assert.equal(rows[1].title, 'گروه تست');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('deleting a telegram target sticks and the draft can be reset', async () => {
+  const page = await mount();
+  try {
+    await openAgentSub(page, 'تلگرام');
+    clickTgSub(page, 'targets');
+    const sub = () => page.doc.getElementById('mas-agent-sub');
+    assert.ok(await page.until(() => Array.from(sub().querySelectorAll('.mas-target-row input'))
+      .some((node) => node.value === 'گروه من')));
+
+    const del = Array.from(sub().querySelectorAll('.mas-target-row button'))
+      .find((node) => node.textContent.includes('🗑'));
+    assert.ok(del, 'the delete button is missing');
+    del.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => sub().textContent.includes('مقصدی ذخیره نشده')),
+      'the deleted row came back — the draft is not persisted');
+    assert.ok(!Array.from(sub().querySelectorAll('.mas-target-row input'))
+      .some((node) => node.value === 'گروه من'));
+
+    const reset = Array.from(sub().querySelectorAll('button'))
+      .find((node) => node.textContent.includes('بازنشانی پیش‌نویس'));
+    assert.ok(reset, 'there is no way to discard an unsaved draft');
+    reset.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => Array.from(sub().querySelectorAll('.mas-target-row input'))
+      .some((node) => node.value === 'گروه من')),
+      'resetting the draft did not bring the saved target back');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});

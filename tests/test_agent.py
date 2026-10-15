@@ -1632,7 +1632,11 @@ class AgentApiTest(TempDirCase):
         status, payload = self.call("GET", "/agent/telegram/status")
         self.assertEqual(payload["mode"], "off")
         self.assertEqual(self.call("POST", "/agent/telegram/test", {})[0], 400)
-        self.assertEqual(self.call("GET", "/agent/telegram/targets")[0], 400)
+        # Round 16: "telegram is off" is a state conflict (409), and the
+        # message has to point the operator at the settings sub-tab.
+        status, payload = self.call("GET", "/agent/telegram/targets")
+        self.assertEqual(status, 409)
+        self.assertIn("تنظیمات", str(payload.get("error", "")))
 
     def test_the_ai_browser_reports_that_it_is_absent_here(self):
         status, payload = self.call("GET", "/agent/ai/status")

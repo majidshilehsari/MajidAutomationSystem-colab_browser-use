@@ -1636,6 +1636,36 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
   background: linear-gradient(160deg, rgba(20, 184, 166, 0.10), var(--mas-surface) 55%);
 }
 
+/* -- telegram targets: a real grid, so id/title/type never run into
+      each other (round 16). The add row reads as a form, the discovered
+      chats as a pick list. ------------------------------------------ */
+#mas-root .mas-tg-targets .mas-target-rows { display: grid; gap: 6px; margin: 6px 0; }
+#mas-root .mas-tg-targets .mas-target-row {
+  display: grid;
+  grid-template-columns: minmax(110px, 1.1fr) minmax(150px, 2fr) minmax(130px, 1.1fr) auto;
+  gap: 8px;
+  align-items: end;
+}
+#mas-root .mas-tg-targets .mas-target-row .mas-btn { margin-bottom: 22px; }
+#mas-root .mas-tg-targets .mas-target-add {
+  padding: 8px 10px 2px;
+  border: 1px dashed var(--mas-line);
+  border-radius: 12px;
+  background: rgba(148, 163, 184, 0.06);
+}
+#mas-root .mas-tg-found { margin-top: 10px; }
+#mas-root .mas-tg-found .mas-found-row {
+  display: flex; flex-wrap: wrap; gap: 8px; align-items: center;
+  padding: 5px 8px;
+  border: 1px solid var(--mas-line);
+  border-radius: 10px;
+}
+#mas-root .mas-tg-found .mas-found-row b { flex: 1 1 auto; }
+@media (max-width: 720px) {
+  #mas-root .mas-tg-targets .mas-target-row { grid-template-columns: 1fr 1fr; }
+  #mas-root .mas-tg-targets .mas-target-row .mas-btn { margin-bottom: 0; }
+}
+
 /* ================================================================== *
  * Phase 9 — the operator's own design pattern, applied as the final
  * layer so it wins the cascade: RTL-first Vazirmatn, semantic tokens

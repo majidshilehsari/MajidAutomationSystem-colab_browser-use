@@ -2672,6 +2672,10 @@ async function renderAgentTelegram(host) {
   const wantsAccount = draft.mode === 'account' || draft.mode === 'both';
 
   const channelLabel = (name) => t('tgChannel' + name.charAt(0).toUpperCase() + name.slice(1));
+  const tgTypeLabel = (type) => {
+    const name = String(type || 'private');
+    return t('tgType' + name.charAt(0).toUpperCase() + name.slice(1));
+  };
   const routeOptions = [
     { value: '', label: t('tgRouteFollow') },
     { value: 'bot', label: channelLabel('bot') },
@@ -2814,37 +2818,86 @@ async function renderAgentTelegram(host) {
     ]),
   ]);
 
-  /* -- targets: fully editable, exactly as the operator asked ----------- */
-  const draftTargets = targets.map((target) => Object.assign({}, target));
-  const add = { id: '', title: '', type: 'private' };
+  /* -- targets: fully editable; the draft survives re-renders (round 16) - */
+  // The working copy lives in `state`, not in a local const: adding or
+  // deleting a row re-renders this pane, and a local draft evaporated on the
+  // spot — that is exactly why "save targets" used to persist nothing and the
+  // test dropdown never saw a fresh target.
+  if (!Array.isArray(state.agentTgDraft)) {
+    state.agentTgDraft = targets.map((target) => Object.assign({}, target));
+  }
+  const draftTargets = state.agentTgDraft;
+  if (!state.agentTgAdd) state.agentTgAdd = { id: '', title: '', type: 'private' };
+  const add = state.agentTgAdd;
   const found = state.agentTgFound || [];
+  const normalizeId = (value) => Number(value) || String(value).trim();
+  const tgTypes = [
+    { value: 'private', label: '👤 ' + t('tgTypePrivate') },
+    { value: 'group', label: '👥 ' + t('tgTypeGroup') },
+    { value: 'supergroup', label: '🏢 ' + t('tgTypeSupergroup') },
+    { value: 'channel', label: '📣 ' + t('tgTypeChannel') },
+  ];
+  const pushTarget = (target) => {
+    const id = String(target.id || '').trim();
+    if (!id) { toast(t('tgNeedId'), 'warn'); return false; }
+    if (draftTargets.some((row) => String(row.id).trim() === id)) {
+      toast(t('tgAlreadyAdded'), 'warn');
+      return false;
+    }
+    draftTargets.push({ id: normalizeId(id), title: String(target.title || ''),
+                        type: String(target.type || 'private') });
+    renderAgentSub('telegram');
+    return true;
+  };
   const saveTargets = async () => {
-    const clean = draftTargets
+    const rows = draftTargets.slice();
+    // an add-form the operator filled but never pressed ➕ on is included too
+    if (String(add.id || '').trim()) rows.push(Object.assign({}, add));
+    const clean = rows
       .filter((target) => String(target.id || '').trim() !== '')
       .map((target) => ({
-        id: Number(target.id) || String(target.id).trim(),
+        id: normalizeId(target.id),
         title: String(target.title || ''),
         type: String(target.type || 'private'),
       }));
     try {
       await api('/agent/settings', { method: 'POST', body: { 'telegram.targets': clean } });
-      toast(t('agentSaved'), 'ok');
+      state.agentTgDraft = null;   // next render reads the server again
+      state.agentTgAdd = null;
+      toast(t('tgTargetsSaved'), 'ok');
       renderAgentSub('telegram');
     } catch (error) { toast(error.message, 'error'); }
   };
-  const targetsCard = el('div', { class: 'mas-box mas-card' }, [
+  // Everything the test/send dropdowns may offer: the working draft (saved
+  // rows plus not-yet-saved ones) and whatever the add form holds right now.
+  const pickTargets = draftTargets
+    .filter((row) => String(row.id || '').trim() !== '')
+    .map((row) => Object.assign({}, row));
+  if (String(add.id || '').trim()
+      && !pickTargets.some((row) => String(row.id).trim() === String(add.id).trim())) {
+    pickTargets.push({ id: add.id.trim(), title: add.title || '',
+                       type: add.type || 'private' });
+  }
+  const rowKey = (row) => [String(row.id).trim(), String(row.title || ''),
+                           String(row.type || 'private')].join('|');
+  const dirty = draftTargets.map(rowKey).join(',') !== targets.map(rowKey).join(',')
+    || String(add.id || '').trim() !== '';
+  const targetsCard = el('div', { class: 'mas-box mas-card mas-tg-targets' }, [
     el('div', { class: 'mas-card-head' }, [
       el('b', { text: `🎯 ${t('agentTgTargets')} (${draftTargets.length})` }),
+      dirty ? el('span', { class: 'mas-chip mas-chip-warn',
+                           text: '✏️ ' + t('tgUnsaved') }) : null,
     ]),
     el('details', { class: 'mas-help' }, [
       el('summary', { text: '📖 ' + t('tgHelpTargetsTitle') }),
       el('p', { text: t('tgHelpTargets') }),
     ]),
     el('p', { class: 'mas-hint', text: t('tgTargetsHint') }),
-    draftTargets.length ? el('div', { class: 'mas-target-rows' },
-      draftTargets.map((target, index) => el('div', { class: 'mas-row mas-wrap mas-target-row' }, [
+    draftTargets.length
+      ? el('div', { class: 'mas-target-rows' }, draftTargets.map((target, index) => el('div', {
+        class: 'mas-row mas-wrap mas-target-row' }, [
         agentField(t('tgColId'), el('input', {
-          class: 'mas-input', value: String(target.id || ''),
+          class: 'mas-input', dir: 'ltr', value: String(target.id || ''),
           onInput: (event) => { draftTargets[index].id = event.target.value; },
         })),
         agentField(t('tgColTitle'), el('input', {
@@ -2852,64 +2905,73 @@ async function renderAgentTelegram(host) {
           onInput: (event) => { draftTargets[index].title = event.target.value; },
         })),
         agentField(t('tgColType'), agentSelect(
-          ['private', 'group', 'supergroup', 'channel'],
-          String(target.type || 'private'),
+          tgTypes, String(target.type || 'private'),
           (event) => { draftTargets[index].type = event.target.value; })),
         button('🗑', () => {
           draftTargets.splice(index, 1);
           renderAgentSub('telegram');
         }, { class: 'mas-btn mas-danger' }),
-      ]))) : el('p', { class: 'mas-hint', text: t('agentEmpty') }),
+      ])))
+      : el('p', { class: 'mas-empty', text: t('tgTargetsEmptyHint') }),
     el('b', { class: 'mas-subhead', text: '➕ ' + t('tgTargetAdd') }),
-    el('div', { class: 'mas-row mas-wrap' }, [
+    el('div', { class: 'mas-row mas-wrap mas-target-row mas-target-add' }, [
       agentField(t('tgColId'), el('input', {
-        class: 'mas-input', placeholder: '-100… یا @name',
+        class: 'mas-input', dir: 'ltr', value: String(add.id || ''),
+        placeholder: '-100… یا @name',
         onInput: (event) => { add.id = event.target.value; },
       })),
       agentField(t('tgColTitle'), el('input', {
-        class: 'mas-input', placeholder: t('tgColTitle'),
+        class: 'mas-input', value: String(add.title || ''),
+        placeholder: t('tgColTitle'),
         onInput: (event) => { add.title = event.target.value; },
       })),
       agentField(t('tgColType'), agentSelect(
-        ['private', 'group', 'supergroup', 'channel'], add.type,
+        tgTypes, String(add.type || 'private'),
         (event) => { add.type = event.target.value; })),
-      button('➕', () => {
-        if (!String(add.id || '').trim()) { toast(t('tgTestNeedTarget'), 'warn'); return; }
-        draftTargets.push({ id: add.id, title: add.title, type: add.type });
-        renderAgentSub('telegram');
+      button('➕ ' + t('tgAddButton'), () => {
+        if (pushTarget(add)) state.agentTgAdd = { id: '', title: '', type: 'private' };
       }, { class: 'mas-btn mas-primary' }),
     ]),
     el('div', { class: 'mas-row mas-wrap' }, [
       button('🔎 ' + t('agentTgDiscover'), async () => {
         try {
           state.agentTgFound = (await api('/agent/telegram/targets')).targets || [];
+          if (!state.agentTgFound.length) toast(t('tgFoundNone'), 'warn');
           renderAgentSub('telegram');
         } catch (error) { toast(error.message, 'error'); }
       }),
-      button('💾 ' + t('tgSaveTargets'), saveTargets, { class: 'mas-btn mas-primary' }),
+      button(`💾 ${t('tgSaveTargets')} (${draftTargets.length})`, saveTargets,
+             { class: 'mas-btn mas-primary' }),
+      dirty ? button('↩️ ' + t('tgResetDraft'), () => {
+        state.agentTgDraft = null;
+        state.agentTgAdd = null;
+        renderAgentSub('telegram');
+      }, { class: 'mas-btn mas-danger' }) : null,
     ]),
-    found.length ? el('div', { class: 'mas-target-rows' },
-      found.map((target) => el('div', { class: 'mas-row mas-wrap mas-target-row' }, [
-        el('span', { class: 'mas-chip', text: String(target.id) }),
-        el('span', { text: target.title || '' }),
-        el('span', { class: 'mas-hint', text: target.type || '' }),
-        button('\uff0b', () => {
-          draftTargets.push(Object.assign({}, target));
-          renderAgentSub('telegram');
-        }, { class: 'mas-btn mas-primary' }),
-      ]))) : null,
+    found.length ? el('div', { class: 'mas-box mas-tg-found' }, [
+      el('b', { class: 'mas-subhead',
+                text: `🔎 ${t('tgFoundTitle')} (${found.length})` }),
+      el('div', { class: 'mas-target-rows' }, found.map((target) => el('div', {
+        class: 'mas-row mas-wrap mas-found-row' }, [
+        el('span', { class: 'mas-chip', dir: 'ltr', text: String(target.id) }),
+        el('b', { text: target.title || String(target.id) }),
+        el('span', { class: 'mas-hint', text: tgTypeLabel(target.type) }),
+        button('\uff0b ' + t('tgAddButton'), () => pushTarget(target),
+               { class: 'mas-btn mas-primary' }),
+      ]))),
+    ]) : null,
   ]);
 
   /* -- the test the user asked for: one click, a real message ----------- */
   const targetSelect = el('select', {
     class: 'mas-input',
     onChange: (event) => { test.target = event.target.value; },
-  }, targets.length
-    ? targets.map((target) => el('option',
+  }, pickTargets.length
+    ? pickTargets.map((target) => el('option',
       { value: String(target.id) },
-      `${target.title || target.id} (${target.type || '?'})`))
+      `${target.title || target.id} (${tgTypeLabel(target.type)})`))
     : [el('option', { value: '' }, t('tgTestNoTargets'))]);
-  if (targets.length) test.target = String(targets[0].id);
+  if (pickTargets.length) test.target = String(pickTargets[0].id);
   const diagnoseHost = el('div', { id: 'mas-tg-diagnose', class: 'mas-diagnose' });
   const testCard = el('div', { class: 'mas-box mas-card' }, [
     el('div', { class: 'mas-card-head' }, [el('b', { text: '🩺 ' + t('tgTest') })]),
@@ -3101,9 +3163,9 @@ async function renderAgentTelegram(host) {
     el('div', { class: 'mas-row mas-wrap' }, [
       agentField(t('tgSendTarget'), agentSelect([
         { value: '', label: t('tgSendEveryone') },
-      ].concat(targets.map((target) => ({
+      ].concat(pickTargets.map((target) => ({
         value: String(target.id),
-        label: `${target.title || target.id} (${target.type || '?'})`,
+        label: `${target.title || target.id} (${tgTypeLabel(target.type)})`,
       }))), '', (event) => { send.target = event.target.value; })),
       agentField(t('tgTestChannel'), agentSelect([
         { value: '', label: t('tgChannelAuto') },

@@ -1208,16 +1208,20 @@ class AgentHub:
         """Chats the operator can pick from, so nobody hunts for a numeric id."""
         mode = self.notifier.mode()
         if mode == MODE_OFF:
-            raise AgentError("telegram is off; set telegram.mode first")
+            raise AgentError(
+                "تلگرام خاموش است؛ اول در زیربخش «تنظیمات» حالت و توکن ربات "
+                "را ذخیره کن.", 409)
         try:
             return self.notifier.transport().list_targets()
         except TelegramError as exc:
-            raise AgentError(str(exc), 502)
+            raise AgentError("پیدا کردن چت‌ها ناموفق بود: %s" % exc, 502)
 
     def telegram_test(self, text: str = "") -> Dict[str, Any]:
         mode = self.notifier.mode()
         if mode == MODE_OFF:
-            raise AgentError("telegram is off")
+            raise AgentError(
+                "تلگرام خاموش است؛ اول در زیربخش «تنظیمات» حالت و توکن ربات "
+                "را ذخیره کن.")
         message = text or "✅ پیام آزمایشی از Majid Automation System"
         try:
             result = self.notifier.send(message)
