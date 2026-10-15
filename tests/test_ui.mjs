@@ -40,6 +40,16 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
       return json({ authRequired: true, viewport: { width: 1366, height: 768 },
                     engineBusy: false, detector: 'x11+cdp', cdpAvailable: false });
     }
+    if (clean.endsWith('/supabase/status')) {
+      return json({ configured: false, enabled: false, url: '', bucket: '',
+                    key: '', source: '', everyMin: 10, running: false,
+                    lastSyncAt: null, lastResult: null, lastError: null,
+                    restoredAt: null, uploads: 0 });
+    }
+    if (clean.endsWith('/supabase/sync') || clean.endsWith('/supabase/restore')) {
+      return json({ ok: true, result: { uploaded: 20480 }, restored: 3,
+                    restarting: true });
+    }
     if ((options.method || 'GET').toUpperCase() === 'POST'
         && (clean.endsWith('/clipboard') || clean.endsWith('/agent/devlog')
             || clean.endsWith('/agent/pages') || clean.endsWith('/agent/suggestions')
@@ -2415,6 +2425,53 @@ test('the flow action line sits first, right under the header, and the name labe
     assert.ok(/max-width: none;/.test(CSS), 'the body cap is still limiting the width');
     assert.ok(CSS.includes('#mas-tab-flow > .mas-flowbar'),
       'the grid span rule for the action line is missing');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the supabase card saves settings, backs up on demand and restores with a confirm', async () => {
+  const page = await mount({});
+  try {
+    await authenticate(page);
+    clickTab(page, 'settings');
+    const pane = page.doc.getElementById('mas-tab-settings');
+    assert.ok(await page.until(() => pane.textContent.includes('پشتیبان‌گیری ابری Supabase')),
+      'the supabase card did not render');
+    const urlInput = Array.from(pane.querySelectorAll('input'))
+      .find((node) => (node.placeholder || '').includes('supabase.co'));
+    assert.ok(urlInput, 'the url input is missing');
+    urlInput.value = 'https://proj.supabase.co';
+    const keyInput = Array.from(pane.querySelectorAll('input[type="password"]'))
+      .find((node) => (node.placeholder || '').includes('service_role'));
+    assert.ok(keyInput, 'the key input must be a password field');
+    keyInput.value = 'sb-secret-x';
+
+    page.byText('button', '💾 ذخیرهٔ تنظیمات').dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    const saved = page.posts.find((p) => p.url.endsWith('/agent/settings'));
+    assert.ok(saved, 'the settings were never posted');
+    const body = JSON.parse(saved.body);
+    assert.equal(body['supabase.url'], 'https://proj.supabase.co');
+    assert.equal(body['supabase.key'], 'sb-secret-x');
+    assert.equal(body['supabase.bucket'], 'mas-snapshots');
+    assert.equal(body['supabase.enabled'], true);
+
+    page.byText('button', '📤 پشتیبان‌گیری فوری').dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    assert.ok(page.posts.some((p) => p.url.endsWith('/supabase/sync')),
+      'the backup button did not call /supabase/sync');
+
+    let asked = false;
+    const original = page.window.confirm;
+    page.window.confirm = () => { asked = true; return true; };
+    page.byText('button', '📥 بازیابی + راه‌اندازی مجدد').dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    page.window.confirm = original;
+    assert.ok(asked, 'restore must ask for confirmation first');
+    assert.ok(page.posts.some((p) => p.url.endsWith('/supabase/restore')),
+      'the restore button did not call /supabase/restore');
     assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();

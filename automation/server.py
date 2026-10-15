@@ -40,6 +40,7 @@ from automation.agent import AgentHub  # noqa: E402
 from automation.cursor import CursorFx  # noqa: E402
 from automation.archive import shot_archive, text_archive  # noqa: E402
 from automation.api import API_PREFIX, AutomationApi, FlowStore  # noqa: E402
+from automation.supabase import SupabaseSync, restore_on_boot  # noqa: E402
 from automation.detect import Detector  # noqa: E402
 from automation.engine import AutomationEngine, ControlBackend  # noqa: E402
 
@@ -438,12 +439,21 @@ def build_api(args: argparse.Namespace) -> AutomationApi:
         agent.engine = engine
     detector = Detector(backend, args.data_dir, viewport=dict(schema.DEFAULT_VIEWPORT),
                         cdp_port=args.cdp_port)
+    # Snapshot sync reads its configuration from the environment first and
+    # from the agent's settings table second (None values are skipped so a
+    # missing key never overrides an env default with False/empty).
+    _supa_keys = ("supabase.url", "supabase.key", "supabase.bucket",
+                  "supabase.enabled", "supabase.everyMin")
+    supabase = SupabaseSync(args.data_dir, settings=(
+        (lambda: {key: value for key in _supa_keys
+                  if (value := agent.store.get_setting(key)) is not None})
+        if agent is not None else None))
     guide_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_guide.md")
     return AutomationApi(
         engine, flows, detector,
         data_dir=args.data_dir, token=token, control_script=args.control_script,
         viewport=dict(schema.DEFAULT_VIEWPORT), guide_path=guide_path,
-        shots=shots, texts=texts, agent=agent)
+        shots=shots, texts=texts, agent=agent, supabase=supabase)
 
 
 def parse_args(argv: Optional[list] = None) -> argparse.Namespace:
@@ -496,6 +506,13 @@ def main(argv: Optional[list] = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 
+    # Round 15: the Supabase snapshot restore must run BEFORE any store opens
+    # agent.db or reads the flows directory. It only fills an empty data dir
+    # (a fresh Colab session); a machine that already has data keeps it.
+    restore_result = restore_on_boot(args.data_dir)
+    if restore_result:
+        LOG.info("supabase boot restore: %s", restore_result)
+
     if not args.no_prepare:
         static_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
         report = prepare_web_root(os.path.abspath(args.web_root), args.novnc_dir, static_dir)
@@ -520,6 +537,8 @@ def main(argv: Optional[list] = None) -> int:
         api.agent.start()
         LOG.info("coworker agent ready (%d job(s) scheduled)",
                  len(api.agent.jobs()))
+    if api.supabase is not None:
+        api.supabase.start()
 
     web_root = os.path.abspath(args.web_root)
     proxy = proxy_class(

@@ -51,6 +51,10 @@ from automation.telegram_client import (CHANNELS, MODE_ACCOUNT, MODE_BOT, MODE_O
 # typo cannot create a key that silently does nothing, and a hostile page cannot
 # invent one.
 PLAIN_SETTINGS = {
+    "supabase.url": str,
+    "supabase.bucket": str,
+    "supabase.enabled": bool,
+    "supabase.everyMin": int,
     "ai.provider": str,
     "ai.chatProvider": str,
     "ai.baseUrl": str,
@@ -92,6 +96,7 @@ PLAIN_SETTINGS = {
 
 SECRET_SETTINGS = {
     "ai.apiKey", "telegram.botToken", "telegram.apiId", "telegram.apiHash",
+    "supabase.key",
 }
 
 # A SELECT, and only a SELECT: one statement, no trailing semicolon trickery.
@@ -205,6 +210,12 @@ API_INDEX = [
      "Revoke a secret handle immediately (operator only)."),
     ("GET", "/secrets/*/status", "وضعیت ماسک‌شدهٔ handle: انقضا، شمارندهٔ استفاده، scope.",
      "Masked handle status: expiry, use counter, scope."),
+    ("POST", "/supabase/sync", "☁️ پشتیبان‌گیری فوری snapshot داده‌ها در Supabase Storage (فقط اپراتور).",
+     "Take an immediate data snapshot to Supabase Storage (operator only)."),
+    ("POST", "/supabase/restore", "♻️ بازیابی آخرین snapshot از Supabase و راه‌اندازی مجدد سرور (فقط اپراتور؛ هنگام اجرای فعال رد می‌شود).",
+     "Restore the latest Supabase snapshot and restart the server (operator only; refused while a run is active)."),
+    ("GET", "/supabase/status", "وضعیت همگام‌سازی Supabase: پیکربندی ماسک‌شده، آخرین نتیجه، دورهٔ زمانی (فقط اپراتور).",
+     "Supabase sync status: masked config, last result, interval (operator only)."),
     ("POST", "/agent/chat", "💬 پرسش مستقیم از ایجنت با زمینهٔ اتوماسیون؛ جواب "
                             "همزمان برمی‌گردد (برخلاف chat/send).",
      "Ask the agent directly with automation context; answers synchronously."),

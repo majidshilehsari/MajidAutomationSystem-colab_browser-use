@@ -9,7 +9,10 @@ unit-testable without a browser, an X server or a VNC connection.
 from __future__ import annotations
 
 import json
+import logging
 import os
+import sys
+import threading
 import re
 import secrets
 import time
@@ -21,6 +24,9 @@ from . import clipboard
 from .agent import AgentError
 from .engine import TERMINAL_STATES, png_size
 from .vault import VaultError
+from .supabase import SupabaseError
+
+LOG = logging.getLogger("automation.api")
 
 API_PREFIX = "/automation/api"
 
@@ -130,8 +136,9 @@ class AutomationApi:
     def __init__(self, engine, store: FlowStore, detector=None, *, data_dir: str,
                  token: str = "", control_script: str = "", viewport=None,
                  guide_path: str = "", version: str = "1.0",
-                 shots=None, texts=None, agent=None):
+                 shots=None, texts=None, agent=None, supabase=None):
         self.engine = engine
+        self.supabase = supabase
         # Indexes of every screenshot and every extracted text this session
         # produced, so two panel tabs can list them with timestamps.
         self.shots = shots
@@ -168,6 +175,9 @@ class AutomationApi:
             ("POST", "/secrets/*/submit", self.route_secret_submit),
             ("POST", "/secrets/*/revoke", self.route_secret_revoke),
             ("GET", "/secrets/*/status", self.route_secret_status),
+            ("POST", "/supabase/sync", self.route_supabase_sync),
+            ("POST", "/supabase/restore", self.route_supabase_restore),
+            ("GET", "/supabase/status", self.route_supabase_status),
             ("POST", "/screenshot", self.route_screenshot),
             ("GET", "/artifact", self.route_artifact),
             ("GET", "/public/shot/*", self.route_public_shot),
@@ -588,6 +598,59 @@ class AutomationApi:
         except VaultError as exc:
             raise ApiError(exc.status, str(exc))
         return json_response(200, status)
+
+    # -- Supabase snapshot sync (round 15) --------------------------------
+    def route_supabase_sync(self, *, body: bytes = b"", **_: Any) -> Response:
+        self._require_operator()
+        if self.supabase is None:
+            raise ApiError(409, "همگام‌سازی Supabase در این سرور فعال نیست.")
+        payload = self.read_json(body)
+        try:
+            result = self.supabase.sync_now(force=bool(payload.get("force")))
+        except SupabaseError as exc:
+            raise ApiError(exc.status, str(exc))
+        return json_response(200, {"ok": True, "result": result})
+
+    def route_supabase_restore(self, *, body: bytes = b"", **_: Any) -> Response:
+        self._require_operator()
+        if self.supabase is None:
+            raise ApiError(409, "همگام‌سازی Supabase در این سرور فعال نیست.")
+        if self.engine is not None and self.engine.busy():
+            raise ApiError(409, "یک اجرا در جریان است؛ اول متوقفش کن و بعد بازیابی کن.")
+        payload = self.read_json(body)
+        cfg = self.supabase.config()
+        if not cfg["enabled"]:
+            raise ApiError(409, "Supabase تنظیم نشده؛ اول نشانی و کلید را بده.")
+        try:
+            archive = self.supabase.download_latest(cfg)
+        except SupabaseError as exc:
+            raise ApiError(exc.status, str(exc))
+        if archive is None:
+            raise ApiError(404, "هیچ snapshot‌ای در باکت پیدا نشد.")
+        try:
+            count = self.supabase.restore(archive)
+        except SupabaseError as exc:
+            raise ApiError(exc.status, str(exc))
+        restarting = bool(payload.get("restart", True))
+        if restarting:
+            # Swap the process image in place: same pid (the start-script
+            # supervisor keeps watching it), fresh stores on the restored db.
+            def _restart() -> None:
+                try:
+                    os.execv(sys.executable,
+                             [sys.executable, os.path.abspath(sys.argv[0])]
+                             + sys.argv[1:])
+                except OSError:
+                    LOG.error("restart after restore failed; restart manually")
+            threading.Timer(0.6, _restart).start()
+        return json_response(200, {"ok": True, "restored": count,
+                                   "restarting": restarting})
+
+    def route_supabase_status(self, **_: Any) -> Response:
+        self._require_operator()
+        if self.supabase is None:
+            raise ApiError(409, "همگام‌سازی Supabase در این سرور فعال نیست.")
+        return json_response(200, self.supabase.status())
 
     def route_runs_list(self, **_: Any) -> Response:
         status = self.engine.status()

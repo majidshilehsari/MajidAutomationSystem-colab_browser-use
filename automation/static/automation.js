@@ -4670,6 +4670,75 @@ async function renderSettings() {
     devBody,
   ]) : null;
 
+  // Round 15: Supabase snapshot card. Configuration lives in the agent
+  // settings (supabase.* keys; the key itself is a SECRET setting), while the
+  // boot restore on a fresh machine reads the SUPABASE_* environment.
+  const supaUrl = el('input', { class: 'mas-input', dir: 'ltr', placeholder: 'https://xxxxxxxx.supabase.co' });
+  const supaKey = el('input', { class: 'mas-input', dir: 'ltr', type: 'password', placeholder: t('supaKeyPh') });
+  const supaBucket = el('input', { class: 'mas-input', dir: 'ltr', placeholder: 'mas-snapshots' });
+  const supaEvery = el('input', { class: 'mas-input', type: 'number', min: '1', max: '1440', placeholder: '10' });
+  const supaStatus = el('p', { class: 'mas-hint', text: '…' });
+  const loadSupa = async () => {
+    try {
+      const st = await api('/supabase/status');
+      if (st.url) supaUrl.value = st.url;
+      if (st.bucket) supaBucket.value = st.bucket;
+      if (st.key) supaKey.placeholder = st.key;
+      supaEvery.value = st.everyMin || 10;
+      const bits = [`${t('supaState')}: ${st.enabled ? '🟢' : '⚪'}${st.source ? ` (${st.source})` : ''}`];
+      if (st.lastSyncAt) bits.push(`${t('supaLast')}: ${tehranWhen(st.lastSyncAt)}`);
+      if (st.lastError) bits.push(`❌ ${st.lastError}`);
+      else if (st.lastResult && st.lastResult.uploaded) {
+        bits.push(`✅ ${(st.lastResult.uploaded / 1024).toFixed(0)} KB`);
+      }
+      if (st.restoredAt) bits.push(`${t('supaRestored')}: ${tehranWhen(st.restoredAt)}`);
+      supaStatus.textContent = bits.join(' · ');
+    } catch (error) { supaStatus.textContent = error.message; }
+  };
+  const supaCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '☁️ ' + t('supaTitle') })]),
+    el('p', { class: 'mas-hint', text: t('supaHint') }),
+    supaUrl, supaKey,
+    el('div', { class: 'mas-row mas-wrap' }, [supaBucket, supaEvery]),
+    supaStatus,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '💾 ' + t('supaSave'), onClick: async () => {
+        const body = {
+          'supabase.url': supaUrl.value.trim(),
+          'supabase.bucket': supaBucket.value.trim() || 'mas-snapshots',
+          'supabase.enabled': true,
+          'supabase.everyMin': parseInt(supaEvery.value, 10) || 10,
+        };
+        if (supaKey.value.trim()) body['supabase.key'] = supaKey.value.trim();
+        try {
+          await api('/agent/settings', { method: 'POST', body });
+          supaKey.value = '';
+          toast(t('supaSaved'), 'ok');
+          loadSupa();
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+      el('button', { class: 'mas-btn', type: 'button', text: '📤 ' + t('supaBackup'), onClick: async () => {
+        try {
+          const res = await api('/supabase/sync', { method: 'POST', body: { force: true } });
+          toast(`${t('supaBackupDone')} (${((res.result || {}).uploaded / 1024 || 0).toFixed(0)} KB)`, 'ok');
+          loadSupa();
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+      el('button', { class: 'mas-btn', type: 'button', text: '📥 ' + t('supaRestore'), onClick: async () => {
+        if (!window.confirm(t('supaConfirmRestore'))) return;
+        try {
+          await api('/supabase/restore', { method: 'POST', body: {} });
+          toast(t('supaRestoring'), 'warn', { sticky: true });
+          setTimeout(() => {
+            // wrapped: in a jsdom teardown the global window is already gone
+            try { window.location.reload(); } catch (error) { /* no-op */ }
+          }, 6000);
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+    ]),
+  ]);
+  if (state.token) loadSupa();
+
   const infoBody = el('div', {}, [el('p', { class: 'mas-hint', text: '…' })]);
   (async () => {
     try {
@@ -4692,7 +4761,7 @@ async function renderSettings() {
     ]),
   ]);
 
-  replace(pane, themeCard, langCard, clipSyncCard, clipCard, devlogCard, infoCard);
+  replace(pane, themeCard, langCard, clipSyncCard, clipCard, supaCard, devlogCard, infoCard);
   if (hasAgent) loadDevlog();
 }
 
