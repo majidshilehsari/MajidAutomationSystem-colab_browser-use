@@ -210,6 +210,8 @@ API_INDEX = [
      "Revoke a secret handle immediately (operator only)."),
     ("GET", "/secrets/*/status", "وضعیت ماسک‌شدهٔ handle: انقضا، شمارندهٔ استفاده، scope.",
      "Masked handle status: expiry, use counter, scope."),
+    ("POST", "/supabase/connect", "🔗 اتصال یک‌چسبانی به Supabase: کلید (یا نشانی+کلید) را می‌گیرد، اعتبارسنجی و ذخیره می‌کند و اگر دادهٔ محلی خالی باشد snapshot را بازیابی و سرور را دوباره راه می‌اندازد (فقط اپراتور).",
+     "One-paste Supabase connect: takes the key (or url+key), validates and stores it, and when the local data is empty restores the snapshot and restarts the server (operator only)."),
     ("POST", "/supabase/sync", "☁️ پشتیبان‌گیری فوری snapshot داده‌ها در Supabase Storage (فقط اپراتور).",
      "Take an immediate data snapshot to Supabase Storage (operator only)."),
     ("POST", "/supabase/restore", "♻️ بازیابی آخرین snapshot از Supabase و راه‌اندازی مجدد سرور (فقط اپراتور؛ هنگام اجرای فعال رد می‌شود).",

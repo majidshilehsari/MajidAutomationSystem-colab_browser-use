@@ -22,9 +22,11 @@ with ``Authorization: Bearer <key>`` and ``apikey`` headers.
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import io
 import json
+import re
 import logging
 import os
 import sqlite3
@@ -63,6 +65,76 @@ class SupabaseError(Exception):
     def __init__(self, message: str, status: int = 502) -> None:
         super().__init__(message)
         self.status = status
+
+
+def parse_connection(text: str) -> Dict[str, str]:
+    """Turn ONE pasted blob into ``{"url", "key"}``.
+
+    The operator should not have to juggle two credentials:
+
+    * a legacy ``service_role`` JWT carries the project reference in its
+      ``iss``/``ref`` claims, so the URL is derived and nothing else is asked;
+    * ``<url> <key>`` pasted together (space, comma or newline, any order)
+      also works — that covers the new ``sb_secret_…`` keys, which do NOT
+      embed the project reference;
+    * a bare key whose format hides the URL raises a 400 that tells the
+      operator exactly what to paste instead.
+    """
+    raw = str(text or "").strip()
+    if not raw:
+        raise SupabaseError("متن اتصال Supabase خالی است.", 400)
+    url = ""
+    key = ""
+    for part in [p for p in re.split(r"[\s,;]+", raw) if p]:
+        if part.startswith("http://") or part.startswith("https://"):
+            url = part.rstrip("/")
+        elif not key:
+            key = part
+    if not key:
+        raise SupabaseError("کلید Supabase در متن پیدا نشد.", 400)
+    if not url and key.startswith("eyJ") and key.count(".") == 2:
+        payload = key.split(".")[1]
+        payload += "=" * (-len(payload) % 4)
+        try:
+            claims = json.loads(base64.urlsafe_b64decode(payload.encode("ascii")))
+        except Exception:  # noqa: BLE001 - not a JWT after all
+            claims = {}
+        iss = str(claims.get("iss") or "")
+        ref = str(claims.get("ref") or "")
+        if iss.startswith("http"):
+            url = iss.split("/auth")[0].rstrip("/")
+        elif ref:
+            url = "https://%s.supabase.co" % ref
+    if not url:
+        raise SupabaseError(
+            "این کلید نشانی پروژه را همراه ندارد؛ نشانی و کلید را با هم در یک "
+            "متن بچسبانید، مثلاً: https://xxxx.supabase.co sb_secret_…", 400)
+    return {"url": url, "key": key}
+
+
+def inject_settings(db_path: str, rows: Dict[str, Any]) -> None:
+    """Upsert settings rows straight into a (staged) agent.db file.
+
+    Used by the panel-connect flow: the credentials just typed must survive
+    the restore that follows, because the snapshot's own settings table
+    predates them (and on Colab there is no env cell to fall back on).
+    """
+    conn = sqlite3.connect(db_path)
+    try:
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS settings ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL,"
+            "is_secret INTEGER NOT NULL DEFAULT 0, updated_at REAL NOT NULL)")
+        now = time.time()
+        for name, spec in rows.items():
+            value, secret = spec if isinstance(spec, tuple) else (spec, False)
+            conn.execute(
+                "INSERT OR REPLACE INTO settings (key, value, is_secret, updated_at)"
+                " VALUES (?, ?, ?, ?)",
+                (str(name), str(value), 1 if secret else 0, now))
+        conn.commit()
+    finally:
+        conn.close()
 
 
 def _http(url: str, method: str = "GET", key: str = "", data: Optional[bytes] = None,
@@ -158,6 +230,10 @@ class SupabaseSync:
             with _http(url, "GET", cfg["key"], timeout=20):
                 return
         except urllib.error.HTTPError as exc:
+            if exc.code in (401, 403):
+                raise SupabaseError(
+                    "کلید Supabase پذیرفته نشد (HTTP %d)؛ کلید secret یا "
+                    "service_role را دوباره بررسی کن." % exc.code, 403)
             if exc.code not in (400, 404):
                 raise SupabaseError("cannot reach Supabase: HTTP %d" % exc.code, 502)
         except Exception as exc:  # noqa: BLE001
@@ -293,10 +369,18 @@ class SupabaseSync:
                 count += 1
         return count
 
-    def restore(self, archive: bytes) -> int:
-        """Swap the snapshot into the live data dir, file by file (atomic)."""
+    def restore(self, archive: bytes, inject: Optional[Dict[str, Any]] = None) -> int:
+        """Swap the snapshot into the live data dir, file by file (atomic).
+
+        ``inject`` adds settings rows to the staged agent.db *before* the
+        swap, so credentials entered moments ago survive the restore.
+        """
         with tempfile.TemporaryDirectory(prefix="mas-restore-") as staging:
             count = self.extract_safe(archive, staging)
+            if inject:
+                staged_db = os.path.join(staging, DB_REL)
+                if os.path.exists(staged_db):
+                    inject_settings(staged_db, inject)
             for root, _dirs, files in os.walk(staging):
                 for name in files:
                     src = os.path.join(root, name)

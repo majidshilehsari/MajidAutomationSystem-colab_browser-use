@@ -24,7 +24,7 @@ from . import clipboard
 from .agent import AgentError
 from .engine import TERMINAL_STATES, png_size
 from .vault import VaultError
-from .supabase import SupabaseError
+from .supabase import DEFAULT_BUCKET, SupabaseError, parse_connection
 
 LOG = logging.getLogger("automation.api")
 
@@ -130,6 +130,19 @@ class FlowStore:
         return True
 
 
+def _restart_later(delay: float = 0.6) -> None:
+    """Swap the process image in place: same pid (the start-script supervisor
+    keeps watching it), fresh stores on whatever is now on disk.  argv[0] is
+    made absolute because websockify chdirs into the web root."""
+    def _restart() -> None:
+        try:
+            os.execv(sys.executable,
+                     [sys.executable, os.path.abspath(sys.argv[0])] + sys.argv[1:])
+        except OSError:
+            LOG.error("restart after restore failed; restart manually")
+    threading.Timer(delay, _restart).start()
+
+
 class AutomationApi:
     """Route table shared by every transport."""
 
@@ -175,6 +188,7 @@ class AutomationApi:
             ("POST", "/secrets/*/submit", self.route_secret_submit),
             ("POST", "/secrets/*/revoke", self.route_secret_revoke),
             ("GET", "/secrets/*/status", self.route_secret_status),
+            ("POST", "/supabase/connect", self.route_supabase_connect),
             ("POST", "/supabase/sync", self.route_supabase_sync),
             ("POST", "/supabase/restore", self.route_supabase_restore),
             ("GET", "/supabase/status", self.route_supabase_status),
@@ -633,24 +647,105 @@ class AutomationApi:
             raise ApiError(exc.status, str(exc))
         restarting = bool(payload.get("restart", True))
         if restarting:
-            # Swap the process image in place: same pid (the start-script
-            # supervisor keeps watching it), fresh stores on the restored db.
-            def _restart() -> None:
-                try:
-                    os.execv(sys.executable,
-                             [sys.executable, os.path.abspath(sys.argv[0])]
-                             + sys.argv[1:])
-                except OSError:
-                    LOG.error("restart after restore failed; restart manually")
-            threading.Timer(0.6, _restart).start()
+            _restart_later()
         return json_response(200, {"ok": True, "restored": count,
                                    "restarting": restarting})
+
+    def route_supabase_connect(self, *, body: bytes = b"", **_: Any) -> Response:
+        """One-paste onboarding: validate, store the credentials, and — when
+        this machine holds no data yet (a fresh Colab session) — immediately
+        pour the cloud snapshot in and restart, so the operator never has to
+        set environment variables by hand."""
+        self._require_operator()
+        if self.supabase is None:
+            raise ApiError(409, "همگام‌سازی Supabase در این سرور فعال نیست.")
+        if self.agent is None:
+            raise ApiError(409, "بدون ایجنت نمی‌توان اتصال Supabase را ذخیره کرد.")
+        payload = self.read_json(body)
+        try:
+            connection = str(payload.get("connection") or "").strip()
+            if connection:
+                parsed = parse_connection(connection)
+            else:
+                parsed = {"url": str(payload.get("url") or "").strip().rstrip("/"),
+                          "key": str(payload.get("key") or "").strip()}
+                if not parsed["url"] or not parsed["key"]:
+                    raise SupabaseError("نشانی و کلید Supabase لازم است.", 400)
+        except SupabaseError as exc:
+            raise ApiError(exc.status, str(exc))
+        bucket = str(payload.get("bucket") or "").strip() or DEFAULT_BUCKET
+        try:
+            every = int(payload.get("everyMin") or 10)
+        except (TypeError, ValueError):
+            every = 10
+        cfg = {"url": parsed["url"], "key": parsed["key"], "bucket": bucket,
+               "enabled": True, "everyMin": every}
+        try:
+            # Fail fast on a wrong key/url instead of storing dead credentials
+            # (this also creates the private bucket on first use).
+            self.supabase.ensure_bucket(cfg)
+        except SupabaseError as exc:
+            raise ApiError(exc.status, str(exc))
+        settings = {"supabase.url": parsed["url"],
+                    "supabase.key": parsed["key"],
+                    "supabase.bucket": bucket,
+                    "supabase.enabled": True,
+                    "supabase.everyMin": every}
+        self.agent.save_settings(settings, actor="operator")
+        # Same values, shaped for inject_settings: they are written into the
+        # staged agent.db during the restore so the just-typed credentials
+        # survive the snapshot's older settings table.
+        inject = {"supabase.url": parsed["url"],
+                  "supabase.key": (parsed["key"], True),
+                  "supabase.bucket": bucket,
+                  "supabase.enabled": "1",
+                  "supabase.everyMin": str(every)}
+        restored = 0
+        restarting = False
+        if self._supabase_data_empty() and not (self.engine is not None
+                                                and self.engine.busy()):
+            try:
+                archive = self.supabase.download_latest(cfg)
+            except SupabaseError as exc:
+                LOG.warning("connect: snapshot lookup failed: %s", exc)
+                archive = None
+            if archive is not None:
+                try:
+                    restored = self.supabase.restore(archive, inject=inject)
+                except SupabaseError as exc:
+                    raise ApiError(exc.status, str(exc))
+                restarting = True
+                _restart_later()
+        if not restarting:
+            self.supabase.start()
+        return json_response(200, {"ok": True, "restored": restored,
+                                   "restarting": restarting,
+                                   "url": parsed["url"], "bucket": bucket})
+
+    def _supabase_data_empty(self) -> bool:
+        """True when this data dir holds nothing worth protecting yet — the
+        signal that a cloud snapshot may be poured in without asking.  Any
+        doubt (missing agent, read errors) means "not empty": never overwrite
+        data we could not verify to be absent."""
+        agent = self.agent
+        if agent is None:
+            return False
+        try:
+            if self.store.list():
+                return False
+            st = agent.store
+            return not (st.list_jobs() or st.list_scripts()
+                        or st.list_notes(limit=1) or st.list_operations())
+        except Exception:  # noqa: BLE001 - doubt means "not empty"
+            return False
 
     def route_supabase_status(self, **_: Any) -> Response:
         self._require_operator()
         if self.supabase is None:
             raise ApiError(409, "همگام‌سازی Supabase در این سرور فعال نیست.")
-        return json_response(200, self.supabase.status())
+        data = self.supabase.status()
+        data["dataEmpty"] = self._supabase_data_empty()
+        return json_response(200, data)
 
     def route_runs_list(self, **_: Any) -> Response:
         status = self.engine.status()

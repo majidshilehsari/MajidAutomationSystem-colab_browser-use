@@ -24,6 +24,7 @@ const VALID_TOKEN = 'tok123';
 
 /** Stands in for the server: /info is open, everything else needs the token. */
 function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
+                supaEmpty = false,
                  clipText = null) {
   return async (url, options = {}) => {
     const path = String(url);
@@ -44,11 +45,17 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
       return json({ configured: false, enabled: false, url: '', bucket: '',
                     key: '', source: '', everyMin: 10, running: false,
                     lastSyncAt: null, lastResult: null, lastError: null,
-                    restoredAt: null, uploads: 0 });
+                    restoredAt: null, uploads: 0, dataEmpty: supaEmpty });
     }
-    if (clean.endsWith('/supabase/sync') || clean.endsWith('/supabase/restore')) {
-      return json({ ok: true, result: { uploaded: 20480 }, restored: 3,
-                    restarting: true });
+    if (clean.endsWith('/supabase/connect')) {
+      return json({ ok: true, restored: 0, restarting: false,
+                    url: 'https://proj.supabase.co', bucket: 'mas-snapshots' });
+    }
+    if (clean.endsWith('/supabase/sync')) {
+      return json({ ok: true, result: { uploaded: 20480 } });
+    }
+    if (clean.endsWith('/supabase/restore')) {
+      return json({ ok: true, restored: 3, restarting: true });
     }
     if ((options.method || 'GET').toUpperCase() === 'POST'
         && (clean.endsWith('/clipboard') || clean.endsWith('/agent/devlog')
@@ -333,7 +340,7 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
 async function mount({ readyStateComplete = true, standalone = false, flow = null,
                       status: statusPayload = null, noAgent = false,
-                      clipText = null } = {}) {
+                      clipText = null, supaEmpty = false } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -372,7 +379,7 @@ async function mount({ readyStateComplete = true, standalone = false, flow = nul
     }),
     requestAnimationFrame: window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window) : (fn) => setTimeout(fn, 0),
-    fetch: fakeApi(requests, posts, statusPayload, noAgent, clipText),
+    fetch: fakeApi(requests, posts, statusPayload, noAgent, supaEmpty, clipText),
     // Tracked so cleanup() can stop the sidebar's poll loops, otherwise the
     // test process never exits. Bound to the originals: referencing the global
     // here would recurse into this very wrapper.
@@ -2431,7 +2438,7 @@ test('the flow action line sits first, right under the header, and the name labe
   }
 });
 
-test('the supabase card saves settings, backs up on demand and restores with a confirm', async () => {
+test('the supabase card connects with one paste, saves the knobs, backs up and restores', async () => {
   const page = await mount({});
   try {
     await authenticate(page);
@@ -2439,24 +2446,30 @@ test('the supabase card saves settings, backs up on demand and restores with a c
     const pane = page.doc.getElementById('mas-tab-settings');
     assert.ok(await page.until(() => pane.textContent.includes('پشتیبان‌گیری ابری Supabase')),
       'the supabase card did not render');
-    const urlInput = Array.from(pane.querySelectorAll('input'))
-      .find((node) => (node.placeholder || '').includes('supabase.co'));
-    assert.ok(urlInput, 'the url input is missing');
-    urlInput.value = 'https://proj.supabase.co';
-    const keyInput = Array.from(pane.querySelectorAll('input[type="password"]'))
-      .find((node) => (node.placeholder || '').includes('service_role'));
-    assert.ok(keyInput, 'the key input must be a password field');
-    keyInput.value = 'sb-secret-x';
+    const connInput = Array.from(pane.querySelectorAll('input'))
+      .find((node) => (node.placeholder || '').includes('sb_secret'));
+    assert.ok(connInput, 'the one-paste connection input is missing');
+    connInput.value = 'https://proj.supabase.co sb_secret_x';
+
+    page.byText('button', '🔗 اتصال و بازیابی').dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    const connect = page.posts.find((p) => p.url.endsWith('/supabase/connect'));
+    assert.ok(connect, 'the connect button did not call /supabase/connect');
+    const connectBody = JSON.parse(connect.body);
+    assert.equal(connectBody.connection, 'https://proj.supabase.co sb_secret_x');
+    assert.equal(connectBody.bucket, 'mas-snapshots');
+    assert.equal(connectBody.everyMin, 10);
 
     page.byText('button', '💾 ذخیرهٔ تنظیمات').dispatchEvent(new page.window.Event('click'));
     await page.wait(30);
-    const saved = page.posts.find((p) => p.url.endsWith('/agent/settings'));
-    assert.ok(saved, 'the settings were never posted');
+    const saved = page.posts.filter((p) => p.url.endsWith('/agent/settings')).pop();
+    assert.ok(saved, 'the knobs were never posted');
     const body = JSON.parse(saved.body);
-    assert.equal(body['supabase.url'], 'https://proj.supabase.co');
-    assert.equal(body['supabase.key'], 'sb-secret-x');
     assert.equal(body['supabase.bucket'], 'mas-snapshots');
+    assert.equal(body['supabase.everyMin'], 10);
     assert.equal(body['supabase.enabled'], true);
+    assert.ok(!('supabase.url' in body), 'the card must not post the url any more');
+    assert.ok(!('supabase.key' in body), 'the card must not post a raw key any more');
 
     page.byText('button', '📤 پشتیبان‌گیری فوری').dispatchEvent(new page.window.Event('click'));
     await page.wait(30);
@@ -2475,5 +2488,62 @@ test('the supabase card saves settings, backs up on demand and restores with a c
     assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
+  }
+});
+
+test('a fresh session is asked for the Supabase connection when entering the panel', async () => {
+  const page = await mount({ supaEmpty: true });
+  try {
+    await authenticate(page);
+    assert.ok(await page.until(() => Array.from(page.doc.querySelectorAll('.mas-modal'))
+      .some((node) => node.textContent.includes('اتصال به Supabase'))),
+      'the onboarding modal never opened');
+    const modal = Array.from(page.doc.querySelectorAll('.mas-modal'))
+      .find((node) => node.textContent.includes('اتصال به Supabase'));
+    const conn = Array.from(modal.querySelectorAll('textarea'))
+      .find((node) => (node.placeholder || '').includes('sb_secret'));
+    assert.ok(conn, 'the modal has no one-paste field');
+    conn.value = 'https://proj.supabase.co sb_secret_x';
+    const go = Array.from(modal.querySelectorAll('button'))
+      .find((node) => node.textContent.includes('اتصال و بازیابی'));
+    go.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const connect = page.posts.find((p) => p.url.endsWith('/supabase/connect'));
+    assert.ok(connect, 'the modal did not call /supabase/connect');
+    assert.equal(JSON.parse(connect.body).connection, 'https://proj.supabase.co sb_secret_x');
+    assert.ok(!page.doc.querySelector('.mas-modal'), 'the modal must close after connecting');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the onboarding modal can be dismissed and never nags a machine with data', async () => {
+  const page = await mount({ supaEmpty: true });
+  try {
+    await authenticate(page);
+    assert.ok(await page.until(() => page.doc.querySelector('.mas-modal')));
+    const modal = page.doc.querySelector('.mas-modal');
+    const later = Array.from(modal.querySelectorAll('button'))
+      .find((node) => node.textContent.trim() === 'بعداً');
+    assert.ok(later, 'there is no way to dismiss the modal');
+    later.dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    assert.ok(!page.doc.querySelector('.mas-modal'), 'dismiss did not close the modal');
+    assert.ok(!page.posts.some((p) => p.url.endsWith('/supabase/connect')),
+      'dismiss must not connect anything');
+  } finally {
+    await page.cleanup();
+  }
+
+  // default fakeApi reports dataEmpty:false -> entering the panel asks nothing
+  const busy = await mount({});
+  try {
+    await authenticate(busy);
+    await busy.wait(80);
+    assert.ok(!busy.doc.querySelector('.mas-modal'),
+      'a machine that already has data must never see the modal');
+  } finally {
+    await busy.cleanup();
   }
 });

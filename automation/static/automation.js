@@ -713,6 +713,64 @@ function modalCard(children) {
   return close;
 }
 
+/* ------------------------------------------------------------------ *
+ * Supabase onboarding: ask for the connection when the panel opens
+ * ------------------------------------------------------------------ */
+
+let supaOnboardTried = false;
+
+function supaReloadSoon() {
+  setTimeout(() => {
+    // wrapped: in a jsdom teardown the global window is already gone
+    try { window.location.reload(); } catch (error) { /* no-op */ }
+  }, 6000);
+}
+
+function openSupaModal(onDone) {
+  const conn = el('textarea', { class: 'mas-input', rows: 3, dir: 'ltr',
+                                placeholder: t('supaConnPh') });
+  const close = modalCard([
+    el('div', { class: 'mas-card-head' },
+       [el('b', { text: '☁️ ' + t('supaOnboardTitle') })]),
+    el('p', { class: 'mas-hint', text: t('supaOnboardHint') }),
+    el('label', { class: 'mas-field' },
+      [el('span', { text: t('supaConnLabel') }), conn]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('🔗 ' + t('supaConnectBtn'), async () => {
+        const value = conn.value.trim();
+        if (!value) { toast(t('supaConnEmpty'), 'warn'); return; }
+        try {
+          const res = await api('/supabase/connect', { method: 'POST',
+                                                       body: { connection: value } });
+          close();
+          if (res.restarting) {
+            toast(t('supaRestoring'), 'warn', { sticky: true });
+            supaReloadSoon();
+          } else {
+            toast(res.restored ? t('supaConnectedRestore') : t('supaConnected'), 'ok');
+          }
+          if (onDone) onDone(res);
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+      button(t('supaLater'), () => close()),
+    ]),
+  ]);
+  return close;
+}
+
+async function maybeSupaOnboard() {
+  // Once per page load, only for an operator who is already in, and only when
+  // nothing is configured AND nothing is stored locally (a fresh Colab
+  // session): exactly the moment a cloud snapshot can be poured in without
+  // risking anybody's data. A machine that has data is never nagged.
+  if (supaOnboardTried || !state.token) return;
+  supaOnboardTried = true;
+  let st;
+  try { st = await api('/supabase/status'); } catch (error) { return; }
+  if (st.configured || !st.dataEmpty) return;
+  openSupaModal();
+}
+
 async function openFlowModal(item) {
   let detail;
   try {
@@ -1100,6 +1158,7 @@ async function refreshStatus() {
   setConnected(true);
   renderTokenBar(false);
   renderStatus();
+  maybeSupaOnboard();
   if (currentTab() === 'log') renderLog();
   // Redraw the step list only when the highlighted step moved, otherwise an
   // editor the human opened would close under their hands every poll.
@@ -4673,19 +4732,18 @@ async function renderSettings() {
   // Round 15: Supabase snapshot card. Configuration lives in the agent
   // settings (supabase.* keys; the key itself is a SECRET setting), while the
   // boot restore on a fresh machine reads the SUPABASE_* environment.
-  const supaUrl = el('input', { class: 'mas-input', dir: 'ltr', placeholder: 'https://xxxxxxxx.supabase.co' });
-  const supaKey = el('input', { class: 'mas-input', dir: 'ltr', type: 'password', placeholder: t('supaKeyPh') });
+  const supaConn = el('input', { class: 'mas-input', dir: 'ltr', placeholder: t('supaConnPh') });
   const supaBucket = el('input', { class: 'mas-input', dir: 'ltr', placeholder: 'mas-snapshots' });
   const supaEvery = el('input', { class: 'mas-input', type: 'number', min: '1', max: '1440', placeholder: '10' });
   const supaStatus = el('p', { class: 'mas-hint', text: '…' });
   const loadSupa = async () => {
     try {
       const st = await api('/supabase/status');
-      if (st.url) supaUrl.value = st.url;
       if (st.bucket) supaBucket.value = st.bucket;
-      if (st.key) supaKey.placeholder = st.key;
       supaEvery.value = st.everyMin || 10;
-      const bits = [`${t('supaState')}: ${st.enabled ? '🟢' : '⚪'}${st.source ? ` (${st.source})` : ''}`];
+      const bits = [];
+      if (st.url) bits.push(`🔗 ${st.url}${st.key ? ` · ${st.key}` : ''}`);
+      bits.push(`${t('supaState')}: ${st.enabled ? '🟢' : '⚪'}${st.source ? ` (${st.source})` : ''}`);
       if (st.lastSyncAt) bits.push(`${t('supaLast')}: ${tehranWhen(st.lastSyncAt)}`);
       if (st.lastError) bits.push(`❌ ${st.lastError}`);
       else if (st.lastResult && st.lastResult.uploaded) {
@@ -4698,21 +4756,40 @@ async function renderSettings() {
   const supaCard = el('div', { class: 'mas-box mas-card' }, [
     el('div', { class: 'mas-card-head' }, [el('b', { text: '☁️ ' + t('supaTitle') })]),
     el('p', { class: 'mas-hint', text: t('supaHint') }),
-    supaUrl, supaKey,
+    el('p', { class: 'mas-hint', text: t('supaConnHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      supaConn,
+      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '🔗 ' + t('supaConnectBtn'), onClick: async () => {
+        const value = supaConn.value.trim();
+        if (!value) { toast(t('supaConnEmpty'), 'warn'); return; }
+        try {
+          const res = await api('/supabase/connect', { method: 'POST', body: {
+            connection: value,
+            bucket: supaBucket.value.trim() || 'mas-snapshots',
+            everyMin: parseInt(supaEvery.value, 10) || 10,
+          } });
+          supaConn.value = '';
+          if (res.restarting) {
+            toast(t('supaRestoring'), 'warn', { sticky: true });
+            supaReloadSoon();
+          } else {
+            toast(res.restored ? t('supaConnectedRestore') : t('supaConnected'), 'ok');
+            loadSupa();
+          }
+        } catch (error) { toast(error.message, 'error'); }
+      } }),
+    ]),
     el('div', { class: 'mas-row mas-wrap' }, [supaBucket, supaEvery]),
     supaStatus,
     el('div', { class: 'mas-row mas-wrap' }, [
-      el('button', { class: 'mas-btn mas-primary', type: 'button', text: '💾 ' + t('supaSave'), onClick: async () => {
+      el('button', { class: 'mas-btn', type: 'button', text: '💾 ' + t('supaSave'), onClick: async () => {
         const body = {
-          'supabase.url': supaUrl.value.trim(),
           'supabase.bucket': supaBucket.value.trim() || 'mas-snapshots',
           'supabase.enabled': true,
           'supabase.everyMin': parseInt(supaEvery.value, 10) || 10,
         };
-        if (supaKey.value.trim()) body['supabase.key'] = supaKey.value.trim();
         try {
           await api('/agent/settings', { method: 'POST', body });
-          supaKey.value = '';
           toast(t('supaSaved'), 'ok');
           loadSupa();
         } catch (error) { toast(error.message, 'error'); }
@@ -4729,10 +4806,7 @@ async function renderSettings() {
         try {
           await api('/supabase/restore', { method: 'POST', body: {} });
           toast(t('supaRestoring'), 'warn', { sticky: true });
-          setTimeout(() => {
-            // wrapped: in a jsdom teardown the global window is already gone
-            try { window.location.reload(); } catch (error) { /* no-op */ }
-          }, 6000);
+          supaReloadSoon();
         } catch (error) { toast(error.message, 'error'); }
       } }),
     ]),

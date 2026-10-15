@@ -22,8 +22,9 @@ from unittest import mock
 
 from automation.api import ApiError, AutomationApi, FlowStore
 from automation.agent import PLAIN_SETTINGS, SECRET_SETTINGS
-from automation.supabase import (SupabaseError, SupabaseSync, mask_key,
-                                 restore_on_boot)
+from automation.agent_store import AgentStore
+from automation.supabase import (SupabaseError, SupabaseSync, inject_settings,
+                                 mask_key, parse_connection, restore_on_boot)
 
 ENV = {
     "SUPABASE_URL": "https://proj.supabase.co",
@@ -286,7 +287,8 @@ class ApiRouteTests(unittest.TestCase):
         self.api._last_verdict = "agent"
         for call in (lambda: self.api.route_supabase_status(),
                      lambda: self.api.route_supabase_sync(body=b"{}"),
-                     lambda: self.api.route_supabase_restore(body=b"{}")):
+                     lambda: self.api.route_supabase_restore(body=b"{}"),
+                     lambda: self.api.route_supabase_connect(body=b"{}")):
             with self.assertRaises(ApiError) as ctx:
                 call()
             self.assertEqual(ctx.exception.status, 403)
@@ -307,3 +309,230 @@ class ApiRouteTests(unittest.TestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+def make_jwt(claims):
+    import base64
+
+    def part(obj):
+        raw = base64.urlsafe_b64encode(json.dumps(obj).encode()).decode()
+        return raw.rstrip("=")
+    return "%s.%s.%s" % (part({"alg": "HS256"}), part(claims), part({"sig": 1}))
+
+
+def make_empty_dir():
+    tmp = tempfile.mkdtemp()
+    os.makedirs(os.path.join(tmp, "automation"), exist_ok=True)
+    os.makedirs(os.path.join(tmp, "flows"), exist_ok=True)
+    return tmp
+
+
+class FakeAgent:
+    """Minimal stand-in: the connect route needs .store and .save_settings."""
+
+    def __init__(self, store):
+        self.store = store
+
+    def save_settings(self, data, actor="operator"):
+        for key, value in data.items():
+            secret = key in SECRET_SETTINGS
+            if secret and value in ("", None):
+                self.store.delete_setting(key, actor=actor)
+            else:
+                self.store.set_setting(key, value, secret=secret, actor=actor)
+        return self.store.list_settings()
+
+
+class ParseConnectionTests(unittest.TestCase):
+    def test_jwt_carries_its_own_url(self):
+        jwt = make_jwt({"role": "service_role",
+                        "iss": "https://refxyz.supabase.co/auth/v1"})
+        self.assertEqual(parse_connection(jwt),
+                         {"url": "https://refxyz.supabase.co", "key": jwt})
+
+    def test_jwt_ref_claim_fallback(self):
+        jwt = make_jwt({"role": "service_role", "ref": "refabc"})
+        self.assertEqual(parse_connection(jwt)["url"], "https://refabc.supabase.co")
+
+    def test_url_and_key_in_one_blob_either_order(self):
+        a = parse_connection("https://x.supabase.co sb_secret_abc")
+        b = parse_connection("sb_secret_abc,\nhttps://x.supabase.co/")
+        self.assertEqual(a, {"url": "https://x.supabase.co", "key": "sb_secret_abc"})
+        self.assertEqual(a, b)
+
+    def test_key_without_url_is_a_clear_400(self):
+        for bad in ("", "   ", "sb_secret_abc", "https://x.supabase.co"):
+            with self.assertRaises(SupabaseError) as ctx:
+                parse_connection(bad)
+            self.assertEqual(ctx.exception.status, 400)
+        with self.assertRaises(SupabaseError) as ctx:
+            parse_connection("sb_secret_abc")
+        self.assertIn("نشانی", str(ctx.exception))
+
+
+class InjectSettingsTests(unittest.TestCase):
+    def test_creates_table_upserts_and_flags_secrets(self):
+        tmp = tempfile.mkdtemp()
+        try:
+            db = os.path.join(tmp, "agent.db")
+            inject_settings(db, {"supabase.url": "https://x.supabase.co",
+                                 "supabase.key": ("sb-secret-x", True)})
+            inject_settings(db, {"supabase.key": ("sb-secret-y", True)})
+            conn = sqlite3.connect(db)
+            rows = dict(conn.execute(
+                "SELECT key, value || ':' || is_secret FROM settings").fetchall())
+            conn.close()
+            self.assertEqual(rows["supabase.url"], "https://x.supabase.co:0")
+            self.assertEqual(rows["supabase.key"], "sb-secret-y:1")
+        finally:
+            shutil.rmtree(tmp, ignore_errors=True)
+
+    def test_restore_injects_credentials_into_the_staged_db(self):
+        src = make_data_dir()
+        dst = make_empty_dir()
+        try:
+            archive = SupabaseSync(src).build_archive()
+            count = SupabaseSync(dst).restore(
+                archive, inject={"supabase.key": ("sb-new", True),
+                                 "supabase.enabled": "1"})
+            self.assertGreater(count, 0)
+            conn = sqlite3.connect(os.path.join(dst, "automation", "agent.db"))
+            row = conn.execute("SELECT value, is_secret FROM settings"
+                               " WHERE key = 'supabase.key'").fetchone()
+            conn.close()
+            self.assertEqual(row, ("sb-new", 1))
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+            shutil.rmtree(dst, ignore_errors=True)
+
+
+class ConnectRouteTests(unittest.TestCase):
+    CONN = "https://proj.supabase.co sb-secret-0123456789abcdef"
+
+    def setUp(self):
+        self.empty = make_empty_dir()
+        self.store = AgentStore(self.empty)
+        self.sync = SupabaseSync(self.empty)
+        self.sync.start = lambda: None  # no background thread in tests
+        self.api = AutomationApi(None, FlowStore(self.empty), data_dir=self.empty,
+                                 token="tok", supabase=self.sync,
+                                 agent=FakeAgent(self.store))
+
+    def tearDown(self):
+        shutil.rmtree(self.empty, ignore_errors=True)
+
+    def _archive_from_a_populated_dir(self):
+        src = make_data_dir()
+        try:
+            return SupabaseSync(src).build_archive()
+        finally:
+            shutil.rmtree(src, ignore_errors=True)
+
+    def test_connect_on_empty_data_restores_and_restarts(self):
+        archive = self._archive_from_a_populated_dir()
+        fake = FakeUrlopen({
+            ("GET", "/storage/v1/bucket/"): FakeResponse(b"{}"),
+            ("GET", "snapshot-latest"): FakeResponse(archive),
+        })
+        body = json.dumps({"connection": self.CONN}).encode()
+        with mock.patch("urllib.request.urlopen", fake), \
+                mock.patch("automation.api._restart_later") as restart:
+            status, _headers, raw = self.api.route_supabase_connect(body=body)
+        self.assertEqual(status, 200)
+        data = json.loads(raw.decode())
+        self.assertTrue(data["restarting"])
+        self.assertGreater(data["restored"], 0)
+        restart.assert_called_once()
+        # the credentials were stored…
+        self.assertEqual(self.store.get_setting("supabase.url"),
+                         "https://proj.supabase.co")
+        # …and injected into the restored db so they survive the restart
+        conn = sqlite3.connect(os.path.join(self.empty, "automation", "agent.db"))
+        row = conn.execute("SELECT value, is_secret FROM settings"
+                           " WHERE key = 'supabase.key'").fetchone()
+        conn.close()
+        self.assertEqual(row, ("sb-secret-0123456789abcdef", 1))
+        # the flow library came back too
+        self.assertTrue(os.path.exists(os.path.join(self.empty, "flows", "google.json")))
+
+    def test_connect_never_touches_a_machine_that_has_data(self):
+        populated = make_data_dir()
+        shutil.rmtree(self.empty, ignore_errors=True)
+        self.empty = populated
+        store = AgentStore(populated)
+        sync = SupabaseSync(populated)
+        started = []
+        sync.start = lambda: started.append(True)
+        api = AutomationApi(None, FlowStore(populated), data_dir=populated,
+                            token="tok", supabase=sync, agent=FakeAgent(store))
+        fake = FakeUrlopen({("GET", "/storage/v1/bucket/"): FakeResponse(b"{}")})
+        body = json.dumps({"connection": self.CONN}).encode()
+        with mock.patch("urllib.request.urlopen", fake), \
+                mock.patch("automation.api._restart_later") as restart:
+            status, _headers, raw = api.route_supabase_connect(body=body)
+        try:
+            data = json.loads(raw.decode())
+            self.assertEqual(status, 200)
+            self.assertFalse(data["restarting"])
+            self.assertEqual(data["restored"], 0)
+            restart.assert_not_called()
+            self.assertTrue(started)  # the periodic sync took over instead
+            self.assertTrue(os.path.exists(os.path.join(populated, "flows", "google.json")))
+            self.assertEqual(store.get_setting("supabase.bucket"), "mas-snapshots")
+            # no snapshot download was ever attempted
+            self.assertFalse([c for c in fake.calls if "snapshot-latest" in c["url"]])
+        finally:
+            shutil.rmtree(populated, ignore_errors=True)
+
+    def test_wrong_key_is_refused_before_anything_is_stored(self):
+        fake = FakeUrlopen({("GET", "/storage/v1/bucket/"): 401})
+        body = json.dumps({"connection": self.CONN}).encode()
+        with mock.patch("urllib.request.urlopen", fake):
+            with self.assertRaises(ApiError) as ctx:
+                self.api.route_supabase_connect(body=body)
+        self.assertEqual(ctx.exception.status, 403)
+        self.assertIn("کلید", str(ctx.exception))
+        self.assertIsNone(self.store.get_setting("supabase.key"))
+
+    def test_connect_without_agent_is_409(self):
+        api = AutomationApi(None, FlowStore(self.empty), data_dir=self.empty,
+                            token="tok", supabase=SupabaseSync(self.empty))
+        body = json.dumps({"connection": self.CONN}).encode()
+        with self.assertRaises(ApiError) as ctx:
+            api.route_supabase_connect(body=body)
+        self.assertEqual(ctx.exception.status, 409)
+
+    def test_bad_connection_text_is_a_400(self):
+        body = json.dumps({"connection": "sb_secret_only"}).encode()
+        with self.assertRaises(ApiError) as ctx:
+            self.api.route_supabase_connect(body=body)
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_first_ever_connect_without_a_snapshot_just_configures(self):
+        fake = FakeUrlopen({("GET", "/storage/v1/bucket/"): FakeResponse(b"{}")})
+        body = json.dumps({"connection": self.CONN}).encode()
+        with mock.patch("urllib.request.urlopen", fake), \
+                mock.patch("automation.api._restart_later") as restart:
+            status, _headers, raw = self.api.route_supabase_connect(body=body)
+        data = json.loads(raw.decode())
+        self.assertEqual(status, 200)
+        self.assertFalse(data["restarting"])
+        self.assertEqual(data["restored"], 0)
+        restart.assert_not_called()
+        self.assertEqual(self.store.get_setting("supabase.url"),
+                         "https://proj.supabase.co")
+
+    def test_status_reports_whether_local_data_is_empty(self):
+        with mock.patch.dict(os.environ, ENV):
+            _status, _headers, raw = self.api.route_supabase_status()
+        self.assertTrue(json.loads(raw.decode())["dataEmpty"])
+        populated = make_data_dir()
+        try:
+            api2 = AutomationApi(None, FlowStore(populated), data_dir=populated,
+                                 token="tok", supabase=SupabaseSync(populated),
+                                 agent=FakeAgent(AgentStore(populated)))
+            with mock.patch.dict(os.environ, ENV):
+                _status, _headers, raw2 = api2.route_supabase_status()
+            self.assertFalse(json.loads(raw2.decode())["dataEmpty"])
+        finally:
+            shutil.rmtree(populated, ignore_errors=True)
