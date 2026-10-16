@@ -628,6 +628,35 @@ class TestColabTrackIsUntouched(unittest.TestCase):
                              "a runtime secret or log is tracked: %s" % path)
 
 
+class TestColabPersianKeyboard(unittest.TestCase):
+    """On a raw "us" X layout no Persian character can be produced at all —
+    neither by the operator through noVNC nor by the agent. The Colab track
+    must load the fa group with a toggle, exactly like the container track."""
+
+    def setUp(self):
+        self.start = read(os.path.join(REPO_ROOT, "start_colab_browser.sh"))
+        self.install = read(os.path.join(REPO_ROOT, "install.sh"))
+
+    def test_installer_ships_the_xkb_tools(self):
+        self.assertIn("x11-xkb-utils", self.install,
+                      "setxkbmap must be installed on Colab")
+        self.assertIn("numlockx", self.install,
+                      "the keypad must send digits, not arrows")
+
+    def test_launcher_loads_both_layouts_with_a_toggle(self):
+        self.assertIn("setxkbmap", self.start)
+        self.assertIn("us,fa", self.start)
+        self.assertIn("grp:alt_shift_toggle", self.start)
+        self.assertIn('env DISPLAY="$DISPLAY_ID" setxkbmap', self.start,
+                      "the layout must be applied to the virtual display")
+
+    def test_keyboard_setup_is_best_effort_and_knobbable(self):
+        self.assertIn("command -v setxkbmap", self.start,
+                      "a missing tool must never stop the desktop")
+        self.assertIn("PERSIAN_KEYBOARD", self.start)
+        self.assertIn("NUMLOCK", self.start)
+
+
 class TestGuide(unittest.TestCase):
     def setUp(self):
         if not os.path.isfile(GUIDE):

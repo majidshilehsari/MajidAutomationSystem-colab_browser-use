@@ -115,6 +115,47 @@ if [[ ! -S /tmp/.X11-unix/X1 ]]; then
   exit 1
 fi
 
+# -- the Persian keyboard ------------------------------------------------
+# noVNC forwards raw key events; the character that finally reaches Chrome is
+# decided by the X keyboard layout, not by the visitor's own OS layout. With
+# only "us" loaded there is simply no way to produce Persian characters, so
+# the desktop always starts with both groups and Alt+Shift as the toggle.
+# Everything here is best-effort on purpose: a missing tool costs one
+# convenience and must never stop the desktop from being served.
+XKB_MODEL=${XKB_MODEL:-pc104}
+XKB_LAYOUTS=${XKB_LAYOUTS:-us,fa}
+XKB_OPTIONS=${XKB_OPTIONS:-grp:alt_shift_toggle}
+PERSIAN_KEYBOARD=${PERSIAN_KEYBOARD:-on}
+NUMLOCK=${NUMLOCK:-on}
+
+configure_keyboard() {
+  local layouts="$XKB_LAYOUTS"
+  if [[ "$PERSIAN_KEYBOARD" == "off" ]]; then
+    layouts="us"
+  fi
+  local args=(-model "$XKB_MODEL" -layout "$layouts")
+  if [[ -n "$XKB_OPTIONS" && "$layouts" == *","* ]]; then
+    args+=(-option "$XKB_OPTIONS")
+  fi
+  if command -v setxkbmap >/dev/null 2>&1; then
+    if env DISPLAY="$DISPLAY_ID" setxkbmap "${args[@]}" \
+        2>>"$LOG_DIR/keyboard.log"; then
+      printf 'Keyboard layouts: %s (toggle: %s)\n' "$layouts" "${XKB_OPTIONS:-none}"
+    else
+      printf 'Warning: setxkbmap failed; Persian typing may not work (see %s).\n' \
+        "$LOG_DIR/keyboard.log" >&2
+    fi
+  else
+    printf 'Warning: setxkbmap is missing; the X layout stays at its default.\n' >&2
+  fi
+  if [[ "$NUMLOCK" == "on" ]] && command -v numlockx >/dev/null 2>&1; then
+    env DISPLAY="$DISPLAY_ID" numlockx on 2>>"$LOG_DIR/keyboard.log" \
+      || printf 'Warning: numlockx failed; the keypad may send arrows.\n' >&2
+  fi
+}
+
+configure_keyboard
+
 nohup env DISPLAY="$DISPLAY_ID" dbus-launch --exit-with-session fluxbox \
   >"$LOG_DIR/fluxbox.log" 2>&1 &
 printf '%s\n' "$!" >"$STATE_DIR/fluxbox.pid"

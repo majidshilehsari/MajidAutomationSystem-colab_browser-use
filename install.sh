@@ -17,11 +17,13 @@ apt-get install -y -qq --no-install-recommends \
   fonts-liberation \
   iproute2 \
   novnc \
+  numlockx \
   openssl \
   procps \
   scrot \
   websockify \
   wmctrl \
+  x11-xkb-utils \
   x11-utils \
   xclip \
   xdotool \
