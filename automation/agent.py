@@ -51,6 +51,19 @@ from automation.telegram_client import (CHANNELS, MODE_ACCOUNT, MODE_BOT, MODE_O
 # typo cannot create a key that silently does nothing, and a hostile page cannot
 # invent one.
 PLAIN_SETTINGS = {
+    # Round 18: the operator's interface preferences travel with the account,
+    # not with the browser. Every ui.* value is written to localStorage for
+    # instant effect AND to this settings table; after login on any machine
+    # or browser the panel reads them back and looks exactly like before.
+    "ui.theme": str,
+    "ui.lang": str,
+    "ui.tab": str,
+    "ui.agentSub": str,
+    "ui.tgSub": str,
+    "ui.dbSub": str,
+    "ui.panel": str,
+    "ui.chatProvider": str,
+    "ui.chatContext": str,
     "supabase.url": str,
     "supabase.bucket": str,
     "supabase.enabled": bool,

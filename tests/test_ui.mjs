@@ -24,7 +24,7 @@ const VALID_TOKEN = 'tok123';
 
 /** Stands in for the server: /info is open, everything else needs the token. */
 function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
-                supaEmpty = false, supaOn = false,
+                supaEmpty = false, supaOn = false, uiPrefs = null,
                  clipText = null) {
   return async (url, options = {}) => {
     const path = String(url);
@@ -92,7 +92,7 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
     }
     if (clean.endsWith('/agent')) {
       return json({
-        settings: { 'ui.theme': 'dark' },
+        settings: Object.assign({ 'ui.theme': 'dark' }, uiPrefs),
         llm: { provider: 'ai-browser', chatProvider: 'deepseek',
                              configured: true, browser: { available: false } },
         telegram: { mode: 'bot', targets: [] },
@@ -358,7 +358,8 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
 async function mount({ readyStateComplete = true, standalone = false, flow = null,
                       status: statusPayload = null, noAgent = false,
-                      clipText = null, supaEmpty = false, supaOn = false } = {}) {
+                      clipText = null, supaEmpty = false, supaOn = false,
+                      uiPrefs = null } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -397,7 +398,7 @@ async function mount({ readyStateComplete = true, standalone = false, flow = nul
     }),
     requestAnimationFrame: window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window) : (fn) => setTimeout(fn, 0),
-    fetch: fakeApi(requests, posts, statusPayload, noAgent, supaEmpty, supaOn, clipText),
+    fetch: fakeApi(requests, posts, statusPayload, noAgent, supaEmpty, supaOn, uiPrefs, clipText),
     // Tracked so cleanup() can stop the sidebar's poll loops, otherwise the
     // test process never exits. Bound to the originals: referencing the global
     // here would recurse into this very wrapper.
@@ -2710,6 +2711,64 @@ test('cloud versions are listed and each one can be restored, local backups too'
 
     page.window.confirm = original;
     assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('stored interface preferences are applied after login on a fresh browser', async () => {
+  // localStorage starts empty — exactly like another browser or machine
+  const page = await mount({ uiPrefs: {
+    'ui.theme': 'light', 'ui.tab': 'db', 'ui.dbSub': 'shots', 'ui.agentSub': 'telegram',
+  } });
+  try {
+    await authenticate(page);
+    assert.ok(await page.until(() =>
+      page.doc.documentElement.dataset.theme === 'light'),
+      'the stored theme was not applied');
+    assert.ok(await page.until(() => {
+      const node = page.doc.querySelector('.mas-tab[data-tab="db"]');
+      return node && node.classList.contains('is-active');
+    }), 'the stored tab was not opened');
+    assert.equal(page.window.localStorage.getItem('mas.tab'), 'db',
+      'localStorage must mirror the database preference');
+    assert.ok(await page.until(() => {
+      const active = page.doc.querySelector('#mas-tab-db [data-dbsub].is-active');
+      return active && active.dataset.dbsub === 'shots';
+    }), 'the stored database sub-tab was not applied');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('changing theme, tab or language writes the preference to the database', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    const bodies = () => page.posts
+      .filter((item) => item.url.endsWith('/agent/settings'))
+      .map((item) => JSON.parse(item.body));
+
+    clickTab(page, 'settings');
+    await page.wait(20);
+    page.byText('button', '☀️ روشن').dispatchEvent(new page.window.Event('click'));
+    await page.wait(30);
+    assert.ok(bodies().some((body) => body['ui.theme'] === 'light'),
+      'the theme change never reached the database');
+
+    clickTab(page, 'flow');
+    await page.wait(20);
+    assert.ok(bodies().some((body) => body['ui.tab'] === 'flow'),
+      'the tab choice never reached the database');
+
+    clickTab(page, 'settings');
+    await page.wait(20);
+    page.byText('button', 'EN').dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+    assert.ok(bodies().some((body) => body['ui.lang'] === 'en'),
+      'the language choice never reached the database');
+    assert.equal(page.window.localStorage.getItem('mas.lang'), 'en');
   } finally {
     await page.cleanup();
   }

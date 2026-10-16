@@ -32,6 +32,19 @@ const LS = {
   theme: 'mas.theme',
 };
 
+/* One helper owns every interface preference: localStorage for the instant
+ * effect (and as the pre-login fallback), the database so the very same look
+ * and layout waits for the operator on any other machine or browser after
+ * the password is typed. */
+let applyingServerPrefs = false;
+
+function saveUiPref(name, value) {
+  if (applyingServerPrefs || !state.token) return;
+  api('/agent/settings', { method: 'POST', body: { ['ui.' + name]: String(value) } })
+    .catch(() => { /* no agent here — the local choice still stands */ });
+}
+
+
 const state = {
   lang: localStorage.getItem(LS.lang) || 'fa',
   token: localStorage.getItem(LS.token) || '',
@@ -374,6 +387,7 @@ function setPanelOpen(open) {
   document.getElementById('mas-panel').hidden = !open;
   document.getElementById('mas-toggle').hidden = open;
   localStorage.setItem(LS.panel, open ? '1' : '0');
+  saveUiPref('panel', open ? '1' : '0');
   if (open) {
     selectTab(currentTab());
     refreshStatus();
@@ -394,6 +408,7 @@ function selectTab(name) {
   });
   if (name !== 'chat') stopChatPolling();
   try { localStorage.setItem(LS.tab, name); } catch (_) { /* quota */ }
+  saveUiPref('tab', name);
   if (name === 'chat') renderChat();
   if (name === 'library') renderOperations();
   if (name === 'pages') renderPages();
@@ -416,10 +431,55 @@ async function refreshAgentTabs() {
   let missing = false;
   try {
     const data = await api('/agent');
-    // The chosen theme lives in the database, so it follows the operator to
-    // any browser; localStorage is only the pre-login fallback.
-    const saved = data && data.settings ? data.settings['ui.theme'] : null;
-    if (saved === 'dark' || saved === 'light') applyTheme(saved, { save: false });
+    // The interface preferences live in the database, so they follow the
+    // operator to any browser; localStorage is only the pre-login fallback.
+    const prefs = (data && data.settings) || {};
+    const str = (value) => (typeof value === 'string' ? value : '');
+    applyingServerPrefs = true;
+    try {
+      if (prefs['ui.theme'] === 'dark' || prefs['ui.theme'] === 'light') {
+        applyTheme(prefs['ui.theme'], { save: false });
+      }
+      let langChanged = false;
+      if ((prefs['ui.lang'] === 'fa' || prefs['ui.lang'] === 'en')
+          && prefs['ui.lang'] !== state.lang) {
+        state.lang = prefs['ui.lang'];
+        try { localStorage.setItem(LS.lang, state.lang); } catch (_) { /* quota */ }
+        langChanged = true;
+      }
+      if (TAB_ORDER.includes(str(prefs['ui.tab']))) {
+        try { localStorage.setItem(LS.tab, prefs['ui.tab']); } catch (_) { /* quota */ }
+      }
+      if (str(prefs['ui.agentSub'])) state.agentSub = prefs['ui.agentSub'];
+      if (str(prefs['ui.tgSub'])) state.tgSub = prefs['ui.tgSub'];
+      if (str(prefs['ui.dbSub'])) state.dbSub = prefs['ui.dbSub'];
+      let panelPref = null;
+      if (prefs['ui.panel'] === '1' || prefs['ui.panel'] === '0') {
+        panelPref = prefs['ui.panel'];
+        try { localStorage.setItem(LS.panel, panelPref); } catch (_) { /* quota */ }
+      }
+      if (str(prefs['ui.chatProvider'])) {
+        state.chatProvider = prefs['ui.chatProvider'];
+        try { localStorage.setItem(LS.provider, state.chatProvider); } catch (_) { /* quota */ }
+      }
+      if (prefs['ui.chatContext'] === '1' || prefs['ui.chatContext'] === '0') {
+        state.chatContext = prefs['ui.chatContext'] === '1';
+        try { localStorage.setItem(LS.context, prefs['ui.chatContext']); } catch (_) { /* quota */ }
+      }
+      const standalone = document.body.classList.contains('mas-standalone');
+      if (langChanged) {
+        // rebuilds everything in the stored language and opens the stored tab
+        rerenderAll();
+      } else if (TAB_ORDER.includes(str(prefs['ui.tab']))
+                 && prefs['ui.tab'] !== currentTab()) {
+        selectTab(prefs['ui.tab']);
+      }
+      // the open/closed panel only follows an actually stored preference —
+      // guessing here would slam shut a panel the operator just opened
+      if (panelPref !== null && !standalone) setPanelOpen(panelPref === '1');
+    } finally {
+      applyingServerPrefs = false;
+    }
   } catch (error) {
     missing = error.status === 404;
   }
@@ -2339,6 +2399,7 @@ async function refreshAgentBar() {
 
 function selectAgentSub(name) {
   state.agentSub = name;
+  saveUiPref('agentSub', name);
   renderAgent();
 }
 
@@ -3221,7 +3282,7 @@ async function renderAgentTelegram(host) {
     return el('button', {
       class: 'mas-tab' + (name === activeSub ? ' is-active' : ''),
       dataset: { tgsub: name }, type: 'button',
-      onClick: () => { state.tgSub = name; renderAgentSub('telegram'); },
+      onClick: () => { state.tgSub = name; saveUiPref('tgSub', name); renderAgentSub('telegram'); },
     }, [t('tgSub' + name.charAt(0).toUpperCase() + name.slice(1)), badge]);
   }));
   const cards = {
@@ -3571,6 +3632,7 @@ function renderChat() {
     onChange: (event) => {
       state.chatProvider = event.target.value;
       try { localStorage.setItem(LS.provider, state.chatProvider); } catch (_) { /* quota */ }
+      saveUiPref('chatProvider', state.chatProvider);
     },
   });
   const input = el('textarea', {
@@ -3597,6 +3659,7 @@ function renderChat() {
           onChange: (event) => {
             state.chatContext = event.target.checked;
             try { localStorage.setItem(LS.context, state.chatContext ? '1' : '0'); } catch (_) { /* quota */ }
+            saveUiPref('chatContext', state.chatContext ? '1' : '0');
           },
         }),
         el('span', { text: t('chatContext') }),
@@ -4341,7 +4404,7 @@ async function renderDatabase() {
       class: 'mas-tab' + (name === active ? ' is-active' : ''),
       dataset: { dbsub: name }, type: 'button',
       text: t('dbSub' + name.charAt(0).toUpperCase() + name.slice(1)),
-      onClick: () => { state.dbSub = name; renderDatabase(); },
+      onClick: () => { state.dbSub = name; saveUiPref('dbSub', name); renderDatabase(); },
     }))),
     host);
   if (active === 'shots') return renderShots(host);
@@ -4808,12 +4871,7 @@ function applyTheme(mode, { save = false } = {}) {
     const node = document.getElementById(id);
     if (node) node.textContent = label;
   }
-  if (save && state.token) {
-    // Persist through the flat settings map; a deployment without the agent
-    // simply keeps the localStorage choice.
-    api('/agent/settings', { method: 'POST', body: { 'ui.theme': state.theme } })
-      .catch(() => { /* no agent here — the local choice still stands */ });
-  }
+  if (save) saveUiPref('theme', state.theme);
 }
 
 function cycleTheme() {
@@ -4870,6 +4928,7 @@ async function renderSettings() {
       onClick: () => {
         state.lang = code;
         localStorage.setItem(LS.lang, code);
+        saveUiPref('lang', code);
         rerenderAll();
         selectTab('settings');
       },
@@ -4953,7 +5012,7 @@ async function renderSettings() {
     infoBody,
     el('p', { class: 'mas-hint', text: t('settingsInfoDesktopHint') }),
     el('div', { class: 'mas-row mas-wrap' }, [
-      el('button', { class: 'mas-btn', type: 'button', text: '✉️ ' + t('settingsGoTelegram'), onClick: () => { selectTab('agent'); selectAgentSub('telegram'); state.tgSub = 'settings'; } }),
+      el('button', { class: 'mas-btn', type: 'button', text: '✉️ ' + t('settingsGoTelegram'), onClick: () => { selectTab('agent'); selectAgentSub('telegram'); state.tgSub = 'settings'; saveUiPref('tgSub', 'settings'); } }),
       el('button', { class: 'mas-btn', type: 'button', text: '🗄 ' + t('settingsGoBackup'), onClick: () => selectTab('db') }),
       el('button', { class: 'mas-btn', type: 'button', text: '🔑 ' + t('settingsGoKey'), onClick: () => { selectTab('agent'); selectAgentSub('agentkey'); } }),
     ]),

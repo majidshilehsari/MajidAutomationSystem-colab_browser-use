@@ -1657,6 +1657,27 @@ class AgentApiTest(TempDirCase):
             self.api.route_agent_backup_restore(body=b'{"name": "x"}')
         self.assertEqual(ctx.exception.status, 403)
 
+    def test_ui_preferences_round_trip_through_the_database(self):
+        from automation.agent import PLAIN_SETTINGS
+        for key in ("ui.theme", "ui.lang", "ui.tab", "ui.agentSub", "ui.tgSub",
+                    "ui.dbSub", "ui.panel", "ui.chatProvider", "ui.chatContext"):
+            self.assertIn(key, PLAIN_SETTINGS,
+                          "%s must be storable or prefs die silently" % key)
+        status, _payload = self.call("POST", "/agent/settings", {
+            "ui.theme": "dark", "ui.lang": "en", "ui.tab": "db",
+            "ui.agentSub": "telegram", "ui.tgSub": "targets",
+            "ui.dbSub": "shots", "ui.panel": "1",
+            "ui.chatProvider": "deepseek", "ui.chatContext": "0"})
+        self.assertEqual(status, 200)
+        status, index = self.call("GET", "/agent")
+        self.assertEqual(status, 200)
+        settings = index.get("settings") or {}
+        self.assertEqual(settings.get("ui.theme"), "dark")
+        self.assertEqual(settings.get("ui.lang"), "en")
+        self.assertEqual(settings.get("ui.tab"), "db")
+        self.assertEqual(settings.get("ui.tgSub"), "targets")
+        self.assertEqual(settings.get("ui.dbSub"), "shots")
+
     def test_telegram_is_off_by_default_and_says_what_to_do(self):
         status, payload = self.call("GET", "/agent/telegram/status")
         self.assertEqual(payload["mode"], "off")
