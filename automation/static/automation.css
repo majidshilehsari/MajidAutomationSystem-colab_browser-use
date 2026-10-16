@@ -2213,3 +2213,68 @@ body.mas-standalone.mas-toastline #mas-root .mas-body { padding-bottom: 92px; }
   color: var(--mas-warn);
 }
 #mas-root .mas-form-policy { font-size: 11.5px; color: var(--mas-dim); margin: 0 0 8px; }
+
+/* ------------------------------------------------------------------ *
+ * The desktop view (vnc.html): a dark stage and one launcher button.
+ * The slide-out panel no longer exists here, so these rules style the
+ * page itself: the dark base theme the operator asked for, a darkened
+ * noVNC control bar, the floating launcher on the right, and a toast
+ * host for the clipboard sync. Scoped to body.mas-desktop-dark so the
+ * standalone panel page keeps its own theme handling.
+ * ------------------------------------------------------------------ */
+body.mas-desktop-dark { background: #0b1220 !important; color-scheme: dark; }
+body.mas-desktop-dark #noVNC_screen,
+body.mas-desktop-dark #noVNC_container,
+body.mas-desktop-dark #noVNC_canvas,
+body.mas-desktop-dark #screen { background: #0b1220 !important; }
+body.mas-desktop-dark #noVNC_control_bar,
+body.mas-desktop-dark #noVNC_control_bar_anchor > div {
+  background: #111a2e !important;
+  border-color: #1e293b !important;
+  color: #e2e8f0 !important;
+}
+body.mas-desktop-dark #noVNC_status_bar,
+body.mas-desktop-dark #noVNC_transition,
+body.mas-desktop-dark #noVNC_transition_text {
+  background: rgba(17, 26, 46, 0.94) !important;
+  color: #e2e8f0 !important;
+}
+.mas-desktop-launcher { position: fixed; top: 12px; right: 12px; z-index: 100000; }
+.mas-desktop-launcher .mas-launcher-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  border: 1px solid rgba(45, 212, 191, 0.4);
+  background: linear-gradient(135deg, #0f766e, #134e4a);
+  color: #f0fdfa;
+  font: 700 14px/1.2 Vazirmatn, sans-serif;
+  text-decoration: none;
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.mas-desktop-launcher .mas-launcher-btn:hover { filter: brightness(1.15); }
+body.mas-desktop-dark .mas-toast-box {
+  position: fixed;
+  right: 12px;
+  bottom: 12px;
+  z-index: 100003;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  align-items: flex-end;
+  pointer-events: none;
+}
+body.mas-desktop-dark .mas-toast {
+  background: #111a2e;
+  color: #e2e8f0;
+  border: 1px solid #1e293b;
+  border-left: 3px solid #14b8a6;
+  border-radius: 6px;
+  padding: 6px 10px;
+  max-width: 300px;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.4);
+  pointer-events: auto;
+}
+body.mas-desktop-dark .mas-toast-ok { border-left-color: #34d399; }
+body.mas-desktop-dark .mas-toast-error { border-left-color: #f87171; }

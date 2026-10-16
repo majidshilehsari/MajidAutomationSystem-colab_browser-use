@@ -48,7 +48,7 @@ function saveUiPref(name, value) {
 const state = {
   lang: localStorage.getItem(LS.lang) || 'fa',
   token: localStorage.getItem(LS.token) || '',
-  theme: localStorage.getItem(LS.theme) || 'light',
+  theme: localStorage.getItem(LS.theme) || 'dark',
   flow: loadFlow(),
   info: null,
   status: { status: 'idle', entries: [] },
@@ -146,15 +146,23 @@ async function imageBlobUrl(path) {
   return URL.createObjectURL(await response.blob());
 }
 
-async function loadFlowFromClipboard() {
-  // Browser clipboard first (the panel is served over HTTPS), then the
-  // server-side xclip bridge as a fallback - same order the settings tab uses.
+async function loadFlowFromClipboard(source) {
+  // Two explicit sources and no silent fallback: one button that quietly
+  // swapped "my Windows clipboard" for "the automation desktop clipboard"
+  // reported confusing errors from whichever side happened to be empty.
   try {
     let text = '';
-    if (navigator.clipboard && navigator.clipboard.readText) {
-      try { text = await navigator.clipboard.readText(); } catch (err) { text = ''; }
+    if (source === 'browser') {
+      if (!navigator.clipboard || !navigator.clipboard.readText) {
+        throw new Error(t('flowClipNoBrowser'));
+      }
+      text = await navigator.clipboard.readText();
+      if (!text) throw new Error(t('flowClipBrowserEmpty'));
+    } else {
+      // a truly empty desktop clipboard arrives as the server's own message
+      text = ((await api('/clipboard')).text) || '';
+      if (!text) throw new Error(t('flowClipDesktopEmpty'));
     }
-    if (!text) text = ((await api('/clipboard')).text) || '';
     let parsed;
     try { parsed = JSON.parse(text); } catch (err) { throw new Error(t('flowClipBad')); }
     const data = parsed && parsed.flow ? parsed.flow : parsed;
@@ -383,6 +391,27 @@ function buildPanel() {
   return root;
 }
 
+/* The desktop view's only chrome: one button on the right that opens the big
+ * dedicated panel, plus a toast host (clipboard-sync messages still need a
+ * place to land). Styled outside #mas-root because no root panel exists here. */
+function buildDesktopLauncher() {
+  const old = document.getElementById('mas-desktop-launcher');
+  if (old) old.remove();
+  document.body.appendChild(el('div', {
+    id: 'mas-desktop-launcher', class: 'mas-desktop-launcher',
+  }, [
+    el('a', {
+      class: 'mas-launcher-btn', href: 'automation/panel.html',
+      target: '_blank', rel: 'noopener', title: t('openPanel'),
+      text: '⧉ ' + t('openPanel'),
+    }),
+  ]));
+  if (!document.getElementById('mas-toast')) {
+    document.body.appendChild(
+      el('div', { id: 'mas-toast', class: 'mas-toast-box' }));
+  }
+}
+
 function setPanelOpen(open) {
   document.getElementById('mas-panel').hidden = !open;
   document.getElementById('mas-toggle').hidden = open;
@@ -491,10 +520,50 @@ async function refreshAgentTabs() {
   return !missing;
 }
 
+/* The standalone panel page ships an empty <header class="mas-page-head">;
+ * this moves the title, the tab row, the status dot and - at the far left in
+ * RTL - the desktop-view button into it. It runs after every full rebuild
+ * (language switch) too, so the head always shows the current labels and the
+ * fresh tab row replaces the moved-away old one. */
+function wireStandaloneHead() {
+  const toggle = document.getElementById('mas-toggle');
+  if (toggle) toggle.hidden = true;
+  const pageHead = document.querySelector('.mas-page-head');
+  if (!pageHead) return;
+  pageHead.textContent = '';
+  const tabsNode = document.querySelector('#mas-root .mas-tabs');
+  const conn = document.getElementById('mas-conn');
+  pageHead.appendChild(el('span', {
+    class: 'mas-brand-logo', title: t('title'),
+    html: '<svg viewBox="0 0 28 28" width="26" height="26" aria-hidden="true">'
+      + '<defs><linearGradient id="maslogo" x1="0" y1="0" x2="1" y2="1">'
+      + '<stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#0f766e"/>'
+      + '</linearGradient></defs>'
+      + '<rect x="1.5" y="1.5" width="25" height="25" rx="8" fill="url(#maslogo)"/>'
+      + '<path d="M15.6 5.2 8.8 15.4h4.3l-1.1 7.4 7.2-10.6h-4.5z" fill="#fff"/></svg>',
+  }));
+  pageHead.appendChild(el('h1', { class: 'mas-page-title', text: t('title') }));
+  if (tabsNode) pageHead.appendChild(tabsNode);
+  if (conn) pageHead.appendChild(conn);
+  pageHead.appendChild(el('a', {
+    class: 'mas-btn mas-desktop-link',
+    href: '../vnc.html?autoconnect=true&resize=scale&path=websockify',
+    target: '_blank', rel: 'noopener', text: '🌐 ' + t('openDesktop'),
+  }));
+}
+
 function rerenderAll() {
+  const standalone = isStandalone();
   document.getElementById('mas-root').remove();
   buildPanel();
-  setPanelOpen(localStorage.getItem(LS.panel) === '1');
+  if (standalone) {
+    // the rebuilt panel has to hand its tab row and status dot back to the
+    // page head, and the dedicated page is never collapsed
+    wireStandaloneHead();
+    setPanelOpen(true);
+  } else {
+    setPanelOpen(localStorage.getItem(LS.panel) === '1');
+  }
   selectTab(initialTab());
 }
 
@@ -682,7 +751,8 @@ function renderFlow() {
       if (name) saveFlow(name);
     }),
     button(t('load'), loadFlowDialog),
-    button('📥 ' + t('flowLoadClipboard'), loadFlowFromClipboard),
+    button('🪟 ' + t('flowLoadClipBrowser'), () => loadFlowFromClipboard('browser')),
+    button('🖥 ' + t('flowLoadClipDesktop'), () => loadFlowFromClipboard('desktop')),
     button('JSON ⇩', exportJson),
     button('🧩 ' + t('flowGotoPrompt'), () => {
       selectTab('agent');
@@ -1174,6 +1244,12 @@ function setToken(value) {
   state.tokenRejected = false;
   const aiField = document.getElementById('mas-ai-token');
   if (aiField) aiField.value = state.token;
+  if (state.token && document.getElementById('mas-panel')) {
+    // Panes rendered while logged out are empty shells - every fetch was a
+    // 401. Re-render the open tab so provider lists, statuses and settings
+    // come alive the moment the token lands.
+    selectTab(currentTab());
+  }
   refreshStatus();
 }
 
@@ -4311,51 +4387,22 @@ function start() {
   const standalone = isStandalone();
   state.clipSyncOn = localStorage.getItem(LS.clip) === '1';
   applyTheme(state.theme, { save: false });
+  if (!standalone) {
+    // The desktop view is a clean dark stage now. The operator's verdict:
+    // the slide-out panel inside vnc.html duplicated the big dedicated
+    // panel and had to go. What remains is one floating button on the
+    // right that leads to that panel, a host so clipboard-sync toasts can
+    // still land, and the silent clipboard sync itself - copies made on
+    // the operator's own machine keep reaching the desktop clipboard.
+    document.body.classList.add('mas-desktop-dark');
+    buildDesktopLauncher();
+    startClipSync();
+    return;
+  }
   buildPanel();
   startClipSync();
-  if (standalone) {
-    // One fixed header line: title, the tab row, the status dot and - at the
-    // far left in RTL - the desktop-view button that opens a new tab.
-    const toggle = document.getElementById('mas-toggle');
-    if (toggle) toggle.hidden = true;
-    const pageHead = document.querySelector('.mas-page-head');
-    if (pageHead) {
-      const tabsNode = document.querySelector('#mas-root .mas-tabs');
-      const conn = document.getElementById('mas-conn');
-      pageHead.appendChild(el('span', {
-        class: 'mas-brand-logo', title: t('title'),
-        html: '<svg viewBox="0 0 28 28" width="26" height="26" aria-hidden="true">'
-          + '<defs><linearGradient id="maslogo" x1="0" y1="0" x2="1" y2="1">'
-          + '<stop offset="0" stop-color="#14b8a6"/><stop offset="1" stop-color="#0f766e"/>'
-          + '</linearGradient></defs>'
-          + '<rect x="1.5" y="1.5" width="25" height="25" rx="8" fill="url(#maslogo)"/>'
-          + '<path d="M15.6 5.2 8.8 15.4h4.3l-1.1 7.4 7.2-10.6h-4.5z" fill="#fff"/></svg>',
-      }));
-      pageHead.appendChild(el('h1', { class: 'mas-page-title', text: t('title') }));
-      if (tabsNode) pageHead.appendChild(tabsNode);
-      if (conn) pageHead.appendChild(conn);
-      pageHead.appendChild(el('a', {
-        class: 'mas-btn mas-desktop-link',
-        href: '../vnc.html?autoconnect=true&resize=scale&path=websockify',
-        target: '_blank', rel: 'noopener', text: '🌐 ' + t('openDesktop'),
-      }));
-    }
-  } else {
-    // From inside noVNC, offer the dedicated panel in its own tab.
-    const head = document.querySelector('#mas-panel .mas-head');
-    if (head) {
-      head.appendChild(el('a', {
-        class: 'mas-btn mas-vnclink',
-        href: 'vnc.html?autoconnect=true&resize=scale&path=websockify',
-        target: '_blank', rel: 'noopener', text: '🌐 ' + t('openDesktop'),
-      }));
-      head.appendChild(el('a', {
-        class: 'mas-btn mas-vnclink', href: 'automation/panel.html', target: '_blank',
-        rel: 'noopener', title: t('openPanel'), text: '⧉ ' + t('openPanel'),
-      }));
-    }
-  }
-  setPanelOpen(standalone || localStorage.getItem(LS.panel) === '1');
+  wireStandaloneHead();
+  setPanelOpen(true);
   selectTab(initialTab());
   refreshAgentTabs();
   renderStatus();

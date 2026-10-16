@@ -356,7 +356,7 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
 }
 
 /** Mount the sidebar in a fresh jsdom page and hand back the handles. */
-async function mount({ readyStateComplete = true, standalone = false, flow = null,
+async function mount({ readyStateComplete = true, standalone = true, flow = null,
                       status: statusPayload = null, noAgent = false,
                       clipText = null, supaEmpty = false, supaOn = false,
                       uiPrefs = null } = {}) {
@@ -588,18 +588,27 @@ test('CAPTCHA handoff notice is non-blocking and offers a human-only continuatio
   }
 });
 
-test('the panel starts collapsed and opens from the toggle', async () => {
-  const page = await mount();
+test('the desktop view stays clean: no slide-out panel, one launcher button', async () => {
+  // The operator's verdict on vnc.html: the collapsible panel on the right
+  // duplicated the big dedicated panel, so the desktop view is now a dark
+  // stage whose only chrome is one button leading to that panel.
+  const page = await mount({ standalone: false });
   try {
-    assert.equal(page.display('#mas-panel'), 'none', 'the panel must start collapsed');
-    assert.notEqual(page.display('#mas-toggle'), 'none', 'the toggle arrow must be visible');
-
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-    assert.equal(page.display('#mas-panel'), 'flex', 'the toggle did not open the panel');
-    assert.equal(page.display('#mas-toggle'), 'none', 'the toggle should hide once open');
-
-    page.doc.querySelector('.mas-head .mas-icon').dispatchEvent(new page.window.Event('click'));
-    assert.equal(page.display('#mas-panel'), 'none', 'the close button did not collapse it');
+    assert.equal(page.doc.getElementById('mas-panel'), null,
+      'the slide-out panel must not be rendered inside the desktop view');
+    assert.equal(page.doc.getElementById('mas-toggle'), null,
+      'no collapse tab either');
+    assert.ok(page.doc.body.classList.contains('mas-desktop-dark'),
+      'the desktop view must carry the dark base theme');
+    const link = page.doc.querySelector('#mas-desktop-launcher a.mas-launcher-btn');
+    assert.ok(link, 'the launcher button is missing');
+    assert.equal(link.getAttribute('href'), 'automation/panel.html');
+    assert.equal(link.getAttribute('target'), '_blank');
+    assert.ok(link.textContent.includes('\u067e\u0646\u0644 \u0628\u0632\u0631\u06af'),
+      'the button must read "big panel": ' + link.textContent);
+    assert.ok(page.doc.getElementById('mas-toast'),
+      'clipboard-sync toasts still need a host in the desktop view');
+    assert.ok(page.doc.getElementById('noVNC_canvas'), 'noVNC must still be in the page');
   } finally {
     await page.cleanup();
   }
@@ -608,7 +617,6 @@ test('the panel starts collapsed and opens from the toggle', async () => {
 test('tabs swap panes and only one is visible', async () => {
   const page = await mount();
   try {
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const tabs = Array.from(page.doc.querySelectorAll('.mas-tab'));
     assert.deepEqual(tabs.map((n) => n.dataset.tab), TAB_ORDER);
 
@@ -638,7 +646,6 @@ test('adding a step through the UI creates a row', async () => {
     // demand like every other pane.
     clickTab(page, 'flow');
     await page.wait(10);
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const pane = page.doc.getElementById('mas-tab-flow');
     const select = pane.querySelector('select');
     select.value = 'click';
@@ -771,58 +778,8 @@ function clickTab(page, name) {
   tab(page, name).dispatchEvent(new page.window.Event('click'));
 }
 
-async function enableRecording(page) {
-  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
-  const recordTab = tab(page, 'record');
-  recordTab.dispatchEvent(new page.window.Event('click'));
-  const toggle = Array.from(page.doc.querySelectorAll('#mas-tab-record button'))[0];
-  toggle.dispatchEvent(new page.window.Event('click'));
-  await page.wait(10);
-  assert.equal(page.display('#mas-record-layer'), 'block', 'record layer did not open');
-}
 
-test('recording Persian keystrokes becomes a paste step, not type', async () => {
-  const page = await mount();
-  try {
-    await enableRecording(page);
-    const layer = page.doc.getElementById('mas-record-layer');
-    const key = (k) => layer.dispatchEvent(
-      new page.window.KeyboardEvent('keydown', { key: k, bubbles: true }));
-    key('س'); key('ل'); key('ا'); key('م');
-    key('Enter');  // non-printable: flushes the buffer into one step
-    await page.wait(10);
 
-    clickTab(page, 'flow');
-    const types = Array.from(page.doc.querySelectorAll('.mas-step .mas-type'))
-      .map((n) => n.textContent);
-    assert.deepEqual(types, ['paste', 'key'],
-      'Persian must use the clipboard path: ' + types.join(','));
-    const label = page.doc.querySelector('.mas-step .mas-step-label').textContent;
-    assert.ok(label.includes('سلام'), 'the recorded text was lost: ' + label);
-  } finally {
-    await page.cleanup();
-  }
-});
-
-test('recording ASCII keystrokes still becomes a type step', async () => {
-  const page = await mount();
-  try {
-    await enableRecording(page);
-    const layer = page.doc.getElementById('mas-record-layer');
-    const key = (k) => layer.dispatchEvent(
-      new page.window.KeyboardEvent('keydown', { key: k, bubbles: true }));
-    key('h'); key('i');
-    key('Enter');
-    await page.wait(10);
-
-    clickTab(page, 'flow');
-    const types = Array.from(page.doc.querySelectorAll('.mas-step .mas-type'))
-      .map((n) => n.textContent);
-    assert.deepEqual(types, ['type', 'key']);
-  } finally {
-    await page.cleanup();
-  }
-});
 
 test('editing a step refreshes its label instead of keeping paste ""', async () => {
   const page = await mount();
@@ -831,7 +788,6 @@ test('editing a step refreshes its label instead of keeping paste ""', async () 
     // demand like every other pane.
     clickTab(page, 'flow');
     await page.wait(10);
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const pane = page.doc.getElementById('mas-tab-flow');
     const select = pane.querySelector('select');
     select.value = 'paste';
@@ -865,7 +821,6 @@ test('a hand written label survives editing the step', async () => {
     // demand like every other pane.
     clickTab(page, 'flow');
     await page.wait(10);
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     const pane = page.doc.getElementById('mas-tab-flow');
     pane.querySelector('select').value = 'paste';
     page.byText('button', 'افزودن گام').dispatchEvent(new page.window.Event('click'));
@@ -952,8 +907,8 @@ test('the standalone panel opens full page and explains recording', async () => 
   }
 });
 
-test('inside noVNC the sidebar offers the dedicated panel', async () => {
-  const page = await mount();
+test('inside noVNC the desktop view links to the dedicated panel', async () => {
+  const page = await mount({ standalone: false });
   try {
     const link = page.doc.querySelector('a[href="automation/panel.html"]');
     assert.ok(link, 'no link to the dedicated panel');
@@ -1211,7 +1166,6 @@ test('the screenshots tab lists every shot with time, size and link', async () =
     input.value = VALID_TOKEN;
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     clickTab(page, 'db');
     clickDbSub(page, 'shots');
 
@@ -1241,7 +1195,6 @@ test('the texts tab lists saved text and can save a new note', async () => {
     input.value = VALID_TOKEN;
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
-    page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
     clickTab(page, 'db');
     clickDbSub(page, 'texts');
 
@@ -1289,7 +1242,6 @@ async function openAgentSub(page, label) {
   input.value = VALID_TOKEN;
   page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
   await page.wait(60);
-  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
   clickTab(page, 'agent');
   const ready = await page.until(
     () => page.doc.querySelectorAll('#mas-tab-agent [data-sub]').length
@@ -1309,7 +1261,6 @@ async function openPrompt(page) {
   input.value = VALID_TOKEN;
   page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
   await page.wait(60);
-  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
   clickTab(page, 'agent');
   const ready = await page.until(() => page.doc.getElementById('mas-ai-request') !== null);
   assert.ok(ready, 'the prompt sub-tab never rendered');
@@ -1492,7 +1443,6 @@ async function authenticate(page) {
   input.value = VALID_TOKEN;
   page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
   await page.wait(60);
-  page.doc.getElementById('mas-toggle').dispatchEvent(new page.window.Event('click'));
   await page.wait(10);
 }
 
@@ -1859,18 +1809,6 @@ test('the run bar sticks to the bottom without covering content', async () => {
   }
 });
 
-test('inside noVNC the footer stays part of the panel column', async () => {
-  const page = await mount();
-  try {
-    const style = page.window.getComputedStyle(page.doc.querySelector('.mas-foot'));
-    assert.notEqual(style.position, 'fixed',
-      'the overlay panel is already fixed; a second fixed footer would float over noVNC');
-    assert.notEqual(style.position, 'sticky',
-      'inside noVNC the footer scrolls with the panel column');
-  } finally {
-    await page.cleanup();
-  }
-});
 
 test('the agent can be given a message to send, with a purpose', async () => {
   const page = await mount();
@@ -2155,7 +2093,9 @@ test('the flow tab has one floating action line above the footer', async () => {
     assert.equal(style.flexWrap, 'nowrap', 'one line only');
     const labels = Array.from(bar.querySelectorAll('button')).map((b) => b.textContent.trim());
     for (const want of ['\u0630\u062e\u06cc\u0631\u0647', '\u0630\u062e\u06cc\u0631\u0647 \u0628\u0627 \u0646\u0627\u0645',
-      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc', '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u0628\u0648\u0631\u062f',
+      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc',
+      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u0645\u0631\u0648\u0631\u06af\u0631',
+      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u062f\u0633\u06a9\u062a\u0627\u067e',
       '\u067e\u0631\u0627\u0645\u067e\u062a']) {
       assert.ok(labels.some((label) => label.includes(want)),
         `the line lost its "${want}" button: ` + labels.join(' | '));
@@ -2168,7 +2108,7 @@ test('the flow tab has one floating action line above the footer', async () => {
     // the clipboard button really loads the flow JSON
     clickTab(page, 'flow');
     const clipBtn = Array.from(bar.querySelectorAll('button'))
-      .find((b) => b.textContent.includes('\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u0628\u0648\u0631\u062f'));
+      .find((b) => b.textContent.includes('\u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u062f\u0633\u06a9\u062a\u0627\u067e'));
     clipBtn.dispatchEvent(new page.window.Event('click'));
     const flowPane = page.doc.getElementById('mas-tab-flow');
     // the imported step shows up in the list and the name lands in the input
@@ -2177,6 +2117,16 @@ test('the flow tab has one floating action line above the footer', async () => {
     assert.equal(flowPane.querySelector('input.mas-input').value,
       '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
       'the imported flow kept the wrong name');
+
+    // the browser-clipboard button must fail loudly in jsdom (no clipboard
+    // API there) instead of silently falling back to the desktop clipboard
+    const browserBtn = Array.from(bar.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('\u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u0645\u0631\u0648\u0631\u06af\u0631'));
+    assert.ok(browserBtn, 'the browser-clipboard button is missing');
+    browserBtn.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.doc.body.textContent
+      .includes('\u0627\u062c\u0627\u0632\u0647 \u062e\u0648\u0627\u0646\u062f\u0646')),
+      'a denied browser clipboard must say so, not fall back to the server');
 
     // the prompt button jumps into the agent's prompt sub-tab
     const promptBtn = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-flowbar button'))
