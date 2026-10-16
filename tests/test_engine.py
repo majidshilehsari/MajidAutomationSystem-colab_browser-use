@@ -219,18 +219,17 @@ class HappyPathTest(EngineTestBase):
         self.run_to_completion(flow)
         self.assertGreaterEqual(self.clock.now - before, 0.25)
 
-    def test_type_uses_fixed_flow_mode_and_step_override_and_reports_them(self):
-        status = self.run_to_completion(build_flow([
+    def test_type_uses_fixed_flow_mode_and_step_override(self):
+        self.run_to_completion(build_flow([
             {"type": "type", "text": "first"},
             {"type": "type", "text": "second", "typingMode": "fast"},
         ], typingMode="low"))
+        # round 26: the flow mode and the step override both arrive as the
+        # delay the backend actually receives; the per-row typing report died
+        # with the typed steps (the code itself now carries the intent)
         self.assertEqual([call for call in self.backend.calls if call[0] == "type"], [
             ("type", "first", 50), ("type", "second", 0),
         ])
-        self.assertEqual(
-            [(row["typingMode"], row["keyDelayMs"]) for row in status["results"]],
-            [("low", 50), ("fast", 0)],
-        )
 
     def test_repeat_runs_every_pass(self):
         flow = build_flow([{"type": "click", "x": 1, "y": 1}], repeat=3)
@@ -774,7 +773,8 @@ class RunOperationStepTest(EngineTestBase):
         self.assertEqual(status["status"], "done")
         self.assertEqual(self.backend.calls,
                          [("click", 3, 4, "left", 1), ("move", 5, 6)])
-        self.assertIn("click → rc=0", status["results"][0]["text"])
+        # the trace shows each substep by its Persian label
+        self.assertIn("کلیک در (3، 4) → rc=0", status["results"][0]["text"])
 
     def test_resolves_the_operation_by_its_persian_name(self):
         self.with_ops()
@@ -794,8 +794,9 @@ class RunOperationStepTest(EngineTestBase):
         status = self.run_to_completion(build_flow(
             [{"type": "run_operation", "operation": "op-a"}]))
         self.assertEqual(status["status"], "error")
-        # the depth refusal is inside the captured per-substep lines
-        self.assertIn("nested too deep", status["results"][0]["text"] or "")
+        # the depth refusal travels up through check(): the root cause stays
+        # visible in the run error, layer by layer
+        self.assertIn("nested too deep", status["error"])
 
     def test_without_an_agent_the_step_says_so(self):
         status = self.run_to_completion(build_flow(
@@ -958,7 +959,8 @@ class RunResultsTest(EngineTestBase):
         rows = status["results"]
         self.assertEqual([r["index"] for r in rows], [0, 1, 2])
         self.assertEqual([r["status"] for r in rows], ["ok", "ok", "error"])
-        self.assertEqual(rows[2]["type"], "type")
+        self.assertEqual(rows[2]["type"], "python")   # round 26: one language
+        self.assertEqual(rows[2]["label"], "تایپ «boom»")
         self.assertTrue(rows[2]["error"], "the failing step must say why")
         self.assertIsInstance(rows[0]["durationMs"], int)
         self.assertEqual(status["status"], "error")

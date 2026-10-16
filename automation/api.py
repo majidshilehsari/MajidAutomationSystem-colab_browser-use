@@ -19,7 +19,7 @@ import time
 from typing import Any, Callable, Dict, List, Optional, Tuple
 from urllib.parse import unquote
 
-from . import schema
+from . import convert, schema
 from . import clipboard
 from .agent import AgentError
 from .engine import TERMINAL_STATES, png_size
@@ -176,6 +176,7 @@ class AutomationApi:
             ("GET", "/flows/*", self.route_flow_get),
             ("PUT", "/flows/*", self.route_flow_put),
             ("DELETE", "/flows/*", self.route_flow_delete),
+            ("POST", "/convert", self.route_convert_flow),
             ("GET", "/runs", self.route_runs_list),
             ("GET", "/runs/*/log", self.route_run_log),
             # Round 13: interactive forms and the secret vault. Submitting or
@@ -557,6 +558,20 @@ class AutomationApi:
         if not self.store.delete(params["*"]):
             raise ApiError(404, "no flow named %r" % params["*"])
         return json_response(200, {"ok": True})
+
+    def route_convert_flow(self, *, body: bytes = b"", **_: Any) -> Response:
+        """Round 26: translate a flow written in the old JSON step language
+        into python steps. The panel calls this when a legacy flow arrives
+        from the clipboard or an old localStorage, so one language remains."""
+        payload = self.read_json(body)
+        flow = payload.get("flow", payload)
+        if not isinstance(flow, dict):
+            raise ApiError(400, "a flow object is required")
+        try:
+            converted = convert.convert_flow(flow)
+        except ValueError as exc:
+            raise ApiError(422, str(exc))
+        return json_response(200, {"ok": True, "flow": converted})
 
     # -- interactive forms and the secret vault -------------------------
     def _form_engine(self) -> Any:

@@ -1308,7 +1308,10 @@ class AgentHubTest(TempDirCase):
         hub, _, _ = self.build(llm=FakeLlm(reply))
         result = hub.chat("یک جریان بساز")
         self.assertTrue(result["flowValid"])
-        self.assertEqual(result["flow"]["steps"][0]["type"], "goto_url")
+        # round 26: the model's old-JSON flow arrives translated to python
+        self.assertEqual(result["flow"]["steps"][0]["type"], "python")
+        self.assertIn("goto('https://example.com')",
+                      result["flow"]["steps"][0]["code"])
 
     def test_chat_reports_a_broken_flow_instead_of_hiding_it(self):
         reply = json.dumps({"steps": [{"type": "teleport"}]})
@@ -1956,14 +1959,14 @@ class OperationsLibraryTest(HubCase):
     def test_the_deepseek_operation_opens_the_site_and_then_asks(self):
         hub, _, _ = self.build()
         by_key = {row["builtinKey"]: row for row in hub.operation_list()}
-        opened = [step["type"] for step in by_key["deepseek-open"]["steps"]]
-        asked = [step["type"] for step in by_key["deepseek-ask"]["steps"]]
-        self.assertIn("agent_open", opened)
-        self.assertIn("agent_ask", asked)
-        provider = [step.get("provider") for step in by_key["deepseek-open"]["steps"]
-                    if step["type"] == "agent_open"][0]
-        self.assertEqual(provider, "deepseek")
-        self.assertIn("chat.deepseek.com", DEFAULT_PROVIDERS[provider]["url"],
+        # round 26: built-in operations are stored in the one language
+        opened = [step.get("code", "") for step in by_key["deepseek-open"]["steps"]]
+        asked = [step.get("code", "") for step in by_key["deepseek-ask"]["steps"]]
+        self.assertTrue(any("open_agent(" in code for code in opened), opened)
+        self.assertTrue(any("ask_agent(" in code for code in asked), asked)
+        self.assertTrue(any("provider='deepseek'" in code for code in opened),
+                        "the provider must ride along in the code")
+        self.assertIn("chat.deepseek.com", DEFAULT_PROVIDERS["deepseek"]["url"],
                       "the profile is what carries the address")
 
     def test_an_operation_can_be_created_edited_and_deleted(self):
@@ -2491,11 +2494,14 @@ class StepCatalogTest(unittest.TestCase):
                 self.assertTrue(entry["en"])
                 self.assertIn("id", entry["common"])
 
-    def test_the_agent_steps_are_part_of_the_same_catalog(self):
+    def test_the_catalog_is_the_single_python_language(self):
+        # round 26: one step type is left; the old vocabulary stays documented
+        # so archived flows and old letters remain readable
         catalog = schema.step_catalog()
-        for kind in ("agent_open", "agent_ask", "captcha_solve"):
-            self.assertIn(kind, catalog)
-        self.assertEqual(catalog["agent_ask"]["required"], ["prompt"])
+        self.assertEqual(sorted(catalog), ["python"])
+        for kind in ("agent_open", "agent_ask", "captcha_solve",
+                     "interactive_form", "secure_http_request"):
+            self.assertIn(kind, schema.STEP_DOCS)
 
 
 class EngineCursorTest(TempDirCase):

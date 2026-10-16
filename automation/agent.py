@@ -146,6 +146,9 @@ API_INDEX = [
     ("GET", "/agent", "📇 نقشهٔ کامل: وضعیت ایجنت، تنظیمات ماسک‌شده، شمارش‌ها و "
                       "همین فهرست مسیرها.",
      "The full map: agent status, masked settings, counts and this index."),
+    ("POST", "/convert", "🔁 تبدیل جریانِ نوشته‌شده به زبان قدیمیِ گام‌های JSON به "
+                         "مراحل پایتون (دور ۲۶: زبان واحد).",
+     "Translate a legacy JSON-step flow into python steps (round 26)."),
     ("GET", "/agent/chat/messages", "💬 تاریخچهٔ گفت‌وگو (تب چت) با وضعیت هر پیام.",
      "Chat history with each message's status."),
     ("POST", "/agent/chat/send", "💬 فرستادن پیام به چت؛ جواب در پس‌زمینه می‌آید و "

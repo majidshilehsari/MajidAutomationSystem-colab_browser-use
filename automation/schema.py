@@ -14,6 +14,9 @@ import re
 import uuid
 from typing import Any, Dict, Iterable, List, Tuple
 
+from . import convert   # round 26: the old JSON step types arrive here and
+                        # leave as python; convert itself imports nothing.
+
 SCHEMA_VERSION = 1
 
 #: Desktop geometry used by the virtual display (see start_colab_browser.sh).
@@ -35,6 +38,19 @@ _LABEL_RE = re.compile(r"^[^\x00-\x1f\x7f<>]{0,120}$", re.UNICODE)
 
 # Every step type, its required keys and the optional keys it accepts.
 STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
+    # Round 26: ONE step language. The 23 old JSON types (click, type,
+    # wait_for_text, interactive_form, ...) are translated to python at every
+    # entrance - validate_flow, engine.start, /convert - by automation.convert,
+    # so only python is a step type now. STEP_DOCS below still documents the
+    # old vocabulary for anyone reading an archived flow.
+    "python": {"required": ["code"], "optional": ["timeout"]},
+}
+
+# The vocabulary flows and operations USED to be written in (round 25 and
+# older). It is private: validate_flow still checks incoming legacy steps
+# against it - every old error message stays exactly as it was - and then
+# automation.convert translates them into python. Nothing new may be added.
+_LEGACY_STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     "click": {"required": ["x", "y"], "optional": ["button", "modifiers", "clicks"]},
     "double_click": {"required": ["x", "y"], "optional": []},
     "drag": {"required": ["x1", "y1", "x2", "y2"], "optional": ["button"]},
@@ -59,7 +75,6 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     # whole program - conditions, loops, and calls into the desk helpers the
     # other step types use - and a run_operation step nests a library
     # operation inside a flow.
-    "python": {"required": ["code"], "optional": ["timeout"]},
     "run_operation": {"required": ["operation"], "optional": []},
     # The coworker agent's own browser (Xvfb :2 / CDP 9223): open a chat
     # provider there, or ask it a question and read the answer back. These are
@@ -91,7 +106,6 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
                                          "timeout"]},
 }
 
-#: Fields accepted on every step regardless of type.
 COMMON_STEP_FIELDS = [
     "id",
     "type",
@@ -225,12 +239,13 @@ def _validate_step(step: Any, index: int, viewport: Dict[str, int], errors: List
         return {}
 
     kind = step.get("type")
-    if not isinstance(kind, str) or kind not in STEP_TYPES:
+    spec = STEP_TYPES.get(kind) if isinstance(kind, str) else None
+    if spec is None and isinstance(kind, str):
+        spec = _LEGACY_STEP_TYPES.get(kind)   # validated, then translated
+    if spec is None:
         _err(errors, "%s: unknown type %r (expected one of %s)"
              % (where, kind, ", ".join(sorted(STEP_TYPES))))
         return {}
-
-    spec = STEP_TYPES[kind]
     for field in spec["required"]:
         if field not in step or step[field] in (None, ""):
             _err(errors, "%s (%s): missing required field '%s'" % (where, kind, field))
@@ -453,6 +468,17 @@ def validate_flow(flow: Any) -> Tuple[Dict[str, Any], List[str]]:
         validated = _validate_step(raw, index, resolved_viewport, errors)
         if not validated:
             continue
+        # Round 26: a step still written in the old JSON vocabulary has just
+        # been validated by its own rules; now it is translated to python, so
+        # everything downstream (engine, panel, archive) speaks one language.
+        if str(validated.get("type") or "") in convert.CONVERTERS:
+            try:
+                validated = convert.convert_step(validated)
+            except Exception as exc:  # noqa: BLE001 - a broken legacy step
+                _err(errors, "steps[%d] (%s): cannot be written as python: %s"
+                     % (index, raw.get("type") if isinstance(raw, dict) else "?",
+                        exc))
+                continue
         step = normalize_step(validated, index)
         if step["id"] in seen_ids:
             step["id"] = new_id()
@@ -462,8 +488,8 @@ def validate_flow(flow: Any) -> Tuple[Dict[str, Any], List[str]]:
     settings = _validate_settings(flow.get("settings"), errors)
 
     if not settings["allowShellSteps"]:
-        for index, step in enumerate(normalized_steps):
-            if step["type"] == "shell":
+        for index, raw in enumerate(steps):
+            if isinstance(raw, dict) and raw.get("type") == "shell":
                 _err(errors, "steps[%d]: shell steps are disabled; set settings.allowShellSteps to enable them" % index)
 
     normalized = {

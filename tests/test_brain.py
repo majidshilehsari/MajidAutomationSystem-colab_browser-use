@@ -111,9 +111,13 @@ class BuiltinAndSchemaTest(BrainCase):
             if op_id != "op-builtin-observe":
                 self.assertEqual(op["permission"], "ask",
                                  "%s must default to ask-first" % op_id)
-        # The fixed thinking is one screenshot plus one text capture.
-        types = [step["type"] for step in ops["op-builtin-observe"]["steps"]]
-        self.assertEqual(types, ["screenshot", "capture_text"])
+        # The fixed thinking is one screenshot plus one text capture -
+        # stored, like everything else, in the one language (round 26).
+        steps = ops["op-builtin-observe"]["steps"]
+        self.assertEqual([step["type"] for step in steps],
+                         ["python", "python"])
+        self.assertIn("screenshot('observe')", steps[0]["code"])
+        self.assertIn("capture_text(limit=20000)", steps[1]["code"])
 
     def test_an_old_database_gains_the_permission_column(self):
         # A database from before round 24: an operations table with no

@@ -148,7 +148,10 @@ def _paste(step: Dict[str, Any]) -> Tuple[str, str]:
 
 
 def _key(step: Dict[str, Any]) -> Tuple[str, str]:
-    keys = list(step.get("keys") or [])
+    raw_keys = step.get("keys") or []
+    if isinstance(raw_keys, str):
+        raw_keys = [raw_keys]   # the promotion normalize_step always did
+    keys = list(raw_keys)
     return ("check(press_key(%s))" % _py(keys),
             "کلید «%s»" % "+".join(str(key) for key in keys))
 
@@ -262,7 +265,8 @@ def _progress_notice(step: Dict[str, Any]) -> Tuple[str, str]:
             "اعلان: %s" % title[:30])
 
 
-def _form_kwargs(step: Dict[str, Any], extra_first: List[str]) -> str:
+def _form_kwargs(step: Dict[str, Any], extra_first: List[str],
+                 secure: bool = False) -> str:
     parts: List[str] = list(extra_first)
     if step.get("message"):
         parts.append("message=%s" % _str_expr(step["message"]))
@@ -276,8 +280,11 @@ def _form_kwargs(step: Dict[str, Any], extra_first: List[str]) -> str:
         parts.append("timeout_ms=%d" % int(step["timeoutMs"]))
     out = step.get("output")
     if out is not None:
+        # interactive_form nests its namespace under "namespace"; secure_input
+        # under "handle" - exactly like the engine reads them.
+        key = "handle" if secure else "namespace"
         parts.append("output=%s" % _py(
-            out.get("namespace") if isinstance(out, dict) else out))
+            out.get(key) if isinstance(out, dict) else out))
     return ",\n    ".join(parts)
 
 
@@ -297,7 +304,7 @@ def _secure_input(step: Dict[str, Any]) -> Tuple[str, str]:
         "title=%s" % _str_expr(title),
         "fields=%s" % _py(step.get("fields") or []),
         "policy=%s" % _py(step.get("policy") or {}),
-    ])
+    ], secure=True)
     return ("handles = check(secure_collect(\n    %s,\n))" % body,
             "ورود امن «%s»" % title[:30])
 
@@ -321,7 +328,9 @@ def _secure_http(step: Dict[str, Any]) -> Tuple[str, str]:
 
 def _run_operation(step: Dict[str, Any]) -> Tuple[str, str]:
     wanted = str(step.get("operation") or "")
-    return ("check(run_operation(%s))" % _str_expr(wanted),
+    # log() on purpose: the per-substep trace lands in the step report, so
+    # the brain and the coworker agent can read what actually happened.
+    return ("log(check(run_operation(%s)))" % _str_expr(wanted),
             "اجرای عملیات «%s»" % wanted[:36])
 
 
@@ -384,6 +393,14 @@ def convert_step(step: Dict[str, Any]) -> Dict[str, Any]:
     if kind == "python":
         return dict(step)
     code, label = step_to_code(step)
+    # A label the operator (or the agent) chose by hand survives; only the
+    # old auto-generated English one ("click 100,200") is replaced by the
+    # uniform Persian label. The import is function-level on purpose:
+    # schema imports convert at module level.
+    from . import schema as _schema
+    old_label = step.get("label")
+    if old_label and str(old_label) != _schema.default_label(step):
+        label = str(old_label)
     converted: Dict[str, Any] = {"type": "python", "code": code,
                                  "label": label}
     for key in COMMON_KEYS:

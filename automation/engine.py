@@ -31,6 +31,7 @@ import urllib.request
 from urllib.parse import urlsplit as _urlsplit
 
 from .challenge import CHALLENGE_SCRIPT, assess_page, safe_origin
+from .convert import convert_flow
 from .vault import MAX_BODY_BYTES, SecretVault, VaultError
 
 DEFAULT_DISPLAY = ":1"
@@ -350,6 +351,7 @@ class AutomationEngine:
         self._current_index = 0
         self._current_shot_dir = ""
         self._current_step_label = ""
+        self._current_shots: Optional[Dict[str, str]] = None
         self._wakeup = threading.Event()
         self._state: Optional[RunState] = None
         self._thread: Optional[threading.Thread] = None
@@ -379,6 +381,9 @@ class AutomationEngine:
                 flow = policy(flow) or flow
             except Exception:
                 pass
+        # Round 26: one language. Anything still written in the old JSON step
+        # types is translated to python here (idempotent for python flows).
+        flow = convert_flow(flow)
         with self._lock:
             if self.busy():
                 raise RuntimeError("a flow is already running (run %s)" % self._state.run_id)
@@ -504,8 +509,8 @@ class AutomationEngine:
                 return
         node[path[-1]] = value
 
-    def _form_values(self, state: Optional[RunState], output: Any,
-                     index: int, secure: bool = False) -> Any:
+    def _form_node(self, state: Optional[RunState], output: Any,
+                   index: int, secure: bool = False) -> Any:
         """The dict form_collect()/secure_collect() just filled (round 26)."""
         if isinstance(output, dict):
             namespace = output.get("handle" if secure else "namespace")
@@ -967,6 +972,12 @@ class AutomationEngine:
     #: Steps allowed to run while a challenge is merely suspected: they only
     #: look at the page or leave it, never touching the challenge itself.
     SAFE_RECOVERY_TYPES = ("focus_window", "screenshot", "capture_text", "wait")
+    # Round 26: the one language needs its own recovery rule - a python step
+    # that only looks around, or only travels to an allowed origin, is the
+    # same safe recovery the old typed steps were.
+    SAFE_PY_CALLS = frozenset({
+        "check", "focus_window", "screenshot", "capture_text", "wait",
+        "sleep", "log", "press_key", "goto"})
     SAFE_RECOVERY_ORIGINS = frozenset({
         "https://arena.ai", "https://www.google.com", "https://lmarena.ai",
         "https://chat.deepseek.com", "https://deepseek.com",
@@ -983,7 +994,31 @@ class AutomationEngine:
             return "ctrl+l" in keys or "control+l" in keys
         if step_type == "goto_url":
             return safe_origin(step.get("url")) in self.SAFE_RECOVERY_ORIGINS
+        if step_type == "python":
+            return self._python_is_safe_recovery(str(step.get("code") or ""))
         return False
+
+    def _python_is_safe_recovery(self, code: str) -> bool:
+        """True when every executed line only looks around or travels to an
+        allowed origin - the round-12 recovery rule, spoken in python."""
+        lines = [line.strip() for line in code.splitlines()
+                 if line.strip() and not line.strip().startswith("#")]
+        if not lines:
+            return False
+        for line in lines:
+            names = set(_re.findall(r"([A-Za-z_][A-Za-z0-9_]*)\s*\(", line))
+            if not names or not names <= self.SAFE_PY_CALLS:
+                return False
+            if "goto" in names:
+                match = _re.search(r"goto\(\s*(['\"])(.*?)\1", line)
+                if (not match or safe_origin(match.group(2))
+                        not in self.SAFE_RECOVERY_ORIGINS):
+                    return False
+            if "press_key" in names:
+                low = line.lower()
+                if "ctrl+l" not in low and "control+l" not in low:
+                    return False
+        return True
 
     def _challenge_fingerprint(self, assessment: Dict[str, Any]) -> Any:
         return (assessment.get("pageOrigin"),
@@ -1186,6 +1221,7 @@ class AutomationEngine:
             })
 
         shots: Dict[str, str] = {}
+        self._current_shots = shots
         image = None
         step_id = step.get("id", "s")
 
@@ -1197,36 +1233,17 @@ class AutomationEngine:
 
         typing_mode = None
         key_delay_ms = None
-        if kind == "type":
-            typing_mode = step.get("typingMode", settings.get("typingMode", "normal"))
-            key_delay_ms = TYPING_DELAYS_MS.get(typing_mode, TYPING_DELAYS_MS["normal"])
 
         step = self._interpolate_step(step, state)
         kind = step.get("type")
 
         started = self._clock()
-        if kind == "progress_notice":
-            rc, out, err = self._run_progress_notice(step)
-        elif kind == "interactive_form":
-            rc, out, err = self._run_interactive_form(state, index, step)
-        elif kind == "secure_input":
-            rc, out, err = self._run_secure_input(state, index, step)
-        elif kind == "secure_http_request":
-            rc, out, err = self._run_secure_http(state, step)
-        elif kind == "pause_for_human_verification":
-            self._create_handoff(state, index, step, shot_dir, "manual_verification",
-                                 step["prompt"])
-            rc, out, err = 0, "human verification confirmed", ""
-        else:
-            rc, out, err = self._dispatch(step, settings)
+        rc, out, err = self._dispatch(step, settings)
         duration_ms = int((self._clock() - started) * 1000)
 
         ok = rc == 0
         captured = None
-        if kind == "capture_text":
-            limit = int(step.get("limit") or 0) or 4000
-            captured = (out or "")[:limit]
-        elif kind in ("python", "run_operation"):
+        if kind in ("python", "run_operation"):
             # Round 25: what the code printed and the nested operation's trace
             # belong in the step report like captured text - but not in the
             # texts archive, which stays page text only.
@@ -1239,17 +1256,16 @@ class AutomationEngine:
                   **({"typingMode": typing_mode, "keyDelayMs": key_delay_ms}
                      if typing_mode is not None else {}))
 
-        if kind == "screenshot" and ok and out:
-            published = self._publish(out)
-            if published:
-                shots["after"] = published
-                image = png_size(os.path.join(shot_dir, published))
-        elif settings.get("screenshotAfterEachStep"):
+        if settings.get("screenshotAfterEachStep"):
             after = self._capture(shot_dir, "step-%03d-after-%s.png" % (index, step_id))
             published = self._publish(after)
             if published:
                 shots["after"] = published
                 image = png_size(os.path.join(shot_dir, published))
+        if image is None and shots.get("after"):
+            # a python screenshot() published into the row; size it like the
+            # old screenshot step did
+            image = png_size(os.path.join(shot_dir, shots["after"]))
 
         if not ok and settings.get("screenshotOnError", True) and not self._stop_requested:
             # The page at the moment of failure is the most useful image there
@@ -1337,59 +1353,14 @@ class AutomationEngine:
 
     def _dispatch(self, step: Dict[str, Any], settings: Optional[Dict[str, Any]] = None) -> Tuple[int, str, str]:
         kind = step["type"]
-        if kind == "click":
-            return self.backend.click(int(step["x"]), int(step["y"]),
-                                      step.get("button", "left"), int(step.get("clicks", 1)))
-        if kind == "double_click":
-            return self.backend.click(int(step["x"]), int(step["y"]), "left", 2)
-        if kind == "move":
-            return self.backend.move(int(step["x"]), int(step["y"]))
-        if kind == "drag":
-            return self.backend.drag(int(step["x1"]), int(step["y1"]),
-                                     int(step["x2"]), int(step["y2"]), step.get("button", "left"))
-        if kind == "type":
-            settings = settings or {}
-            mode = step.get("typingMode", settings.get("typingMode", "normal"))
-            delay_ms = TYPING_DELAYS_MS.get(mode, TYPING_DELAYS_MS["normal"])
-            return self.backend.type_text(step["text"], delay_ms=delay_ms)
-        if kind == "paste":
-            return self.backend.paste(step["text"])
-        if kind == "key":
-            return self.backend.key(step["keys"])
-        if kind == "scroll":
-            return self.backend.scroll(int(step["amount"]), step.get("x"), step.get("y"))
-        if kind == "wait":
-            self._interruptible_sleep(int(step["ms"]) / 1000.0)
-            return 0, "", ""
-        if kind == "wait_for_text":
-            return self._wait_for_text(step)
-        if kind == "capture_text":
-            rc, out, err = self._page_text()
-            if rc != 0:
-                return rc, "", err or "could not read the page text"
-            return 0, out or "", ""
-        if kind == "goto_url":
-            return self.backend.goto_url(step["url"])
-        if kind == "focus_window":
-            return self.backend.focus_window(step["title"])
-        if kind == "screenshot":
-            name = step.get("name") or "shot-%d.png" % int(self._clock())
-            path = self._capture(os.path.join(self.data_dir, "runs",
-                                              self._state.run_id if self._state else "misc"), name)
-            return (0, path or "", "") if path else (1, "", "screenshot failed")
-        if kind == "shell":
-            return self.backend.shell(step["command"])
         if kind == "python":
             return self._run_python(step)
         if kind == "run_operation":
+            # Kept for structured operation steps inside old library rows;
+            # flows themselves only ever arrive here as python (round 26).
             return self._run_operation_step(step, settings)
-        if kind == "agent_open":
-            return self._agent_open(step)
-        if kind == "agent_ask":
-            return self._agent_ask(step)
-        if kind == "captcha_solve":
-            return self._captcha_solve(step)
-        return 1, "", "unsupported step type: %s" % kind
+        return 1, "", ("unsupported step type: %s (round 26: every step "
+                       "speaks python)" % kind)
 
     # -- round 25: python steps and nested operations -----------------------
     def _python_namespace(self) -> Tuple[Dict[str, Any], List[str]]:
@@ -1424,6 +1395,8 @@ class AutomationEngine:
             if not path:
                 return 1, "", "screenshot failed"
             published = self._publish(path) or path
+            if self._current_shots is not None:
+                self._current_shots["after"] = published
             if self._shots is not None and state is not None:
                 self._shots.add({
                     "name": os.path.basename(path), "role": "shot",
@@ -1507,8 +1480,8 @@ class AutomationEngine:
                 state, self._current_index, form_step)
             if rc != 0:
                 return rc, None, err or out or "the form was never completed"
-            return 0, self._form_values(state, form_step.get("output"),
-                                        self._current_index), ""
+            return 0, self._form_node(state, form_step.get("output"),
+                                      self._current_index), ""
 
         def secure_collect(title: str, fields: Any, policy: Any,
                            message: str = "",
@@ -1531,8 +1504,8 @@ class AutomationEngine:
                 state, self._current_index, sec_step)
             if rc != 0:
                 return rc, None, err or out or "no secret reached the vault"
-            return 0, self._form_values(state, sec_step.get("output"),
-                                        self._current_index, secure=True), ""
+            return 0, self._form_node(state, sec_step.get("output"),
+                                      self._current_index, secure=True), ""
 
         def http_request(method: str, url: str,
                          handle: Optional[str] = None,
@@ -1609,6 +1582,14 @@ class AutomationEngine:
                     pass
             return rc, out, err
 
+        def shell(command: str) -> Tuple[int, str, str]:
+            settings_now = (((state.flow or {}).get("settings")) or {}) \
+                if state is not None else {}
+            if not settings_now.get("allowShellSteps"):
+                return 1, "", ("shell steps are disabled; set "
+                               "settings.allowShellSteps to enable them")
+            return self.backend.shell(str(command))
+
         def run_operation(operation: str) -> Tuple[int, str, str]:
             return self._run_operation_step({"operation": str(operation)},
                                             None)
@@ -1618,7 +1599,13 @@ class AutomationEngine:
             if isinstance(result, tuple) and len(result) == 3:
                 rc, out, err = result
                 if int(rc or 0) != 0:
-                    raise RuntimeError(str(err or out or ("rc=%s" % rc)))
+                    detail = str(err or "")
+                    if err and out:
+                        # keep the nested cause (the operation trace, the
+                        # depth guard, ...) visible next to the refusal
+                        detail = "%s | %s" % (detail,
+                                              str(out).replace("\n", " / "))
+                    raise RuntimeError(detail or str(out or ("rc=%s" % rc)))
                 return out
             return result
 
@@ -1642,7 +1629,7 @@ class AutomationEngine:
             "focus_window": lambda title: self.backend.focus_window(str(title)),
             "screenshot": screenshot,
             "page_text": lambda limit=20000: self.page_text(int(limit)),
-            "shell": lambda command: self.backend.shell(str(command)),
+            "shell": shell,
             "ask_agent": ask_agent,
             "run_operation": run_operation,
             "check": check,
@@ -1732,7 +1719,7 @@ class AutomationEngine:
         if operation is None:
             return 1, "", "no operation with id or name %r" % wanted
         try:
-            flow = library.as_flow(operation)
+            flow = convert_flow(library.as_flow(operation))
         except Exception as exc:
             return 1, "", str(exc)
         sub_steps = list(flow.get("steps") or [])
@@ -1754,7 +1741,8 @@ class AutomationEngine:
                     # would hide why (the depth guard, a protocol refusal...).
                     detail = "%s | %s" % (err, out.replace("\n", " / "))
                 lines.append("%s → rc=%d %s"
-                             % (sub.get("type"), rc, detail[:400]))
+                             % (sub.get("label") or sub.get("type"), rc,
+                                detail[:400]))
                 if rc != 0:
                     rc_final = rc
                     break

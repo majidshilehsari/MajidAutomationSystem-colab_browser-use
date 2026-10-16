@@ -71,7 +71,7 @@ class CodeTest(unittest.TestCase):
                          "check(paste('panda'))")
         self.assertEqual(
             self.code({"type": "run_operation", "operation": "op-two"}),
-            "check(run_operation('op-two'))")
+            "log(check(run_operation('op-two')))")
 
     def test_special_steps_map_to_their_wrappers(self):
         self.assertEqual(
@@ -163,11 +163,13 @@ class CodeTest(unittest.TestCase):
             {"type": "click", "x": 1, "y": 2, "note": "یادداشت"},
             {"type": "python", "code": "log('hi')", "label": "سلام"},
         ])
+        raw = {"schema": 1, "name": "raw", "settings": {},
+               "steps": [{"type": "click", "x": 1, "y": 2}]}
         once = convert.convert_flow(flow)
         twice = convert.convert_flow(once)
         self.assertEqual(once, twice)
         self.assertFalse(convert.needs_conversion(once))
-        self.assertTrue(convert.needs_conversion(flow))
+        self.assertTrue(convert.needs_conversion(raw))
         first = once["steps"][0]
         self.assertEqual(first["type"], "python")
         self.assertEqual(first["note"], "یادداشت")
