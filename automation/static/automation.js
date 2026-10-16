@@ -146,6 +146,40 @@ async function imageBlobUrl(path) {
   return URL.createObjectURL(await response.blob());
 }
 
+/* Manual paste dialog: reading the OS clipboard programmatically depends on
+ * a browser permission that silently resets whenever the tunnel URL (origin)
+ * changes, while a native Ctrl+V into a textarea needs no permission at all.
+ * This dialog is therefore the guaranteed import path for flow JSON from the
+ * operator's own machine. Resolves with the pasted text, or '' on cancel. */
+function openPasteDialog() {
+  return new Promise((resolve) => {
+    const area = el('textarea', {
+      id: 'mas-paste-area', class: 'mas-input mas-mono mas-paste-area', rows: 10,
+      placeholder: t('flowPastePh'),
+    });
+    const overlay = el('div', { id: 'mas-paste', class: 'mas-confirm' }, [
+      el('div', { class: 'mas-confirm-box' }, [
+        el('h3', { text: '📋 ' + t('flowPasteTitle') }),
+        el('p', { text: t('flowPasteHint') }),
+        area,
+        el('div', { class: 'mas-row' }, [
+          el('button', {
+            class: 'mas-btn mas-primary', type: 'button', text: t('flowPasteImport'),
+            onClick: () => { const value = area.value; overlay.remove(); resolve(value); },
+          }),
+          el('button', {
+            class: 'mas-btn', type: 'button', text: t('close'),
+            onClick: () => { overlay.remove(); resolve(''); },
+          }),
+        ]),
+      ]),
+    ]);
+    const host = document.getElementById('mas-root') || document.body;
+    host.appendChild(overlay);
+    area.focus();
+  });
+}
+
 async function loadFlowFromClipboard(source) {
   // Two explicit sources and no silent fallback: one button that quietly
   // swapped "my Windows clipboard" for "the automation desktop clipboard"
@@ -153,11 +187,17 @@ async function loadFlowFromClipboard(source) {
   try {
     let text = '';
     if (source === 'browser') {
-      if (!navigator.clipboard || !navigator.clipboard.readText) {
-        throw new Error(t('flowClipNoBrowser'));
+      if (navigator.clipboard && navigator.clipboard.readText) {
+        try { text = await navigator.clipboard.readText(); } catch (err) { text = ''; }
       }
-      text = await navigator.clipboard.readText();
-      if (!text) throw new Error(t('flowClipBrowserEmpty'));
+      if (!text) {
+        // Permission denied, no API, or an empty clipboard: instead of a
+        // dead-end English error, open the manual paste dialog - Ctrl+V
+        // always works, on every origin, with no permission at all.
+        toast(t('flowClipDenied'), 'warn');
+        text = await openPasteDialog();
+        if (!text) return;
+      }
     } else {
       // a truly empty desktop clipboard arrives as the server's own message
       text = ((await api('/clipboard')).text) || '';

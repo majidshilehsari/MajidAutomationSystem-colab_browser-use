@@ -2118,15 +2118,27 @@ test('the flow tab has one floating action line above the footer', async () => {
       '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
       'the imported flow kept the wrong name');
 
-    // the browser-clipboard button must fail loudly in jsdom (no clipboard
-    // API there) instead of silently falling back to the desktop clipboard
+    // jsdom has no clipboard API - exactly the "Read permission denied" case
+    // in a real browser: the button must open the manual paste dialog (native
+    // Ctrl+V needs no permission) and import the flow from it
     const browserBtn = Array.from(bar.querySelectorAll('button'))
       .find((b) => b.textContent.includes('\u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u0645\u0631\u0648\u0631\u06af\u0631'));
     assert.ok(browserBtn, 'the browser-clipboard button is missing');
     browserBtn.dispatchEvent(new page.window.Event('click'));
-    assert.ok(await page.until(() => page.doc.body.textContent
-      .includes('\u0627\u062c\u0627\u0632\u0647 \u062e\u0648\u0627\u0646\u062f\u0646')),
-      'a denied browser clipboard must say so, not fall back to the server');
+    assert.ok(await page.until(() => page.doc.getElementById('mas-paste') !== null),
+      'a denied browser clipboard must open the paste dialog');
+    const area = page.doc.getElementById('mas-paste-area');
+    area.value = JSON.stringify({ name: '\u062c\u0631\u06cc\u0627\u0646 \u0686\u0633\u0628\u0627\u0646',
+      steps: [{ type: 'move', x: 7, y: 7 }] });
+    page.byText('button', '\u0648\u0627\u0631\u062f \u06a9\u0631\u062f\u0646')
+      .dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => flowPane.textContent.includes('move 7,7')),
+      'the pasted flow never arrived');
+    assert.equal(page.doc.getElementById('mas-paste'), null,
+      'the dialog must close after importing');
+    assert.equal(flowPane.querySelector('input.mas-input').value,
+      '\u062c\u0631\u06cc\u0627\u0646 \u0686\u0633\u0628\u0627\u0646',
+      'the pasted flow kept the wrong name');
 
     // the prompt button jumps into the agent's prompt sub-tab
     const promptBtn = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-flowbar button'))

@@ -2278,3 +2278,12 @@ body.mas-desktop-dark .mas-toast {
 }
 body.mas-desktop-dark .mas-toast-ok { border-left-color: #34d399; }
 body.mas-desktop-dark .mas-toast-error { border-left-color: #f87171; }
+
+/* The manual paste dialog (flow JSON from the operator's own clipboard):
+ * the box must give the textarea room, on both themes. */
+#mas-root .mas-paste-area {
+  width: 100%;
+  min-width: 320px;
+  margin: 0 0 12px;
+  box-sizing: border-box;
+}
