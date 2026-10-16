@@ -3151,6 +3151,50 @@ class Phase9Test(HubCase):
             self.assertEqual(captured["env"].get("LC_ALL"), "C.UTF-8")
             self.assertEqual(captured["env"].get("LANG"), "C.UTF-8")
 
+    def test_clipboard_read_falls_back_from_utf8_to_string(self) -> None:
+        # xclip's default target is the legacy STRING (Latin-1); Chrome
+        # refuses to convert Persian into it ("target STRING not available")
+        # even when the clipboard is full. UTF8_STRING must be asked first.
+        from unittest import mock
+        from automation import clipboard
+        calls: List[List[str]] = []
+
+        def fake_run(args, **kwargs):
+            calls.append([str(a) for a in args])
+            if "UTF8_STRING" in args:
+                return subprocess.CompletedProcess(
+                    args, 1, b"", b"Error: target UTF8_STRING not available\n")
+            return subprocess.CompletedProcess(args, 0, "سلام".encode(), b"")
+
+        with mock.patch.object(clipboard.shutil, "which",
+                               return_value="/usr/bin/xclip"), \
+                mock.patch.object(clipboard.subprocess, "run",
+                                  side_effect=fake_run):
+            self.assertEqual(clipboard.read_text(), "سلام")
+        self.assertEqual(len(calls), 2)
+        self.assertIn("UTF8_STRING", calls[0])
+        self.assertIn("STRING", calls[1])
+
+    def test_clipboard_read_reports_an_empty_desktop_cleanly(self) -> None:
+        # Both targets unavailable means nobody owns text; the operator must
+        # see "empty", not xclip's raw English error. (The old detection
+        # looked for "target not available", which never matches the real
+        # "target STRING not available" message.)
+        from unittest import mock
+        from automation import clipboard
+
+        def fake_run(args, **kwargs):
+            return subprocess.CompletedProcess(
+                args, 1, b"", b"Error: target STRING not available\n")
+
+        with mock.patch.object(clipboard.shutil, "which",
+                               return_value="/usr/bin/xclip"), \
+                mock.patch.object(clipboard.subprocess, "run",
+                                  side_effect=fake_run):
+            with self.assertRaises(clipboard.ClipboardError) as ctx:
+                clipboard.read_text()
+        self.assertIn("خالی", str(ctx.exception))
+
     def test_agent_key_use_is_audited_and_shown(self) -> None:
         hub, backend, flows = self.build()
         api = self.api_for(hub, backend, flows)

@@ -236,14 +236,22 @@ class ControlBackend:
         if rc != 0:
             return rc, out, err
         time.sleep(0.15)
-        try:
-            proc = subprocess.run(["xclip", "-selection", "clipboard", "-o"],
-                                  env=self.env(), capture_output=True, text=True,
-                                  timeout=10, check=False)
-        except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
-            return 1, "", "clipboard read failed: %s" % exc
+        # Chrome refuses the legacy STRING target for non-ASCII text, so ask
+        # for UTF8_STRING first (same order as the clipboard API bridge).
+        rc, text, err = 1, "", ""
+        for extra in (["-t", "UTF8_STRING"], ["-t", "STRING"]):
+            try:
+                proc = subprocess.run(
+                    ["xclip", "-selection", "clipboard", "-o"] + extra,
+                    env=self.env(), capture_output=True, text=True,
+                    timeout=10, check=False)
+            except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
+                return 1, "", "clipboard read failed: %s" % exc
+            rc, text, err = proc.returncode, proc.stdout, proc.stderr
+            if rc == 0:
+                break
         self.control(["key", "Escape"])
-        return proc.returncode, proc.stdout, proc.stderr
+        return rc, text, err
 
 
 class RunState:

@@ -48,24 +48,37 @@ def supported() -> Dict[str, Any]:
 def read_text(timeout: float = 5.0) -> str:
     """Return the current X clipboard content as text."""
     tool = _tool()
-    args = ([tool, "-selection", "clipboard", "-o"] if tool == "xclip"
+    base = ([tool, "-selection", "clipboard", "-o"] if tool == "xclip"
             else [tool, "--clipboard", "--output"])
+    # xclip's default retrieval target is the legacy STRING (Latin-1) and
+    # Chrome refuses to convert Persian into it -- the read dies with
+    # "Error: target STRING not available" even though the clipboard is
+    # full. Ask for UTF8_STRING first and keep STRING only as a fallback
+    # for owners that advertise nothing else.
+    attempts = ([base + ["-t", "UTF8_STRING"], base + ["-t", "STRING"]]
+                if tool == "xclip" else [base])
     # xclip converts through the locale encoding: a POSIX/ASCII locale turns
     # Persian text into question marks. Force UTF-8 no matter how the server
     # itself was started.
     env = dict(os.environ, DISPLAY=_display(),
                LC_ALL="C.UTF-8", LANG="C.UTF-8")
-    try:
-        proc = subprocess.run(args, capture_output=True, timeout=timeout,
-                              env=env)
-    except subprocess.TimeoutExpired:
-        raise ClipboardError("خواندن کلیپ‌بورد دسکتاپ طول کشید؛ دوباره تلاش کن.")
-    if proc.returncode != 0:
+    stderr = ""
+    for args in attempts:
+        try:
+            proc = subprocess.run(args, capture_output=True, timeout=timeout,
+                                  env=env)
+        except subprocess.TimeoutExpired:
+            raise ClipboardError("خواندن کلیپ‌بورد دسکتاپ طول کشید؛ دوباره تلاش کن.")
+        if proc.returncode == 0:
+            return proc.stdout.decode("utf-8", "replace")
         stderr = proc.stderr.decode("utf-8", "replace").strip()[:160]
-        if "target not available" in stderr or not stderr:
-            raise ClipboardError("کلیپ‌بورد دسکتاپ خالی است.")
-        raise ClipboardError("کلیپ‌بورد دسکتاپ خوانده نشد: %s" % stderr)
-    return proc.stdout.decode("utf-8", "replace")
+        if stderr and "not available" not in stderr:
+            # a real failure (dead X, no owner at all): retrying another
+            # target cannot help
+            break
+    if not stderr or "not available" in stderr:
+        raise ClipboardError("کلیپ‌بورد دسکتاپ خالی است.")
+    raise ClipboardError("کلیپ‌بورد دسکتاپ خوانده نشد: %s" % stderr)
 
 
 def write_text(text: str, timeout: float = 5.0) -> Dict[str, Any]:
