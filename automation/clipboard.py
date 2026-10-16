@@ -50,7 +50,11 @@ def read_text(timeout: float = 5.0) -> str:
     tool = _tool()
     args = ([tool, "-selection", "clipboard", "-o"] if tool == "xclip"
             else [tool, "--clipboard", "--output"])
-    env = dict(os.environ, DISPLAY=_display())
+    # xclip converts through the locale encoding: a POSIX/ASCII locale turns
+    # Persian text into question marks. Force UTF-8 no matter how the server
+    # itself was started.
+    env = dict(os.environ, DISPLAY=_display(),
+               LC_ALL="C.UTF-8", LANG="C.UTF-8")
     try:
         proc = subprocess.run(args, capture_output=True, timeout=timeout,
                               env=env)
@@ -74,7 +78,11 @@ def write_text(text: str, timeout: float = 5.0) -> Dict[str, Any]:
     # exactly what we want; xsel needs --input explicitly.
     args = ([tool, "-selection", "clipboard"] if tool == "xclip"
             else [tool, "--clipboard", "--input"])
-    env = dict(os.environ, DISPLAY=_display())
+    # xclip converts through the locale encoding: a POSIX/ASCII locale turns
+    # Persian text into question marks. Force UTF-8 no matter how the server
+    # itself was started.
+    env = dict(os.environ, DISPLAY=_display(),
+               LC_ALL="C.UTF-8", LANG="C.UTF-8")
     try:
         proc = subprocess.run(args, input=text.encode("utf-8"),
                               timeout=timeout, env=env,

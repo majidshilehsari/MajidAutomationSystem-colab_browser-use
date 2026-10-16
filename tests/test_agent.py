@@ -3128,6 +3128,29 @@ class Phase9Test(HubCase):
         self.assertIn(status, (200, 409),
                       "no xclip in the sandbox is fine, but it must answer")
 
+    def test_clipboard_bridge_forces_a_utf8_locale(self) -> None:
+        # xclip converts clipboard bytes through the locale encoding; Colab
+        # starts with LANG unset (POSIX/ASCII), which silently turns Persian
+        # text into question marks. Both directions must force C.UTF-8.
+        from unittest import mock
+        from automation import clipboard
+        captured: Dict[str, Any] = {}
+
+        def fake_run(args, **kwargs):
+            captured["env"] = kwargs.get("env") or {}
+            return subprocess.CompletedProcess(args, 0, b"", b"")
+
+        with mock.patch.object(clipboard.shutil, "which",
+                               return_value="/usr/bin/xclip"), \
+                mock.patch.object(clipboard.subprocess, "run",
+                                  side_effect=fake_run):
+            clipboard.write_text("سلام")
+            self.assertEqual(captured["env"].get("LC_ALL"), "C.UTF-8")
+            self.assertEqual(captured["env"].get("LANG"), "C.UTF-8")
+            clipboard.read_text()
+            self.assertEqual(captured["env"].get("LC_ALL"), "C.UTF-8")
+            self.assertEqual(captured["env"].get("LANG"), "C.UTF-8")
+
     def test_agent_key_use_is_audited_and_shown(self) -> None:
         hub, backend, flows = self.build()
         api = self.api_for(hub, backend, flows)

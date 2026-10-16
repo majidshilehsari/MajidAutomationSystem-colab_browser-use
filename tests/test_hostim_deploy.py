@@ -656,6 +656,37 @@ class TestColabPersianKeyboard(unittest.TestCase):
         self.assertIn("PERSIAN_KEYBOARD", self.start)
         self.assertIn("NUMLOCK", self.start)
 
+    def test_installer_ships_persian_font_and_xkb_data(self):
+        # Without an Arabic-script font Chrome draws every Persian character
+        # as an empty box and the desktop looks like it cannot type Persian.
+        self.assertIn("vazirmatn", self.install,
+                      "the bundled Vazirmatn font must be installed on Colab")
+        self.assertIn("fc-list ':lang=fa'", self.install,
+                      "font coverage must be proven, not assumed")
+        self.assertIn("xkb-data", self.install,
+                      "setxkbmap compiles nothing without the XKB database")
+
+    def test_launcher_forces_a_utf8_locale(self):
+        # xclip converts clipboard bytes through the locale encoding; Colab
+        # starts with LANG unset (POSIX), which turns Persian clipboard text
+        # into question marks. The launcher must export a UTF-8 world.
+        self.assertIn("${LANG:-C.UTF-8}", self.start)
+        self.assertIn("${LC_ALL:-C.UTF-8}", self.start)
+
+    def test_keyboard_setup_self_installs_and_verifies(self):
+        self.assertIn("installing the keyboard tools", self.start,
+                      "a runtime without install.sh must still get setxkbmap")
+        self.assertIn("setxkbmap -query", self.start,
+                      "the applied layout must be verified and shown")
+
+    def test_desktop_offers_a_click_based_layout_switch(self):
+        # Alt+Shift only helps when the events reach X untouched; operators
+        # whose own OS keyboard is already Persian toggle the wrong side.
+        self.assertIn("kb-set.sh", self.start)
+        self.assertIn(".fluxbox/menu", self.start)
+        self.assertIn("Persian only", self.start)
+        self.assertIn("English only", self.start)
+
 
 class TestGuide(unittest.TestCase):
     def setUp(self):

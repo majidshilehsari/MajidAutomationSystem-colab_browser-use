@@ -25,10 +25,28 @@ apt-get install -y -qq --no-install-recommends \
   wmctrl \
   x11-xkb-utils \
   x11-utils \
+  xkb-data \
   xclip \
   xdotool \
   x11vnc \
   xvfb
+
+# Without an Arabic-script font Chrome draws every Persian character as an
+# empty box, and the desktop looks like it "cannot type Persian" even when the
+# keyboard layout is right. The operator's own font (Vazirmatn, OFL license
+# beside the files) ships in the repo, so no guessed package name is needed:
+# install it and prove the coverage with a real fc-list check.
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+install -d /usr/share/fonts/truetype/vazirmatn
+install -m 0644 "$SCRIPT_DIR"/automation/static/fonts-ttf/*.ttf \
+  /usr/share/fonts/truetype/vazirmatn/ 2>/dev/null \
+  || printf 'Warning: the bundled Vazirmatn fonts could not be installed.\n' >&2
+fc-cache -f >/dev/null 2>&1 || true
+if fc-list ':lang=fa' | grep -q .; then
+  printf 'Persian font coverage: ok\n'
+else
+  printf 'Warning: no Persian-capable font; Persian text may render as boxes.\n' >&2
+fi
 
 if ! command -v google-chrome >/dev/null 2>&1; then
   chrome_deb=$(mktemp --suffix=.deb /tmp/google-chrome-stable.XXXXXX)
