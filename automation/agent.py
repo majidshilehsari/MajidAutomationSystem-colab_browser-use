@@ -40,6 +40,7 @@ from automation.backup import BackupError, BackupManager
 from automation.captcha import CaptchaError, CaptchaSolver
 from automation.llm import (LlmClient, LlmError, PROVIDER_BROWSER,
                             extract_json)
+from automation.brain import Brain
 from automation.operations import OperationError, OperationLibrary
 from automation.scheduler import Scheduler, SchedulerBusy, next_run
 from automation.scripts import ScriptError, ScriptRunner
@@ -93,6 +94,18 @@ PLAIN_SETTINGS = {
     "captcha.notifyOnEscalation": bool,
     "scripts.passToken": bool,
     "scripts.timeout": float,
+    # Round 24, phase 1: the brain's policy lives here, so the panel edits
+    # it and every Supabase snapshot carries it between machines.
+    "brain.enabled": bool,
+    "brain.notify": bool,
+    "brain.runGapSec": int,
+    "brain.opCooldownMin": int,
+    "brain.suggestTtlMin": int,
+    "brain.askCooldownMin": int,
+    "log.forceStepShots": bool,
+    "log.shotKeepDays": int,
+    "log.errShotKeepDays": int,
+    "telegram.channel.brain": str,
     "public.base": str,
     # The visible pointer: a big yellow cursor and a ripple on every click.
     "cursor.enabled": bool,
@@ -271,6 +284,15 @@ API_INDEX = [
      "Kill the running script right now."),
     ("PUT", "/agent/operations/<id>", "📚 ویرایش یک عملیات موجود.",
      "Edit an existing operation."),
+    ("GET", "/agent/brain", "🧠 وضعیت مغز: روشن/خاموش، پیشنهادِ جاری، عملیات‌های "
+                            "همیشه‌مجاز و سیاست‌های گزارش‌گیری.",
+     "Brain status: on/off, the open suggestion, the always-allowed operations "
+     "and the logging policy."),
+    ("POST", "/agent/brain/toggle", "🧠 روشن یا خاموش کردن مغز (کلید enabled).",
+     "Turn the brain on or off (enabled)."),
+    ("POST", "/agent/brain/suggestion", "🧠 تصمیم روی پیشنهاد مغز: id به‌علاوهٔ "
+                                        "action=run|reject.",
+     "Decide on the brain's suggestion: id plus action=run|reject."),
     ("DELETE", "/agent/operations/<id>", "📚 حذف یک عملیات (عملیات‌های آماده با "
                                          "restart برمی‌گردند).",
      "Delete an operation; built-ins come back on restart."),
@@ -425,7 +447,8 @@ class AgentHub:
                  notifier: Optional[Notifier] = None,
                  ai_browser: Any = None, scheduler: Optional[Scheduler] = None,
                  scripts: Optional[ScriptRunner] = None,
-                 captcha: Optional[CaptchaSolver] = None) -> None:
+                 captcha: Optional[CaptchaSolver] = None,
+                 shots: Optional[Any] = None) -> None:
         self.data_dir = data_dir
         self.engine = engine
         self.flows = flows
@@ -483,13 +506,22 @@ class AgentHub:
             self.store, data_dir=data_dir, notifier=self.notifier, clock=clock,
             flows_dir=getattr(flows, "dir", None), hub=self)
 
+        # The never-sleeping brain: it runs the always-allowed operations
+        # whenever the desk is free, proposes the others, enforces the
+        # per-step logging policy on every engine start and prunes old
+        # screenshots (the text reports stay forever).
+        self.brain = Brain(self, store=self.store, shots=shots, clock=clock,
+                           sleep=sleep)
+
     # -- lifecycle ------------------------------------------------------
     def start(self) -> None:
         self.scheduler.ensure_schedules()
         self.scheduler.start()
+        self.brain.start()
 
     def stop(self) -> None:
         self.scheduler.stop()
+        self.brain.stop()
         self.store.close()
 
     # -- small shared helpers -------------------------------------------
@@ -862,6 +894,30 @@ class AgentHub:
                 "steps": len(operation.get("steps") or [])}
 
     # -- Telegram: sending on purpose --------------------------------------
+    # -- the brain: the awake supervisor ----------------------------------
+    def brain_status(self) -> Dict[str, Any]:
+        return self.brain.status()
+
+    def brain_toggle(self, enabled: Any, actor: str = "operator") -> Dict[str, Any]:
+        self._guard()
+        value = bool(enabled)
+        self.store.set_setting("brain.enabled", value, actor=actor)
+        self.store.add_devlog("مغز %s شد." % ("روشن" if value else "خاموش"),
+                              "", actor=actor)
+        self.store.audit(actor, "brain.toggle", "on" if value else "off")
+        return self.brain.status()
+
+    def brain_decide(self, suggestion_id: str, action: str,
+                     actor: str = "operator") -> Dict[str, Any]:
+        self._guard()
+        try:
+            result = self.brain.decide(str(suggestion_id), str(action))
+        except ValueError as exc:
+            raise AgentError(str(exc), 409)
+        self.store.audit(actor, "brain.decision",
+                         "%s:%s" % (action, suggestion_id))
+        return result
+
     def telegram_send(self, text: str, target: Optional[Any] = None,
                       channel: Optional[str] = None, purpose: str = "manual",
                       actor: str = "operator") -> Dict[str, Any]:

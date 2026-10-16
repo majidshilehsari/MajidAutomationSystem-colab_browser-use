@@ -423,7 +423,8 @@ def build_api(args: argparse.Namespace) -> AutomationApi:
             token=token,
             public_base=getattr(args, "public_base", "") or "",
             ai_port=int(getattr(args, "ai_cdp_port", 9223) or 9223),
-            ai_display=str(getattr(args, "ai_display", ":2") or ":2"))
+            ai_display=str(getattr(args, "ai_display", ":2") or ":2"),
+            shots=shots)
     # The visible pointer: a big yellow cursor plus a ripple on every click.
     # It reads its own settings from the agent store when there is one, and
     # quietly does nothing when CDP is not answering.

@@ -363,6 +363,16 @@ class AutomationEngine:
             return self._state is not None and self._state.status not in TERMINAL_STATES
 
     def start(self, flow: Dict[str, Any], run_id: Optional[str] = None) -> Dict[str, Any]:
+        # The brain's logging policy: mandatory before/after screenshots on
+        # every run, whatever the flow itself asked for. Best effort - a
+        # failing policy must never block a run.
+        brain = getattr(self._agent, "brain", None) if self._agent else None
+        policy = getattr(brain, "enforce_logging", None)
+        if policy is not None:
+            try:
+                flow = policy(flow) or flow
+            except Exception:
+                pass
         with self._lock:
             if self.busy():
                 raise RuntimeError("a flow is already running (run %s)" % self._state.run_id)

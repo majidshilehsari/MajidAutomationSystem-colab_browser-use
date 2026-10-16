@@ -15,7 +15,7 @@ import {
 
 /** Tab order, and the tab the panel opens on. */
 const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages',
-  'db', 'ops', 'settings', 'agent', 'log'];
+  'db', 'ops', 'brain', 'settings', 'agent', 'log'];
 const DEFAULT_TAB = 'chat';
 
 /** The tab the panel opens on: the remembered one, else the first. */
@@ -368,6 +368,7 @@ function buildPanel() {
       el('section', { id: 'mas-tab-pages', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-db', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-ops', class: 'mas-tabpane', hidden: true }),
+      el('section', { id: 'mas-tab-brain', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-settings', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-agent', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-log', class: 'mas-tabpane', hidden: true }),
@@ -476,6 +477,7 @@ function selectTab(name) {
     node.hidden = node.id !== `mas-tab-${name}`;
   });
   if (name !== 'chat') stopChatPolling();
+  if (name !== 'brain') stopBrainPolling();
   try { localStorage.setItem(LS.tab, name); } catch (_) { /* quota */ }
   saveUiPref('tab', name);
   if (name === 'chat') renderChat();
@@ -484,6 +486,7 @@ function selectTab(name) {
   if (name === 'log') renderLog();
   if (name === 'db') renderDatabase();
   if (name === 'ops') renderOps();
+  if (name === 'brain') renderBrain();
   if (name === 'settings') renderSettings();
   if (name === 'agent') renderAgent();
   if (name === 'flow') renderFlow();
@@ -552,11 +555,13 @@ async function refreshAgentTabs() {
   } catch (error) {
     missing = error.status === 404;
   }
-  for (const name of ['chat', 'library', 'db', 'ops']) {
+  for (const name of ['chat', 'library', 'db', 'ops', 'brain']) {
     const node = document.querySelector(`.mas-tab[data-tab="${name}"]`);
     if (node) node.hidden = missing;
   }
-  if (missing && ['chat', 'library', 'db', 'ops'].includes(currentTab())) selectTab('flow');
+  if (missing && ['chat', 'library', 'db', 'ops', 'brain'].includes(currentTab())) {
+    selectTab('flow');
+  }
   return !missing;
 }
 
@@ -3613,6 +3618,9 @@ async function copyText(text) {
 
 const CHAT_POLL_MS = 2000;
 let chatTimer = null;
+// The brain tab's status poller. Declared up here next to chatTimer because
+// selectTab() runs during boot, long before the brain section below executes.
+let brainTimer = null;
 /** Last known connection state, so a poll does not re-check the tabs. */
 let lastConnected = null;
 
@@ -3873,6 +3881,9 @@ function operationCard(op) {
     ]),
     el('div', { class: 'mas-row mas-wrap' }, [
       button('▶ ' + t('opRun'), () => runOperation(op), { class: 'mas-btn mas-primary' }),
+      button(op.permission === 'auto' ? '🔓 ' + t('opPermAuto') : '🔒 ' + t('opPermAsk'),
+        () => setOperationPermission(op, op.permission === 'auto' ? 'ask' : 'auto'),
+        { class: 'mas-btn', title: t('opPermHint') }),
       button('📂 ' + t('opOpen'), () => openOperationInStages(op)),
       button('✎ ' + t('opEdit'), () => {
         state.editingOperation = {
@@ -4472,6 +4483,184 @@ if (document.readyState === 'loading') {
   document.addEventListener('DOMContentLoaded', boot);
 } else {
   boot();
+}
+
+/* ------------------------------------------------------------------ *
+ * Brain tab: the awake supervisor that never lets the desk idle
+ * ------------------------------------------------------------------ */
+
+async function renderBrain() {
+  const pane = document.getElementById('mas-tab-brain');
+  if (!pane) return;
+  replace(pane, el('p', { class: 'mas-empty', text: '…' }));
+  let data;
+  try {
+    data = await api('/agent/brain');
+  } catch (error) {
+    stopBrainPolling();
+    replace(pane, el('p', { class: 'mas-hint', text: error.message }),
+      el('p', { class: 'mas-hint', text: t('opNeedsAgent') }));
+    return;
+  }
+  state.brainSugSeen = Boolean(data.suggestion);
+  const policy = data.policy || {};
+  const suggestion = data.suggestion;
+  const statusCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '🧠 ' + t('brainTitle') })]),
+    el('p', { class: 'mas-hint', text: t('brainHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, compact([
+      el('label', { class: 'mas-check' }, [
+        el('input', {
+          type: 'checkbox', id: 'mas-brain-enabled', checked: Boolean(data.enabled),
+          onChange: (event) => brainToggle(event.target.checked),
+        }),
+        el('span', { text: t('brainEnabled') }),
+      ]),
+      el('span', {
+        class: 'mas-hint', id: 'mas-brain-state',
+        text: (data.alive ? t('brainAlive') : t('brainStopped'))
+          + ' · ' + (data.busy ? t('brainBusy') : t('brainIdle')),
+      }),
+      button('↻ ' + t('refresh'), renderBrain),
+    ])),
+  ]);
+  const sugCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '💡 ' + t('brainSuggestion') })]),
+    suggestion ? el('div', {}, compact([
+      el('p', { text: suggestion.name }),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        button('▶ ' + t('brainRunIt'), () => brainDecide(suggestion.id, 'run'),
+          { class: 'mas-btn mas-primary' }),
+        button('✕ ' + t('brainReject'), () => brainDecide(suggestion.id, 'reject'),
+          { class: 'mas-btn mas-danger' }),
+      ]),
+    ])) : el('p', { class: 'mas-hint', text: t('brainNoSuggestion') }),
+  ]);
+  const opRow = (op, badge) => el('div', { class: 'mas-op' }, compact([
+    el('b', { text: op.name }),
+    el('span', { class: 'mas-badge', text: badge }),
+    op.last_run_at
+      ? el('span', { class: 'mas-hint', text: agentTime(op.last_run_at) }) : null,
+  ]));
+  const opsCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '🗂 ' + t('brainOps') })]),
+    el('div', { class: 'mas-ops' }, compact([
+      (data.autoOps || []).length || (data.askOps || []).length ? null
+        : el('p', { class: 'mas-empty', text: t('opNone') }),
+      (data.autoOps || []).map((op) => opRow(op, t('brainAuto'))),
+      (data.askOps || []).map((op) => opRow(op, t('brainAsk'))),
+    ])),
+  ]);
+  const policyCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '🎛 ' + t('brainPolicy') })]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      brainNumber('brain.runGapSec', policy.runGapSec, t('brainRunGap')),
+      brainNumber('brain.opCooldownMin', policy.opCooldownMin, t('brainCooldown')),
+      brainNumber('brain.suggestTtlMin', policy.suggestTtlMin, t('brainTtl')),
+      brainNumber('log.shotKeepDays', policy.shotKeepDays, t('brainShotKeep')),
+      brainNumber('log.errShotKeepDays', policy.errShotKeepDays, t('brainErrKeep')),
+    ]),
+    el('label', { class: 'mas-check' }, [
+      el('input', {
+        type: 'checkbox', id: 'mas-brain-forceshots',
+        checked: policy.forceStepShots !== false,
+        onChange: (event) => savePolicy('log.forceStepShots', event.target.checked),
+      }),
+      el('span', { text: t('brainForceShots') }),
+    ]),
+    el('label', { class: 'mas-check' }, [
+      el('input', {
+        type: 'checkbox', id: 'mas-brain-notify', checked: policy.notify !== false,
+        onChange: (event) => savePolicy('brain.notify', event.target.checked),
+      }),
+      el('span', { text: t('brainNotify') }),
+    ]),
+  ]);
+  const logCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '📜 ' + t('brainLog') })]),
+    el('div', { class: 'mas-log' }, (data.log || []).map((entry) => el('div', {
+      class: 'mas-log-line',
+    }, compact([
+      el('span', { class: 'mas-log-t', text: formatDateTime(entry.at) }),
+      el('span', { text: entry.title }),
+    ])))),
+  ]);
+  replace(pane, statusCard, sugCard, opsCard, policyCard, logCard);
+  startBrainPolling();
+}
+
+function brainNumber(key, value, label) {
+  return el('label', { class: 'mas-field' }, compact([
+    el('span', { class: 'mas-hint', text: label }),
+    el('input', {
+      class: 'mas-input', type: 'number', min: '0',
+      value: value === null || value === undefined ? '' : String(value),
+      onChange: (event) => savePolicy(key, parseInt(event.target.value, 10) || 0),
+    }),
+  ]));
+}
+
+async function savePolicy(key, value) {
+  try {
+    await api('/agent/settings', { method: 'POST', body: { [key]: value } });
+    toast(t('saved'), 'ok');
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function brainToggle(enabled) {
+  try {
+    await api('/agent/brain/toggle', { method: 'POST', body: { enabled } });
+    toast(enabled ? t('brainOn') : t('brainOff'), 'ok');
+    renderBrain();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function brainDecide(suggestionId, action) {
+  try {
+    await api('/agent/brain/suggestion',
+      { method: 'POST', body: { id: suggestionId, action } });
+    toast(t(action === 'run' ? 'brainStarted' : 'brainRejected'), 'ok');
+    renderBrain();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+function startBrainPolling() {
+  stopBrainPolling();
+  brainTimer = setInterval(async () => {
+    const pane = document.getElementById('mas-tab-brain');
+    if (!pane || pane.hidden) { stopBrainPolling(); return; }
+    try {
+      const data = await api('/agent/brain');
+      const line = document.getElementById('mas-brain-state');
+      if (line) {
+        line.textContent = (data.alive ? t('brainAlive') : t('brainStopped'))
+          + ' · ' + (data.busy ? t('brainBusy') : t('brainIdle'));
+      }
+      // Only a appearing/vanishing suggestion redraws the pane: a full
+      // redraw while the operator types into a policy input would eat text.
+      if (Boolean(data.suggestion) !== Boolean(state.brainSugSeen)) renderBrain();
+    } catch (_) { /* the next tick tries again */ }
+  }, 5000);
+}
+
+function stopBrainPolling() {
+  if (brainTimer !== null) { clearInterval(brainTimer); brainTimer = null; }
+}
+
+async function setOperationPermission(op, permission) {
+  try {
+    await api(`/agent/operations/${encodeURIComponent(op.id)}`, {
+      method: 'PUT',
+      body: {
+        name: op.name, description: op.description || '', tags: op.tags || [],
+        steps: op.steps || [], permission,
+      },
+    });
+    toast(t('saved'), 'ok');
+    renderOperations();
+  } catch (error) { toast(error.message, 'error'); }
 }
 
 /* ------------------------------------------------------------------ *

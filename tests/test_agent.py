@@ -1932,9 +1932,9 @@ class OperationsLibraryTest(HubCase):
         first = hub.operation_list()
         ids = [row["id"] for row in first]
         self.assertEqual(len(ids), len(set(ids)), "a built-in was seeded twice")
-        self.assertEqual(len(first), 5)
+        self.assertEqual(len(first), 6)
         names = " ".join(row["name"] for row in first)
-        for needle in ("lmarena", "کپچا", "دیپ‌سیک"):
+        for needle in ("lmarena", "کپچا", "دیپ‌سیک", "مشاهده"):
             self.assertIn(needle, names)
         hub.store.close()
 
@@ -1982,7 +1982,7 @@ class OperationsLibraryTest(HubCase):
                                     operation_id=created["id"])
         self.assertEqual(edited["id"], created["id"])
         self.assertEqual(len(edited["steps"]), 1)
-        self.assertEqual(len(hub.operation_list()), 6)
+        self.assertEqual(len(hub.operation_list()), 7)
 
         self.assertEqual(hub.operation_delete(created["id"])["deleted"], created["id"])
         with self.assertRaises(AgentError) as caught:
@@ -1998,7 +1998,7 @@ class OperationsLibraryTest(HubCase):
                 with self.assertRaises(AgentError) as caught:
                     hub.operation_save({"name": "bad", "steps": bad})
                 self.assertEqual(caught.exception.status, 400)
-        self.assertEqual(len(hub.operation_list()), 5, "a refused operation was stored")
+        self.assertEqual(len(hub.operation_list()), 6, "a refused operation was stored")
 
     def test_a_builtin_can_be_reset_after_an_edit(self):
         hub, _, _ = self.build()

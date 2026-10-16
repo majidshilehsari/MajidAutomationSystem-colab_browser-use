@@ -276,6 +276,9 @@ class AutomationApi:
             ("DELETE", "/agent/operations/*", self.route_agent_operations_delete),
             ("POST", "/agent/operation-run", self.route_agent_operation_run),
             ("POST", "/agent/operation-reset", self.route_agent_operation_reset),
+            ("GET", "/agent/brain", self.route_agent_brain_status),
+            ("POST", "/agent/brain/toggle", self.route_agent_brain_toggle),
+            ("POST", "/agent/brain/suggestion", self.route_agent_brain_decide),
             # the pointer and the click ripple
             ("GET", "/agent/cursor", self.route_agent_cursor_get),
             ("POST", "/agent/cursor", self.route_agent_cursor_set),
@@ -1225,6 +1228,25 @@ class AutomationApi:
             raise ApiError(400, "missing 'id'")
         return json_response(200, {"operation":
                                    self.agent.operation_reset(operation_id)})
+
+    # -- the brain: the awake supervisor -------------------------------------
+    def route_agent_brain_status(self, **_: Any) -> Response:
+        return json_response(200, self.agent.brain_status())
+
+    def route_agent_brain_toggle(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        if "enabled" not in payload:
+            raise ApiError(400, "missing 'enabled'")
+        return json_response(200, self.agent.brain_toggle(payload.get("enabled")))
+
+    def route_agent_brain_decide(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        suggestion_id = str(payload.get("id") or "")
+        action = str(payload.get("action") or "")
+        if not suggestion_id or action not in ("run", "reject"):
+            raise ApiError(400, "need 'id' plus action=run|reject")
+        return json_response(
+            200, self.agent.brain_decide(suggestion_id, action))
 
     # -- the pointer and the click ripple -------------------------------------
     def route_agent_cursor_get(self, **_: Any) -> Response:

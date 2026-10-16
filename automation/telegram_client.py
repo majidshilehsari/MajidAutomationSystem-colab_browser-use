@@ -44,7 +44,7 @@ MODES = (MODE_OFF, MODE_BOT, MODE_ACCOUNT, MODE_BOTH)
 #: The two transports a message can travel on.
 CHANNELS = (MODE_BOT, MODE_ACCOUNT)
 #: Notification kinds an operator can route to a different transport.
-PURPOSES = ("handoff", "captcha", "jobs", "manual", "backup")
+PURPOSES = ("handoff", "captcha", "jobs", "manual", "backup", "brain")
 
 DEFAULT_HANDOFF_TEMPLATE = (
     "🛑 نیاز به تأیید انسانی\n"

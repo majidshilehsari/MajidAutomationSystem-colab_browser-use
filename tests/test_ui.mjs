@@ -30,7 +30,7 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
     const path = String(url);
     const clean = path.split('?')[0];
     requests.push(path);
-    if ((options.method || 'GET').toUpperCase() === 'POST') {
+    if (['POST', 'PUT'].includes((options.method || 'GET').toUpperCase())) {
       posts.push({ url: path, body: options.body });
     }
     const token = (options.headers || {})['X-Automation-Token'];
@@ -78,6 +78,8 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
     if ((options.method || 'GET').toUpperCase() === 'POST'
         && (clean.endsWith('/clipboard') || clean.endsWith('/agent/devlog')
             || clean.endsWith('/agent/pages') || clean.endsWith('/agent/suggestions')
+            || clean.endsWith('/agent/brain/toggle')
+            || clean.endsWith('/agent/brain/suggestion')
             || clean.includes('/agent/suggestion-'))) {
       return json({ ok: true, page: { id: 7, title: 'x' },
         suggestion: { id: 3, status: 'draft' } });
@@ -275,13 +277,15 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
       return json({ operations: [
         { id: 'op-builtin-lmarena', name: '\u0627\u062a\u0635\u0627\u0644 \u0628\u0647 \u0627\u06cc\u062c\u0646\u062a lmarena',
           description: '\u0633\u0627\u06cc\u062a \u0631\u0627 \u0628\u0627\u0632 \u0645\u06cc\u200c\u06a9\u0646\u062f', kind: 'browser',
-          builtin: true, builtinKey: 'lmarena', tags: ['chat'], steps: [
+          builtin: true, builtinKey: 'lmarena', permission: 'ask',
+          tags: ['chat'], steps: [
             { type: 'agent_open', provider: 'lmarena', url: 'https://lmarena.ai/' },
             { type: 'wait', ms: 1500 }],
           created_at: 1760000000, updated_at: 1760000000, last_run_at: 1760000900,
           last_status: 'done', run_count: 3 },
         { id: 'op-1', name: 'my operation', description: '', kind: 'custom',
-          builtin: false, builtinKey: '', tags: [], steps: [{ type: 'click', x: 5, y: 6 }],
+          builtin: false, builtinKey: '', permission: 'auto', tags: [],
+          steps: [{ type: 'click', x: 5, y: 6 }],
           created_at: 1760000000, updated_at: 1760000000, last_run_at: 0,
           last_status: '', run_count: 0 },
       ], stepTypes: {
@@ -291,6 +295,20 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
         agent_open: { required: [], optional: ['provider', 'url'], common: [],
                       fa: '\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 \u0686\u062a', en: 'Open a chat' },
       } });
+    }
+    if (clean.endsWith('/agent/brain')) {
+      return json({ enabled: true, alive: true, busy: false,
+        suggestion: { id: 'sug1', operationId: 'op-1', name: 'my operation',
+                      createdAt: 1760000000, expiresAt: 1760001800 },
+        nextAllowedAt: 0,
+        policy: { runGapSec: 120, opCooldownMin: 10, suggestTtlMin: 15,
+                  notify: true, forceStepShots: true, shotKeepDays: 7,
+                  errShotKeepDays: 30 },
+        autoOps: [{ id: 'op-builtin-observe', name: 'observe', permission: 'auto',
+                    last_run_at: 1760000000, last_status: 'done' }],
+        askOps: [{ id: 'op-1', name: 'my operation', permission: 'ask' }],
+        log: [{ id: 1, at: 1760000000, actor: 'brain', title: 'brain said hi',
+                body: '' }] });
     }
     if (clean.endsWith('/agent/operation-run')) {
       return json({ started: true, id: 'op-1', status: 'running',
@@ -765,7 +783,7 @@ test('step list shows no numbering and options are styled dark', async () => {
 
 /** Tabs by name. Chat is first and the library comes before the stages. */
 const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages',
-  'db', 'ops', 'settings', 'agent', 'log'];
+  'db', 'ops', 'brain', 'settings', 'agent', 'log'];
 
 function tab(page, name) {
   const node = Array.from(page.doc.querySelectorAll('.mas-tab'))
@@ -1592,6 +1610,63 @@ test('running an operation hands it to the engine', async () => {
     const sent = page.posts.find((item) => item.url.endsWith('/agent/operation-run'));
     assert.ok(sent, 'operation-run was never called');
     assert.equal(JSON.parse(sent.body).id, 'op-builtin-lmarena');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the brain tab shows the supervisor and takes its decisions', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'brain');
+    const ready = await page.until(
+      () => page.doc.querySelector('#mas-brain-enabled') !== null);
+    assert.ok(ready, 'the brain pane never rendered');
+    assert.equal(page.doc.querySelector('#mas-brain-enabled').checked, true,
+      'the switch should mirror the server state');
+    // The open suggestion shows both decision buttons; running it posts
+    // the suggestion id and the action, nothing else.
+    const run = await page.until(
+      () => page.byText('button', '\u25b6 \u0627\u062c\u0631\u0627 \u06a9\u0646') !== undefined);
+    assert.ok(run, 'no run-it button for the suggestion');
+    page.byText('button', '\u25b6 \u0627\u062c\u0631\u0627 \u06a9\u0646')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const sent = page.posts.find((item) => item.url.endsWith('/agent/brain/suggestion'));
+    assert.ok(sent, 'the decision was never posted');
+    assert.deepEqual(JSON.parse(sent.body), { id: 'sug1', action: 'run' });
+    // Flipping the switch off posts the new state right away.
+    const box = page.doc.querySelector('#mas-brain-enabled');
+    box.checked = false;
+    box.dispatchEvent(new page.window.Event('change'));
+    await page.wait(40);
+    const toggled = page.posts.find((item) => item.url.endsWith('/agent/brain/toggle'));
+    assert.ok(toggled, 'the toggle was never posted');
+    assert.equal(JSON.parse(toggled.body).enabled, false);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the library flips an operation between auto and ask', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'library');
+    // op-1 comes from the fake as permission 'auto', so its card shows the
+    // open lock; one click must PUT the whole operation with 'ask'.
+    const ready = await page.until(
+      () => page.byText('button', '\ud83d\udd13 \u0647\u0645\u06cc\u0634\u0647 \u0645\u062c\u0627\u0632') !== undefined);
+    assert.ok(ready, 'no permission toggle in the library');
+    page.byText('button', '\ud83d\udd13 \u0647\u0645\u06cc\u0634\u0647 \u0645\u062c\u0627\u0632')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const sent = page.posts.find((item) => item.url.endsWith('/agent/operations/op-1'));
+    assert.ok(sent, 'the permission change was never sent');
+    const body = JSON.parse(sent.body);
+    assert.equal(body.permission, 'ask');
+    assert.equal(body.name, 'my operation', 'the PUT must carry the whole operation');
   } finally {
     await page.cleanup();
   }

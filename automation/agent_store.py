@@ -110,6 +110,7 @@ CREATE TABLE IF NOT EXISTS operations (
     description TEXT NOT NULL DEFAULT '',
     kind        TEXT NOT NULL DEFAULT 'steps',
     builtin     TEXT NOT NULL DEFAULT '',
+    permission  TEXT NOT NULL DEFAULT 'ask',   -- brain: auto = run it, ask = propose
     tags        TEXT NOT NULL DEFAULT '[]',
     steps       TEXT NOT NULL DEFAULT '[]',
     created_at  REAL NOT NULL,
@@ -235,6 +236,33 @@ class AgentStore:
                 "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
                 ("schema_version", str(SCHEMA_VERSION)))
             self._db.commit()
+        self._ensure_columns()
+
+    def _ensure_columns(self) -> None:
+        """Add columns a newer schema introduced to an existing database.
+
+        The panel database survives upgrades (and travels through Supabase
+        snapshots), so additive schema changes must not assume a fresh file:
+        every entry below is an ALTER TABLE that runs only while the column
+        is still missing.
+        """
+        additions = (("operations", "permission",
+                      "TEXT NOT NULL DEFAULT 'ask'"),)
+        with self._lock:
+            for table, column, spec in additions:
+                try:
+                    existing = {row["name"] for row in
+                                self._db.execute("PRAGMA table_info(%s)" % table)}
+                except sqlite3.Error:
+                    continue
+                if not existing or column in existing:
+                    continue
+                try:
+                    self._db.execute("ALTER TABLE %s ADD COLUMN %s %s"
+                                     % (table, column, spec))
+                    self._db.commit()
+                except sqlite3.Error:
+                    self._db.rollback()
 
     # -- plumbing -------------------------------------------------------
     def close(self) -> None:
@@ -793,12 +821,14 @@ class AgentStore:
             operation_id = "op-%s" % uuid.uuid4().hex[:10]
         self._execute(
             "INSERT INTO operations (id, name, description, kind, builtin, tags,"
-            " steps, created_at, updated_at) VALUES (?,?,?,?,?,?,?,?,?)",
+            " steps, created_at, updated_at, permission)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?)",
             (operation_id, str(data.get("name") or "عملیات"),
              str(data.get("description") or ""), str(data.get("kind") or "steps"),
              str(data.get("builtin") or ""),
              json.dumps(data.get("tags") or [], ensure_ascii=False),
-             json.dumps(data.get("steps") or [], ensure_ascii=False), now, now))
+             json.dumps(data.get("steps") or [], ensure_ascii=False), now, now,
+             str(data.get("permission") or "ask")[:10]))
         self.audit(actor, "operation.created", operation_id)
         return self.get_operation(operation_id) or {}
 
@@ -808,7 +838,7 @@ class AgentStore:
         if row is None:
             return None
         fields, args = [], []
-        for key in ("name", "description", "kind"):
+        for key in ("name", "description", "kind", "permission"):
             if key in data:
                 fields.append("%s = ?" % key)
                 args.append(str(data[key]))

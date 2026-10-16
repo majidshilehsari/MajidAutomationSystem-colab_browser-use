@@ -94,6 +94,25 @@ BUILTINS: List[Dict[str, Any]] = [
             {"id": "sn-2", "type": "capture_text", "label": "متن صفحه"},
         ],
     },
+    {
+        # The brain's fixed thinking: one screenshot of whatever is on screen
+        # right now, one capture of all visible text, and both archived into
+        # the log. Safe at any moment, so it is always allowed.
+        "id": "op-builtin-observe",
+        "builtin": "observe",
+        "name": "چرخهٔ مشاهده",
+        "description": "یک اسکرین‌شات از صفحهٔ فعلی + ضبط کامل متنِ دیده‌شدنی؛ "
+                       "هر دو به آرشیو گزارش‌ها می‌روند. این نگاهِ ثابتِ مغز است و "
+                       "در هر لحظه بی‌خطر است، پس همیشه مجاز است.",
+        "tags": ["مغز", "مشاهده", "گزارش"],
+        "permission": "auto",
+        "steps": [
+            {"id": "ob-1", "type": "screenshot", "name": "observe",
+             "label": "اسکرین‌شاتِ چرخهٔ مشاهده"},
+            {"id": "ob-2", "type": "capture_text", "limit": 20000,
+             "label": "متن کاملِ صفحهٔ فعلی"},
+        ],
+    },
 ]
 
 
@@ -128,7 +147,8 @@ class OperationLibrary:
             self.store.create_operation(
                 {"name": definition["name"], "description": definition["description"],
                  "kind": "steps", "builtin": definition["builtin"],
-                 "tags": definition["tags"], "steps": steps},
+                 "tags": definition["tags"], "steps": steps,
+                 "permission": definition.get("permission") or "ask"},
                 operation_id=definition["id"], actor=actor)
             created += 1
         return created
@@ -187,10 +207,17 @@ class OperationLibrary:
         steps, errors = self.validate_steps(data.get("steps") or [])
         if errors:
             raise OperationError("invalid steps: %s" % "; ".join(errors))
+        # The brain's permission flag: 'auto' operations it may run by
+        # itself; everything else it only ever proposes.
+        permission = str(data.get("permission") or "").strip()
+        if permission and permission not in ("auto", "ask"):
+            raise OperationError("permission must be 'auto' or 'ask'")
         payload = {"name": name,
                    "description": str(data.get("description") or ""),
                    "tags": [str(tag) for tag in (data.get("tags") or [])],
                    "steps": steps}
+        if permission:
+            payload["permission"] = permission
         if operation_id:
             updated = self.store.update_operation(operation_id, payload, actor=actor)
             if updated is None:
