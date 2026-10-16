@@ -845,9 +845,15 @@ class AutomationApi:
             raise ApiError(400, "text must not be empty")
         if self.texts is None:
             raise ApiError(503, "text archive is not configured")
+        # Round 27, item 9: the archive is split in two - 'page' for the
+        # unstructured whole-page captures and 'structured' for the texts
+        # copied from the agent's answers and the saved notes. Anything
+        # posted here on purpose is curated, so it defaults to structured.
+        kind = "page" if str(payload.get("kind") or "") == "page" else "structured"
         row = self.texts.add({
             "text": text[:20000],
             "source": str(payload.get("source") or "manual")[:40],
+            "kind": kind,
             "note": str(payload.get("note") or "")[:200],
             "chars": len(text),
         })

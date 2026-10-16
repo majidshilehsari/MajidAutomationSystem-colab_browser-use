@@ -2247,62 +2247,76 @@ async function renderShots(host) {
 }
 
 /* ------------------------------------------------------------------ *
- * Extracted texts tab: what the system read off a page and kept
+ * Extracted texts: two sub-tabs (round 27, item 9). The unstructured
+ * ones are the whole-page captures exactly as seen; the structured ones
+ * are the answers copied from the agent and the operator's saved notes.
+ * Legacy rows without a kind are sorted by their source.
  * ------------------------------------------------------------------ */
 
-async function renderTexts(host) {
-  const pane = host || document.getElementById('mas-tab-texts');
+function textKindOf(row) {
+  if (row.kind === 'page' || row.kind === 'structured') return row.kind;
+  return row.source === 'capture_text' ? 'page' : 'structured';
+}
+
+async function renderTexts(host, kind) {
+  const want = kind === 'page' ? 'page' : 'structured';
+  const pane = host || document.getElementById('mas-tab-db');
   if (!pane) return;
   replace(pane, el('p', { class: 'mas-empty', text: '…' }));
   let rows = [];
   try {
     const data = await api('/texts');
-    rows = data.texts || [];
+    rows = (data.texts || []).filter((row) => textKindOf(row) === want);
   } catch (error) {
     replace(pane, el('p', { class: 'mas-empty', text: error.message }));
     return;
   }
-  const noteBox = el('textarea', {
-    class: 'mas-input mas-area', rows: '3', placeholder: t('noteHint'),
-  });
-  replace(pane,
-    el('div', { class: 'mas-row mas-wrap' }, [
-      button('⟳ ' + t('refresh'), renderTexts),
-      button('💾 ' + t('saveNote'), async () => {
-        const text = noteBox.value.trim();
-        if (!text) { toast(t('noteEmpty'), 'warn'); return; }
-        try {
-          await api('/texts', { method: 'POST', body: { text, source: 'manual' } });
-          renderTexts();
-          toast(t('saved'), 'ok');
-        } catch (error) { toast(error.message, 'error'); }
-      }, { class: 'mas-btn mas-primary' }),
-      el('span', { class: 'mas-hint', text: `${rows.length} ${t('textsCount')}` }),
-    ]),
-    noteBox,
-    rows.length
-      ? el('div', { class: 'mas-texts' }, rows.map((row) => el('details', { class: 'mas-text' }, [
-        el('summary', {}, compact([
-          el('b', { text: formatDateTime(row.createdAt) }),
-          el('span', {
-            class: 'mas-text-src',
-            text: ` · ${row.source || ''}${row.stepLabel ? ` · ${row.stepLabel}` : ''} · ${row.chars || (row.text || '').length}`,
-          }),
-        ])),
-        el('pre', { text: row.text || '' }),
-        el('div', { class: 'mas-row' }, [
-          button('📋', () => copyText(row.text || ''), { title: t('copy') }),
-          button('🗑', async () => {
-            if (!window.confirm(t('deleteTextConfirm'))) return;
-            try {
-              await api(`/texts/${encodeURIComponent(row.id)}`, { method: 'DELETE' });
-              renderTexts();
-            } catch (error) { toast(error.message, 'error'); }
-          }, { class: 'mas-btn mas-danger', title: t('delete') }),
-        ]),
-      ])))
-      : el('p', { class: 'mas-empty', text: t('textsEmpty') }),
-  );
+  const headRow = el('div', { class: 'mas-row mas-wrap' }, [
+    button('⟳ ' + t('refresh'), () => renderTexts(host, want)),
+    el('span', { class: 'mas-hint', text: `${rows.length} ${t('textsCount')}` }),
+  ]);
+  const bits = [headRow,
+    el('p', { class: 'mas-hint',
+      text: want === 'page' ? t('textsPageHint') : t('textsCopyHint') })];
+  if (want === 'structured') {
+    const noteBox = el('textarea', {
+      class: 'mas-input mas-area', rows: '3', placeholder: t('noteHint'),
+    });
+    headRow.appendChild(button('💾 ' + t('saveNote'), async () => {
+      const text = noteBox.value.trim();
+      if (!text) { toast(t('noteEmpty'), 'warn'); return; }
+      try {
+        await api('/texts', { method: 'POST',
+          body: { text, source: 'manual', kind: 'structured' } });
+        renderTexts(host, want);
+        toast(t('saved'), 'ok');
+      } catch (error) { toast(error.message, 'error'); }
+    }, { class: 'mas-btn mas-primary' }));
+    bits.push(noteBox);
+  }
+  bits.push(rows.length
+    ? el('div', { class: 'mas-texts' }, rows.map((row) => el('details', { class: 'mas-text' }, [
+      el('summary', {}, compact([
+        el('b', { text: formatDateTime(row.createdAt) }),
+        el('span', {
+          class: 'mas-text-src',
+          text: ` · ${row.source || ''}${row.stepLabel ? ` · ${row.stepLabel}` : ''} · ${row.chars || (row.text || '').length}`,
+        }),
+      ])),
+      el('pre', { text: row.text || '' }),
+      el('div', { class: 'mas-row' }, [
+        button('📋', () => copyText(row.text || ''), { title: t('copy') }),
+        button('🗑', async () => {
+          if (!window.confirm(t('deleteTextConfirm'))) return;
+          try {
+            await api(`/texts/${encodeURIComponent(row.id)}`, { method: 'DELETE' });
+            renderTexts(host, want);
+          } catch (error) { toast(error.message, 'error'); }
+        }, { class: 'mas-btn mas-danger', title: t('delete') }),
+      ]),
+    ])))
+    : el('p', { class: 'mas-empty', text: t('textsEmpty') }));
+  replace(pane, ...bits);
 }
 
 /* ------------------------------------------------------------------ *
@@ -3719,7 +3733,14 @@ function chatBubble(message) {
 
   const actions = [];
   if (!mine && message.body) {
-    actions.push(button('📋 ' + t('copy'), () => copyText(message.body)));
+    actions.push(button('📋 ' + t('copy'), () => {
+      copyText(message.body);
+      // Round 27, item 9: an answer copied from the agent also lands in the
+      // structured texts archive, so nothing read off the AI is ever lost.
+      api('/texts', { method: 'POST',
+        body: { text: message.body, source: 'ai-answer', kind: 'structured' } })
+        .catch(() => { /* the copy itself already succeeded */ });
+    }));
     // Round 27, item 3: one click archives this reply as a letter FROM the
     // agent, kept in the database's letters sub-tab.
     actions.push(button('📨 ' + t('lettersSaveReply'), async () => {
@@ -5046,7 +5067,9 @@ async function renderDatabase() {
   // texts all live under the database tab as sub-tabs.
   // Round 27, item 3: 'letters' is the dedicated home of the two-way mail
   // between the operator and the coworker agent.
-  const subs = ['backups', 'letters', 'reports', 'shots', 'texts'];
+  // Round 27, item 9: the extracted texts are two sub-tabs now - the
+  // unstructured whole-page captures and the structured copied answers.
+  const subs = ['backups', 'letters', 'reports', 'shots', 'textsPage', 'textsCopy'];
   const active = subs.includes(state.dbSub) ? state.dbSub : 'backups';
   const host = el('div', { class: 'mas-subhost' });
   replace(pane,
@@ -5058,7 +5081,8 @@ async function renderDatabase() {
     }))),
     host);
   if (active === 'shots') return renderShots(host);
-  if (active === 'texts') return renderTexts(host);
+  if (active === 'textsPage') return renderTexts(host, 'page');
+  if (active === 'textsCopy') return renderTexts(host, 'structured');
   if (active === 'letters') return renderLetters(host);
   if (active === 'reports') return renderReports(host);
   return renderBackups(host);

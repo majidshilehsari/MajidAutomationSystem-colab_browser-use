@@ -9,6 +9,7 @@ import unittest
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
+from automation.api import AutomationApi, FlowStore  # noqa: E402
 from automation.archive import Archive, shot_archive, text_archive  # noqa: E402
 
 
@@ -93,3 +94,45 @@ class ArchiveTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TextsKindTest(unittest.TestCase):
+    """Round 27, item 9: the texts archive is split in two kinds - 'page'
+    for the unstructured whole-page captures and 'structured' for the
+    answers copied from the agent and the saved notes."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="automation-texts-")
+        self.texts = text_archive(self.tmp)
+        self.api = AutomationApi(None, FlowStore(self.tmp), None,
+                                 data_dir=self.tmp, token="tok",
+                                 texts=self.texts)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def post(self, payload):
+        status, _, data = self.api.handle(
+            "POST", "/texts", body=json.dumps(payload).encode("utf-8"),
+            query={}, headers={"x-automation-token": "tok"})
+        return status, json.loads(data.decode("utf-8"))
+
+    def test_copied_texts_default_to_the_structured_kind(self):
+        status, body = self.post({"text": "پاسخ ایجنت", "source": "ai-answer"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["text"]["kind"], "structured",
+                         "anything curated is structured by default")
+        status, body = self.post({"text": "یادداشت", "source": "manual",
+                                  "kind": "structured"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["text"]["kind"], "structured")
+
+    def test_whole_page_captures_can_be_marked_unstructured(self):
+        status, body = self.post({"text": "کل صفحه", "source": "capture_text",
+                                  "kind": "page"})
+        self.assertEqual(status, 200)
+        self.assertEqual(body["text"]["kind"], "page")
+        self.post({"text": "پاسخ ایجنت", "source": "ai-answer"})
+        self.assertEqual({row["kind"] for row in self.texts.list()},
+                         {"structured", "page"},
+                         "one archive, two clearly separated kinds")

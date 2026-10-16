@@ -1300,6 +1300,7 @@ class AutomationEngine:
             self._texts.add({
                 "text": captured, "source": "capture_text", "runId": state.run_id,
                 "stepIndex": index, "stepLabel": label, "chars": len(captured),
+                "kind": "page",  # round 27, item 9: unstructured whole-page text
             })
 
         if not ok and str(settings.get("errorOperation") or "").strip():
@@ -1421,6 +1422,7 @@ class AutomationEngine:
                     "text": text, "source": "capture_text",
                     "runId": state.run_id, "stepIndex": self._current_index,
                     "stepLabel": self._current_step_label, "chars": len(text),
+                    "kind": "page",  # round 27, item 9: unstructured
                 })
             return 0, text, ""
 

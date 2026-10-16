@@ -260,7 +260,9 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
     if (path.endsWith('/texts')) {
       return json({ texts: [
         { id: 't1', text: 'Battle Arena\nStart game', source: 'capture_text',
-          stepLabel: 'خواندن صفحه', chars: 25, createdAt: 1760000050 },
+          kind: 'page', stepLabel: 'خواندن صفحه', chars: 25, createdAt: 1760000050 },
+        { id: 't2', text: 'پاسخ کپی‌شده از ایجنت', source: 'ai-answer',
+          kind: 'structured', chars: 21, createdAt: 1760000060 },
       ] });
     }
     if (clean.endsWith('/agent/chat/messages')) {
@@ -847,8 +849,8 @@ test('tabs swap panes and only one is visible', async () => {
     assert.equal(page.display('#mas-tab-agent'), 'none');
     clickDbSub(page, 'shots');                              // screenshots
     assert.ok(page.doc.querySelector('#mas-tab-db [data-dbsub="shots"].is-active'));
-    clickDbSub(page, 'texts');                              // extracted texts
-    assert.ok(page.doc.querySelector('#mas-tab-db [data-dbsub="texts"].is-active'));
+    clickDbSub(page, 'textsPage');                          // unstructured texts
+    assert.ok(page.doc.querySelector('#mas-tab-db [data-dbsub="textsPage"].is-active'));
     assert.ok(!page.doc.querySelector('#mas-tab-db [data-dbsub="shots"].is-active'));
   } finally {
     await page.cleanup();
@@ -1411,7 +1413,9 @@ test('the screenshots tab lists every shot with time, size and link', async () =
   }
 });
 
-test('the texts tab lists saved text and can save a new note', async () => {
+test('round 27: extracted texts are split into unstructured and structured tabs', async () => {
+  // Item 9: whole-page captures are the unstructured tab; answers copied
+  // from the agent and saved notes are the structured one.
   const page = await mount();
   try {
     const input = page.doc.getElementById('mas-token-input');
@@ -1419,29 +1423,54 @@ test('the texts tab lists saved text and can save a new note', async () => {
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
     clickTab(page, 'db');
-    clickDbSub(page, 'texts');
-
     const pane = page.doc.getElementById('mas-tab-db');
-    assert.ok(await page.until(() => pane.querySelectorAll('.mas-text').length === 1),
-      'the texts never listed: ' + pane.textContent);
-    assert.ok(pane.textContent.includes('Battle Arena'), 'the saved text is missing');
 
+    // unstructured: the whole-page capture only, and no note box
+    clickDbSub(page, 'textsPage');
+    assert.ok(await page.until(() => pane.querySelectorAll('.mas-text').length === 1),
+      'the page tab never listed: ' + pane.textContent);
+    assert.ok(pane.textContent.includes('Battle Arena'), 'the whole-page text is missing');
+    assert.equal(pane.querySelector('textarea'), null,
+      'the note box belongs to the structured tab');
+
+    // structured: the copied answer and the note box
+    clickDbSub(page, 'textsCopy');
+    assert.ok(await page.until(() => pane.textContent.includes('پاسخ کپی‌شده')),
+      'the structured tab never listed the copied answer');
+    assert.ok(!pane.textContent.includes('Battle Arena'),
+      'whole-page text must not leak into the structured tab');
     const box = pane.querySelector('textarea');
+    assert.ok(box, 'the note box is missing');
     box.value = 'یادداشت دستی من';
     box.dispatchEvent(new page.window.Event('input'));
     const save = Array.from(pane.querySelectorAll('button'))
       .find((b) => b.textContent.includes('ذخیره یادداشت'));
     save.dispatchEvent(new page.window.Event('click'));
     await page.wait(60);
-
     const posted = page.posts.find((p) => p.url.endsWith('/texts'));
     assert.ok(posted, '/texts was never posted');
     assert.equal(JSON.parse(posted.body).text, 'یادداشت دستی من');
+    assert.equal(JSON.parse(posted.body).kind, 'structured');
+
+    // copying an agent answer also files it into the structured archive
+    clickTab(page, 'chat');
+    const chatPane = page.doc.getElementById('mas-tab-chat');
+    assert.ok(await page.until(() => chatPane.querySelectorAll('.mas-bubble-body').length >= 2),
+      'the chat bubbles never rendered');
+    const copyBtn = Array.from(chatPane.querySelectorAll('.mas-bubble button'))
+      .find((b) => b.textContent.includes('📋'));
+    assert.ok(copyBtn, 'the answer copy button is missing');
+    copyBtn.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts.some((p) => p.url.endsWith('/texts')
+      && JSON.parse(p.body).source === 'ai-answer')),
+      'the copied answer was never archived');
+    const archived = page.posts.filter((p) => p.url.endsWith('/texts')).pop();
+    assert.equal(JSON.parse(archived.body).kind, 'structured');
+    assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
   }
 });
-
 test('round 27: the letters sub-tab keeps the two-way mail with the agent', async () => {
   const page = await mount();
   try {
@@ -2706,7 +2735,7 @@ test('the database tab groups backups, letters, screenshots and texts', async ()
       .map((node) => node.textContent.trim());
     assert.deepEqual(labels,
       ['پشتیبان‌گیری', 'نامه‌ها', 'گزارشات ایجنت همکار',
-       'اسکرین‌شات‌ها', 'متون استخراج‌شده']);
+       'اسکرین‌شات‌ها', 'متن بی‌ساختار', 'متن ساختاریافته']);
     assert.ok(await page.until(() =>
       page.doc.getElementById('mas-tab-db').textContent.includes('mas-backup-test') ||
       page.doc.getElementById('mas-tab-db').textContent.includes('پشتیبان')),
