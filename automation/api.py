@@ -279,6 +279,8 @@ class AutomationApi:
             ("GET", "/agent/brain", self.route_agent_brain_status),
             ("POST", "/agent/brain/toggle", self.route_agent_brain_toggle),
             ("POST", "/agent/brain/suggestion", self.route_agent_brain_decide),
+            ("POST", "/agent/brain/message", self.route_agent_brain_message),
+            ("POST", "/agent/step-doc", self.route_agent_step_doc),
             # the pointer and the click ripple
             ("GET", "/agent/cursor", self.route_agent_cursor_get),
             ("POST", "/agent/cursor", self.route_agent_cursor_set),
@@ -1247,6 +1249,20 @@ class AutomationApi:
             raise ApiError(400, "need 'id' plus action=run|reject")
         return json_response(
             200, self.agent.brain_decide(suggestion_id, action))
+
+    def route_agent_brain_message(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        text = str(payload.get("text") or "").strip()
+        if not text:
+            raise ApiError(400, "missing 'text'")
+        return json_response(200, self.agent.brain_message(text))
+
+    def route_agent_step_doc(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        step = payload.get("step")
+        if not isinstance(step, dict):
+            raise ApiError(400, "missing 'step'")
+        return json_response(200, self.agent.step_doc(step))
 
     # -- the pointer and the click ripple -------------------------------------
     def route_agent_cursor_get(self, **_: Any) -> Response:

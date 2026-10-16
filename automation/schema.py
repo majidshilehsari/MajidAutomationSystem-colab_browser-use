@@ -55,6 +55,12 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     # must stay under direct human control. The engine does not solve it.
     "pause_for_human_verification": {"required": ["prompt"], "optional": []},
     "shell": {"required": ["command"], "optional": []},
+    # Round 25: the coworker agent writes real code. A python step carries a
+    # whole program - conditions, loops, and calls into the desk helpers the
+    # other step types use - and a run_operation step nests a library
+    # operation inside a flow.
+    "python": {"required": ["code"], "optional": ["timeout"]},
+    "run_operation": {"required": ["operation"], "optional": []},
     # The coworker agent's own browser (Xvfb :2 / CDP 9223): open a chat
     # provider there, or ask it a question and read the answer back. These are
     # what make an operation like "prompt DeepSeek and get its message" a
@@ -137,6 +143,12 @@ STEP_DOCS: Dict[str, Dict[str, str]] = {
         "en": "Deliberate pause for a human (CAPTCHA, MFA, consent). Not solved."},
     "shell": {"fa": "اجرای یک دستور shell روی دسکتاپ (با احتیاط: بدون sandbox).",
               "en": "Run a shell command on the desktop (no sandbox)."},
+    "python": {"fa": "اجرای کد پایتون با دسترسی کامل به میز: کلیک، تایپ، اسکرین‌شات، "
+                     "متن صفحه، حلقه و شرط؛ متغیرها بین گام‌های پایتون یک اجرا می‌مانند.",
+               "en": "Run Python code with full desk access: click, type, screenshot, "
+                     "page text, loops and ifs; vars survive across python steps of a run."},
+    "run_operation": {"fa": "اجرای یک عملیات از کتابخانه در دل این جریان (تودرتو).",
+                      "en": "Run a library operation nested inside this flow."},
     "agent_open": {"fa": "باز کردن سایت چت در مرورگر اختصاصی ایجنت (نمایش :2).",
                    "en": "Open a chat site in the agent's own browser (display :2)."},
     "agent_ask": {"fa": "تایپ پرامپت در چت ایجنت، صبر تا پایان پاسخ و آوردن متنش.",
@@ -314,6 +326,11 @@ def _validate_settings(settings: Any, errors: List[str]) -> Dict[str, Any]:
         "repeat": 1,
         "allowShellSteps": False,
         "stepTimeoutMs": 60000,
+        # Round 25: the dedicated error protocol. A failing step can hand the
+        # desk to one library operation (observe, a captcha attempt, a pause
+        # for the human) and - optionally - be retried once after it.
+        "errorOperation": "",
+        "retryAfterProtocol": False,
     }
     if settings is None:
         return defaults
@@ -331,9 +348,12 @@ def _validate_settings(settings: Any, errors: List[str]) -> Dict[str, Any]:
     if "typingMode" in settings and settings["typingMode"] not in ("low", "normal", "fast"):
         _err(errors, "settings: 'typingMode' must be low, normal, or fast")
     for field in ("screenshotAfterEachStep", "screenshotBeforeEachStep",
-                  "screenshotOnError", "stopOnError", "allowShellSteps"):
+                  "screenshotOnError", "stopOnError", "allowShellSteps",
+                  "retryAfterProtocol"):
         if field in settings and not isinstance(settings[field], bool):
             _err(errors, "settings: '%s' must be true or false" % field)
+    if "errorOperation" in settings and not isinstance(settings["errorOperation"], str):
+        _err(errors, "settings: 'errorOperation' must be a string")
     merged = dict(defaults)
     merged.update({k: v for k, v in settings.items() if k in defaults})
     return merged

@@ -20,6 +20,7 @@ import struct
 import subprocess
 import threading
 import time
+import traceback
 import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -1197,6 +1198,11 @@ class AutomationEngine:
         if kind == "capture_text":
             limit = int(step.get("limit") or 0) or 4000
             captured = (out or "")[:limit]
+        elif kind in ("python", "run_operation"):
+            # Round 25: what the code printed and the nested operation's trace
+            # belong in the step report like captured text - but not in the
+            # texts archive, which stays page text only.
+            captured = ((out or "")[:6000] or None)
         keep = 6000 if captured is not None else 800
         self._log("ok" if ok else "error",
                   "%s -> rc=%d in %dms" % (label, rc, duration_ms),
@@ -1242,11 +1248,23 @@ class AutomationEngine:
                     "stepIndex": index, "stepLabel": label, "stepType": kind,
                     "image": image, "status": "ok" if ok else "error",
                 })
-        if captured is not None and self._texts is not None:
+        if captured is not None and kind == "capture_text" and self._texts is not None:
             self._texts.add({
                 "text": captured, "source": "capture_text", "runId": state.run_id,
                 "stepIndex": index, "stepLabel": label, "chars": len(captured),
             })
+
+        if not ok and str(settings.get("errorOperation") or "").strip():
+            # Round 25, phase 2: the failing step hands the desk to the error
+            # protocol operation; when that succeeds and retryAfterProtocol is
+            # set, the step is retried exactly once.
+            protocol_ok = self._run_error_protocol(settings, index)
+            if protocol_ok and settings.get("retryAfterProtocol"):
+                self._log("info", "retrying step #%d after the error protocol" % index)
+                rc, out, err = self._dispatch(step, settings)
+                ok = rc == 0
+                if ok:
+                    self._log("info", "step #%d succeeded on the retry" % index)
 
         if not ok:
             if step.get("continueOnError"):
@@ -1333,6 +1351,10 @@ class AutomationEngine:
             return (0, path or "", "") if path else (1, "", "screenshot failed")
         if kind == "shell":
             return self.backend.shell(step["command"])
+        if kind == "python":
+            return self._run_python(step)
+        if kind == "run_operation":
+            return self._run_operation_step(step, settings)
         if kind == "agent_open":
             return self._agent_open(step)
         if kind == "agent_ask":
@@ -1340,6 +1362,177 @@ class AutomationEngine:
         if kind == "captcha_solve":
             return self._captcha_solve(step)
         return 1, "", "unsupported step type: %s" % kind
+
+    # -- round 25: python steps and nested operations -----------------------
+    def _python_namespace(self) -> Tuple[Dict[str, Any], List[str]]:
+        """The desk API handed to a python step.
+
+        Every helper is a thin wrapper over the same backend calls the
+        ordinary step types make, so a python step can do anything a flow can
+        do - plus conditions, loops and variables. The ``vars`` dict survives
+        to the next python step of the same run.
+        """
+        state = self._state
+        py_vars = getattr(state, "py_vars", None)
+        if py_vars is None:
+            py_vars = {}
+            if state is not None:
+                state.py_vars = py_vars
+        outputs: List[str] = []
+
+        def log(message: Any = "") -> None:
+            outputs.append(str(message))
+
+        def screenshot(name: str = "") -> Optional[str]:
+            shot_name = str(name or "py-%d.png" % int(self._clock() * 1000))
+            run_dir = os.path.join(self.data_dir, "runs",
+                                   state.run_id if state else "misc")
+            return self._capture(run_dir, shot_name)
+
+        def wait(seconds: float) -> None:
+            self._interruptible_sleep(max(0.0, float(seconds)))
+
+        def run_operation(operation: str) -> Tuple[int, str, str]:
+            return self._run_operation_step({"operation": str(operation)}, None)
+
+        def ask_agent(prompt: str, provider: Optional[str] = None) -> Any:
+            if self._agent is None:
+                raise RuntimeError("no coworker agent is attached")
+            return self._agent.ai_ask(prompt=str(prompt), provider=provider)
+
+        namespace: Dict[str, Any] = {
+            "click": lambda x, y, button="left", clicks=1:
+                self.backend.click(int(x), int(y), button, int(clicks)),
+            "double_click": lambda x, y:
+                self.backend.click(int(x), int(y), "left", 2),
+            "move": lambda x, y: self.backend.move(int(x), int(y)),
+            "drag": lambda x1, y1, x2, y2, button="left":
+                self.backend.drag(int(x1), int(y1), int(x2), int(y2), button),
+            "scroll": lambda amount, x=None, y=None:
+                self.backend.scroll(int(amount), x, y),
+            "type_text": lambda text: self.backend.type_text(str(text)),
+            "paste": lambda text: self.backend.paste(str(text)),
+            "press_key": lambda keys: self.backend.key(
+                keys if isinstance(keys, list) else [str(keys)]),
+            "wait": wait,
+            "sleep": wait,
+            "goto": lambda url: self.backend.goto_url(str(url)),
+            "focus_window": lambda title: self.backend.focus_window(str(title)),
+            "screenshot": screenshot,
+            "page_text": lambda limit=20000: self.page_text(int(limit)),
+            "shell": lambda command: self.backend.shell(str(command)),
+            "ask_agent": ask_agent,
+            "run_operation": run_operation,
+            "log": log,
+            "print": lambda *args: outputs.append(" ".join(str(a) for a in args)),
+            "vars": py_vars,
+            "stop_requested": lambda: bool(self._stop_requested),
+        }
+        return namespace, outputs
+
+    def _run_python(self, step: Dict[str, Any]) -> Tuple[int, str, str]:
+        """One python step: real code, on a worker thread, output captured."""
+        code = str(step.get("code") or "")
+        if not code.strip():
+            return 1, "", "a python step needs code"
+        try:
+            timeout = float(step.get("timeout") or 0)
+        except (TypeError, ValueError):
+            timeout = 0.0
+        namespace, outputs = self._python_namespace()
+        holder: Dict[str, Any] = {}
+
+        def target() -> None:
+            # No redirect_stdout on purpose: it swaps sys.stdout for the whole
+            # process, and an abandoned timeout worker would keep the real
+            # stdout hostage. The namespace's own print/log capture instead.
+            try:
+                exec(compile(code, "<python step>", "exec"), namespace)
+            except BaseException as exc:
+                holder["error"] = "%s: %s\n%s" % (
+                    type(exc).__name__, exc,
+                    "".join(traceback.format_tb(exc.__traceback__))[-800:])
+
+        worker = threading.Thread(target=target, name="python-step", daemon=True)
+        worker.start()
+        worker.join(timeout if timeout > 0 else None)
+        if worker.is_alive():
+            # Revoke the abandoned worker's world: with the namespace cleared
+            # its next helper lookup dies instead of touching the desk.
+            namespace.clear()
+            return 1, "\n".join(outputs), (
+                "python step timed out after %gs; the worker was abandoned "
+                "and its helpers were revoked" % timeout)
+        if "error" in holder:
+            return 1, "\n".join(outputs), holder["error"]
+        return 0, "\n".join(outputs), ""
+
+    def _run_operation_step(self, step: Dict[str, Any],
+                            settings: Optional[Dict[str, Any]]) -> Tuple[int, str, str]:
+        """Nest one library operation inside the running flow."""
+        if self._agent is None:
+            return self._no_agent()
+        library = getattr(self._agent, "library", None)
+        if library is None:
+            return self._no_agent()
+        wanted = str(step.get("operation") or "").strip()
+        if not wanted:
+            return 1, "", "run_operation needs an operation id or name"
+        depth = getattr(self, "_op_depth", 0)
+        if depth >= 3:
+            return 1, "", "run_operation nested too deep (the limit is 3)"
+        operation = None
+        try:
+            operation = library.get(wanted)
+        except Exception:
+            operation = None
+        if operation is None:
+            for row in library.list():
+                if str(row.get("name") or "") == wanted:
+                    operation = row
+                    break
+        if operation is None:
+            return 1, "", "no operation with id or name %r" % wanted
+        try:
+            flow = library.as_flow(operation)
+        except Exception as exc:
+            return 1, "", str(exc)
+        sub_steps = list(flow.get("steps") or [])
+        self._log("info", "run_operation: «%s» (%d step(s))"
+                  % (operation.get("name"), len(sub_steps)))
+        self._op_depth = depth + 1
+        lines: List[str] = []
+        rc_final = 0
+        try:
+            for sub in sub_steps:
+                if self._stop_requested:
+                    rc_final = 1
+                    lines.append("stopped before %s" % sub.get("type"))
+                    break
+                rc, out, err = self._dispatch(sub, settings)
+                detail = err or out or ""
+                if rc != 0 and err and out:
+                    # Keep the nested cause visible: "operation failed" alone
+                    # would hide why (the depth guard, a protocol refusal...).
+                    detail = "%s | %s" % (err, out.replace("\n", " / "))
+                lines.append("%s → rc=%d %s"
+                             % (sub.get("type"), rc, detail[:400]))
+                if rc != 0:
+                    rc_final = rc
+                    break
+        finally:
+            self._op_depth = depth
+        return rc_final, "\n".join(lines), (
+            "" if rc_final == 0 else "operation %r failed" % wanted)
+
+    def _run_error_protocol(self, settings: Dict[str, Any], index: int) -> bool:
+        """The dedicated error protocol: one library operation as reaction."""
+        name = str(settings.get("errorOperation") or "").strip()
+        rc, out, err = self._run_operation_step({"operation": name}, settings)
+        self._log("info" if rc == 0 else "warn",
+                  "error protocol «%s» after step #%d: rc=%d %s"
+                  % (name, index, rc, (err or out or "")[:200]))
+        return rc == 0
 
     # -- steps that reach the coworker agent -------------------------------
     def _no_agent(self) -> Tuple[int, str, str]:

@@ -917,30 +917,21 @@ body.mas-standalone #mas-root .mas-log { font-size: 12px; line-height: 1.7; }
 body.mas-standalone #mas-root .mas-foot { padding: 8px 0 26px; }
 body.mas-standalone #mas-root .mas-errors { padding: 12px 14px; border-radius: 9px; }
 
-/* On a wide screen the step list and its controls sit side by side. The rules
-   below only assign columns, so if a child is missing the grid still stacks. */
+/* Round 25: the step rows own the full width of the pane. The flow settings
+   moved into the gear modal, so the old two-column grid (steps | settings)
+   is gone and every step row stretches from edge to edge. */
 @media (min-width: 1024px) {
-  body.mas-standalone #mas-root #mas-tab-flow {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) 340px;
-    gap: 18px;
-    align-items: start;
-  }
+  body.mas-standalone #mas-root #mas-tab-flow > .mas-steps { width: 100%; }
+  body.mas-standalone #mas-root #mas-tab-flow > .mas-step { width: 100%; }
+}
 
-  body.mas-standalone #mas-root #mas-tab-flow > .mas-flowbar {
-    grid-column: 1 / -1;
-    grid-row: 1;
-  }
-  body.mas-standalone #mas-root #mas-tab-flow > .mas-steps { grid-column: 1; }
-  body.mas-standalone #mas-root #mas-tab-flow > .mas-settings {
-    grid-column: 2;
-    grid-row: 2 / span 3;
-    margin-top: 0;
-  }
-  body.mas-standalone #mas-root #mas-tab-flow > .mas-row { grid-column: 1; }
-  body.mas-standalone #mas-root #mas-tab-flow > .mas-row.mas-wrap { grid-column: 2; }
-  body.mas-standalone #mas-root #mas-tab-flow > .mas-errors { grid-column: 1 / -1; }
-  body.mas-standalone #mas-root #mas-tab-flow > .mas-editor { grid-column: 1; }
+/* The brain's one big switch: the most important button of the tab. */
+#mas-root .mas-brain-big {
+  font-size: 16px;
+  padding: 14px 26px;
+  border-radius: 12px;
+  min-width: 240px;
+  font-weight: 700;
 }
 
 /* What the model said around its code: summary and questions. */

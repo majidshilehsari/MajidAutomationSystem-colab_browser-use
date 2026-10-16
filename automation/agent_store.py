@@ -156,6 +156,23 @@ CREATE TABLE IF NOT EXISTS agent_pages (
     actor      TEXT NOT NULL DEFAULT ''
 );
 
+-- Round 25: the brain's own voice. Two small tables give the supervisor a
+-- conversation with the operator and a personal memory that survives restarts
+-- and travels with every Supabase snapshot.
+CREATE TABLE IF NOT EXISTS brain_msgs (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    at        REAL NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'in',
+    text      TEXT NOT NULL DEFAULT '',
+    actor     TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS brain_memory (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    at        REAL NOT NULL,
+    text      TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS suggestions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at   REAL NOT NULL,
@@ -694,6 +711,45 @@ class AgentStore:
             row_id = int(cursor.lastrowid)
         rows = self._query("SELECT * FROM devlog WHERE id = ?", (row_id,))
         return rows[0] if rows else {"id": row_id}
+
+    # -- the brain: conversation and personal memory ---------------------
+    def add_brain_msg(self, direction: str, text: str,
+                      actor: str = "") -> Dict[str, Any]:
+        """One line of the brain's conversation: 'in' = the operator spoke,
+        'out' = the brain spoke."""
+        way = "out" if str(direction) == "out" else "in"
+        body = str(text or "")[:4000]
+        now = round(self._clock(), 3)
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO brain_msgs (at, direction, text, actor)"
+                " VALUES (?, ?, ?, ?)", (now, way, body, str(actor or "")[:60]))
+            self._db.commit()
+            return {"id": int(cursor.lastrowid), "at": now, "direction": way,
+                    "text": body, "actor": str(actor or "")[:60]}
+
+    def list_brain_msgs(self, limit: int = 60) -> List[Dict[str, Any]]:
+        """Oldest first, the way a conversation reads."""
+        rows = self._query(
+            "SELECT * FROM brain_msgs ORDER BY id DESC LIMIT ?",
+            (max(1, min(200, int(limit))),))
+        return list(reversed([dict(row) for row in rows]))
+
+    def add_brain_memory(self, text: str) -> Dict[str, Any]:
+        """A note the brain must not forget."""
+        body = str(text or "")[:2000]
+        now = round(self._clock(), 3)
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO brain_memory (at, text) VALUES (?, ?)", (now, body))
+            self._db.commit()
+            return {"id": int(cursor.lastrowid), "at": now, "text": body}
+
+    def list_brain_memory(self, limit: int = 30) -> List[Dict[str, Any]]:
+        """Newest first: the freshest memories matter most."""
+        return self._query(
+            "SELECT * FROM brain_memory ORDER BY id DESC LIMIT ?",
+            (max(1, min(200, int(limit))),))
 
     def list_devlog(self, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 500))

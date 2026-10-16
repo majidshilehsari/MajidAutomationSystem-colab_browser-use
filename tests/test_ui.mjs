@@ -80,6 +80,8 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
             || clean.endsWith('/agent/pages') || clean.endsWith('/agent/suggestions')
             || clean.endsWith('/agent/brain/toggle')
             || clean.endsWith('/agent/brain/suggestion')
+            || clean.endsWith('/agent/brain/message')
+            || clean.endsWith('/agent/step-doc')
             || clean.includes('/agent/suggestion-'))) {
       return json({ ok: true, page: { id: 7, title: 'x' },
         suggestion: { id: 3, status: 'draft' } });
@@ -308,7 +310,14 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
                     last_run_at: 1760000000, last_status: 'done' }],
         askOps: [{ id: 'op-1', name: 'my operation', permission: 'ask' }],
         log: [{ id: 1, at: 1760000000, actor: 'brain', title: 'brain said hi',
-                body: '' }] });
+                body: '' }],
+        messages: [
+          { id: 1, at: 1760000000, direction: 'in', text: 'سلام مغز',
+            actor: 'operator' },
+          { id: 2, at: 1760000001, direction: 'out', text: 'دریافت شد',
+            actor: '' },
+        ],
+        memory: [{ id: 1, at: 1760000000, text: 'فردا ساعت ۸' }] });
     }
     if (clean.endsWith('/agent/operation-run')) {
       return json({ started: true, id: 'op-1', status: 'running',
@@ -526,9 +535,20 @@ test('typing mode settings, per-step overrides and human-verification steps edit
     // demand like every other pane.
     clickTab(page, 'flow');
     await page.wait(10);
+    // Round 25: the flow settings open from the gear button as a modal.
+    const gear = page.byText('button', '\u2699 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u062c\u0631\u06cc\u0627\u0646');
+    assert.ok(gear, 'the gear button is missing');
+    gear.dispatchEvent(new page.window.Event('click'));
     const globalMode = page.doc.getElementById('mas-flow-typing-mode');
     assert.ok(globalMode, 'flow-level typing mode selector is missing');
     assert.equal(globalMode.value, 'low');
+    // the error protocol sits in the same modal and saves on change
+    const errOp = page.doc.querySelector('.mas-modal input[placeholder="op-builtin-observe"]');
+    assert.ok(errOp, 'the error-protocol input is missing from the modal');
+    errOp.value = 'op-builtin-captcha';
+    errOp.dispatchEvent(new page.window.Event('input'));
+    const savedSettings = JSON.parse(page.window.localStorage.getItem('mas.flow'));
+    assert.equal(savedSettings.settings.errorOperation, 'op-builtin-captcha');
 
     const typeLabel = Array.from(page.doc.querySelectorAll('.mas-step-label'))
       .find((button) => button.textContent.includes('hello'));
@@ -635,7 +655,10 @@ test('the desktop view stays clean: no slide-out panel, one launcher button', as
 test('tabs swap panes and only one is visible', async () => {
   const page = await mount();
   try {
-    const tabs = Array.from(page.doc.querySelectorAll('.mas-tab'));
+    // Scope to the main tab row: the brain's sub-tabs (round 25) reuse the
+    // mas-tab class inside .mas-subtabs, like the db and ops sub-tabs do.
+    const tabs = Array.from(
+      page.doc.querySelectorAll('.mas-tabs:not(.mas-subtabs) .mas-tab'));
     assert.deepEqual(tabs.map((n) => n.dataset.tab), TAB_ORDER);
 
     clickTab(page, 'agent');                                // coworker agent
@@ -781,9 +804,9 @@ test('step list shows no numbering and options are styled dark', async () => {
   }
 });
 
-/** Tabs by name. Chat is first and the library comes before the stages. */
-const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages',
-  'db', 'ops', 'brain', 'settings', 'agent', 'log'];
+/** Tabs by name. The brain comes first (round 25), then chat. */
+const TAB_ORDER = ['brain', 'chat', 'library', 'flow', 'record', 'pages',
+  'db', 'ops', 'settings', 'agent', 'log'];
 
 function tab(page, name) {
   const node = Array.from(page.doc.querySelectorAll('.mas-tab'))
@@ -794,6 +817,13 @@ function tab(page, name) {
 
 function clickTab(page, name) {
   tab(page, name).dispatchEvent(new page.window.Event('click'));
+}
+
+function clickBrainSub(page, name) {
+  const node = Array.from(page.doc.querySelectorAll('[data-brainsub]'))
+    .find((item) => item.dataset.brainsub === name);
+  assert.ok(node, `no brain sub-tab named ${name}`);
+  node.dispatchEvent(new page.window.Event('click'));
 }
 
 
@@ -1464,12 +1494,14 @@ async function authenticate(page) {
   await page.wait(10);
 }
 
-test('the chat tab is first and the panel opens on it', async () => {
+test('the brain tab is first and the panel opens on it', async () => {
   const page = await mount();
   try {
-    assert.equal(TAB_ORDER[0], 'chat', 'chat must be the first tab');
-    assert.equal(page.doc.querySelector('.mas-tab').dataset.tab, 'chat');
-    assert.equal(page.display('#mas-tab-chat'), 'block', 'the panel should open on chat');
+    assert.equal(TAB_ORDER[0], 'brain', 'the brain must be the first tab');
+    assert.equal(page.doc.querySelector('.mas-tab').dataset.tab, 'brain');
+    assert.equal(page.display('#mas-tab-brain'), 'block',
+      'the panel should open on the brain');
+    assert.equal(page.display('#mas-tab-chat'), 'none');
     assert.equal(page.display('#mas-tab-flow'), 'none');
   } finally {
     await page.cleanup();
@@ -1480,6 +1512,7 @@ test('the chat pane shows the conversation, the model and a pending answer', asy
   const page = await mount();
   try {
     await authenticate(page);
+    clickTab(page, 'chat');
     const listed = await page.until(
       () => page.doc.querySelectorAll('#mas-chat-list .mas-bubble').length === 3);
     assert.ok(listed, 'the conversation never rendered');
@@ -1502,7 +1535,14 @@ test('sending a chat message posts the text and the provider', async () => {
   const page = await mount();
   try {
     await authenticate(page);
+    clickTab(page, 'chat');
     await page.until(() => page.doc.getElementById('mas-chat-input') !== null);
+    // the provider select fills on the first fetch; sendChat reads the
+    // selection, so wait for it like the pane test does
+    await page.until(() => {
+      const provider = page.doc.getElementById('mas-chat-provider');
+      return provider && provider.options.length > 0;
+    });
     const box = page.doc.getElementById('mas-chat-input');
     box.value = 'روی اولین نتیجه کلیک کن';
     box.dispatchEvent(new page.window.Event('input'));
@@ -1525,6 +1565,7 @@ test('a flow the model proposed can be applied to the stages', async () => {
   const page = await mount();
   try {
     await authenticate(page);
+    clickTab(page, 'chat');
     const applied = await page.until(() => Array.from(
       page.doc.querySelectorAll('#mas-chat-list button'))
       .some((node) => node.textContent.includes('⤓')));
@@ -1552,7 +1593,8 @@ test('the library lists operations, built-ins marked, before the stages tab', as
   const page = await mount();
   try {
     await authenticate(page);
-    assert.equal(TAB_ORDER[1], 'library', 'the library comes right before the stages');
+    assert.ok(TAB_ORDER.indexOf('library') < TAB_ORDER.indexOf('flow'),
+      'the library comes right before the stages');
     clickTab(page, 'library');
     const listed = await page.until(
       () => page.doc.querySelectorAll('#mas-tab-library .mas-op').length === 2);
@@ -1615,18 +1657,23 @@ test('running an operation hands it to the engine', async () => {
   }
 });
 
-test('the brain tab shows the supervisor and takes its decisions', async () => {
+test('the brain tab talks, decides and toggles', async () => {
   const page = await mount();
   try {
     await authenticate(page);
     clickTab(page, 'brain');
+    // The default sub-tab is the interaction page: one big button, the open
+    // suggestion, the conversation and the memory.
     const ready = await page.until(
-      () => page.doc.querySelector('#mas-brain-enabled') !== null);
-    assert.ok(ready, 'the brain pane never rendered');
-    assert.equal(page.doc.querySelector('#mas-brain-enabled').checked, true,
-      'the switch should mirror the server state');
-    // The open suggestion shows both decision buttons; running it posts
-    // the suggestion id and the action, nothing else.
+      () => page.doc.querySelector('#mas-brain-big') !== null);
+    assert.ok(ready, 'the interact pane never rendered');
+    assert.ok(page.doc.querySelector('#mas-brain-msgs .mas-bubble'),
+      'the conversation never rendered');
+    assert.ok(page.doc.querySelector('#mas-brain-msgs .mas-bubble.is-mine'),
+      'the operator side of the conversation is missing');
+    assert.ok(page.doc.querySelector('#mas-brain-msgs .mas-bubble.is-ai'),
+      'the brain side of the conversation is missing');
+    // Running the suggestion posts id + action.
     const run = await page.until(
       () => page.byText('button', '\u25b6 \u0627\u062c\u0631\u0627 \u06a9\u0646') !== undefined);
     assert.ok(run, 'no run-it button for the suggestion');
@@ -1636,14 +1683,143 @@ test('the brain tab shows the supervisor and takes its decisions', async () => {
     const sent = page.posts.find((item) => item.url.endsWith('/agent/brain/suggestion'));
     assert.ok(sent, 'the decision was never posted');
     assert.deepEqual(JSON.parse(sent.body), { id: 'sug1', action: 'run' });
-    // Flipping the switch off posts the new state right away.
-    const box = page.doc.querySelector('#mas-brain-enabled');
-    box.checked = false;
-    box.dispatchEvent(new page.window.Event('change'));
-    await page.wait(40);
+    // The big button mirrors the server state: enabled=true means it offers
+    // to STOP, and clicking posts enabled:false.
+    await page.until(() => page.doc.querySelector('#mas-brain-big') !== null);
+    page.doc.querySelector('#mas-brain-big')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
     const toggled = page.posts.find((item) => item.url.endsWith('/agent/brain/toggle'));
-    assert.ok(toggled, 'the toggle was never posted');
+    assert.ok(toggled, 'the big button never posted');
     assert.equal(JSON.parse(toggled.body).enabled, false);
+    // Typing to the brain posts the text.
+    await page.until(() => page.doc.querySelector('#mas-brain-input') !== null);
+    const box = page.doc.querySelector('#mas-brain-input');
+    box.value = 'وضعیت';
+    box.dispatchEvent(new page.window.Event('input'));
+    page.doc.querySelector('#mas-brain-send')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+    const msg = page.posts.find((item) => item.url.endsWith('/agent/brain/message'));
+    assert.ok(msg, 'the message was never posted');
+    assert.equal(JSON.parse(msg.body).text, 'وضعیت');
+    // The settings sub-tab keeps the switch and the policies.
+    clickBrainSub(page, 'settings');
+    const settings = await page.until(
+      () => page.doc.querySelector('#mas-brain-enabled') !== null);
+    assert.ok(settings, 'the settings pane never rendered');
+    assert.equal(page.doc.querySelector('#mas-brain-enabled').checked, true);
+    assert.ok(page.doc.querySelector('#mas-brain-forceshots'),
+      'the forced-logging switch is missing');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the flow bar lost save-as, the JSON export and the prompt shortcut', async () => {
+  const page = await mount({ standalone: true });
+  try {
+    await authenticate(page);
+    clickTab(page, 'flow');
+    const bar = await page.until(
+      () => page.doc.querySelector('#mas-tab-flow .mas-flowbar'));
+    const labels = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-flowbar button'))
+      .map((node) => node.textContent);
+    for (const gone of ['\u0630\u062e\u06cc\u0631\u0647 \u0628\u0627 \u0646\u0627\u0645',
+      'JSON \u21e9', '\ud83e\udde9']) {
+      assert.ok(!labels.some((label) => label.includes(gone)),
+        `the bar still carries ${gone}: ` + labels.join(' | '));
+    }
+    // what must survive: save, load, both clipboards, the report, the bin
+    for (const keep of ['\u0630\u062e\u06cc\u0631\u0647', '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc',
+      '\ud83d\udccb', '\ud83d\uddd1']) {
+      assert.ok(labels.some((label) => label.includes(keep)),
+        `the bar lost ${keep}: ` + labels.join(' | '));
+    }
+    assert.ok(bar, 'bar missing');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('step rows carry the pencil and the report, and the report writes notes', async () => {
+  const page = await mount({ flow: {
+    name: 'notes',
+    steps: [{ id: 'w1', type: 'wait', ms: 100, label: 'wait 100ms', enabled: true }],
+  } });
+  try {
+    await authenticate(page);
+    clickTab(page, 'flow');
+    await page.until(
+      () => page.doc.querySelector('.mas-step[data-id="w1"]') !== null);
+    const row = page.doc.querySelector('.mas-step[data-id="w1"]');
+    // the pencil opens the inline editor
+    const pencil = Array.from(row.querySelectorAll('button'))
+      .find((node) => node.textContent.includes('\u270e'));
+    assert.ok(pencil, 'the pencil button is missing');
+    pencil.dispatchEvent(new page.window.Event('click'));
+    assert.ok(page.doc.querySelector('.mas-step[data-id="w1"] .mas-editor'),
+      'the pencil did not open the editor');
+    // the report button opens the note modal, saves on input, and offers
+    // the agent-written description
+    const report = Array.from(page.doc.querySelectorAll('.mas-step[data-id="w1"] button'))
+      .find((node) => node.textContent.includes('\ud83d\udcc4'));
+    assert.ok(report, 'the report button is missing');
+    report.dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.doc.querySelector('.mas-modal textarea') !== null);
+    const area = page.doc.querySelector('.mas-modal textarea');
+    area.value = 'کمی صبر می‌کنیم';
+    area.dispatchEvent(new page.window.Event('input'));
+    const saved = JSON.parse(page.window.localStorage.getItem('mas.flow'));
+    assert.equal(saved.steps[0].note, 'کمی صبر می‌کنیم',
+      'the note must save while it is typed');
+    const write = page.byText('button', '\u2728 \u0628\u0627 \u0627\u06cc\u062c\u0646\u062a \u0628\u0646\u0648\u06cc\u0633');
+    assert.ok(write, 'the agent-write button is missing');
+    write.dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const doc = page.posts.find((item) => item.url.endsWith('/agent/step-doc'));
+    assert.ok(doc, 'step-doc was never called');
+    assert.equal(JSON.parse(doc.body).step.id, 'w1');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('a python step edits as real code', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'flow');
+    await page.until(() => page.doc.querySelector('#mas-tab-flow select') !== null);
+    const select = page.doc.querySelector('#mas-tab-flow select');
+    select.value = 'python';
+    page.byText('button', '\u0627\u0641\u0632\u0648\u062f\u0646 \u06af\u0627\u0645')
+      .dispatchEvent(new page.window.Event('click'));
+    // open the fresh step with its pencil, then edit the code
+    await page.until(() => page.doc.querySelector('.mas-step .mas-icon') !== null);
+    const pencil = Array.from(page.doc.querySelectorAll('.mas-step button'))
+      .find((node) => node.textContent.includes('\u270e'));
+    pencil.dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.doc.querySelector('.mas-editor textarea') !== null);
+    const area = page.doc.querySelector('.mas-editor textarea');
+    assert.equal(Number(area.getAttribute('rows')), 10,
+      'code deserves a tall editor');
+    area.value = "for i in range(3):\n    click(10, 20)\nlog('done')";
+    area.dispatchEvent(new page.window.Event('input'));
+    page.doc.querySelector('.mas-editor button')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    const saved = JSON.parse(page.window.localStorage.getItem('mas.flow'));
+    const step = saved.steps[saved.steps.length - 1];
+    assert.equal(step.type, 'python');
+    assert.ok(step.code.includes("click(10, 20)"), 'the code was not saved');
+    // the row shows the honest label
+    assert.ok(page.doc.querySelector('#mas-tab-flow').textContent.includes('python (3 lines)'),
+      'the python label is wrong');
+    // run_operation is in the catalog too
+    assert.ok(Array.from(page.doc.querySelectorAll('#mas-tab-flow select option'))
+      .some((option) => option.value === 'run_operation'),
+      'run_operation is missing from the add-step list');
   } finally {
     await page.cleanup();
   }
@@ -1940,7 +2116,8 @@ test('without an agent the chat and library tabs disappear', async () => {
     assert.equal(page.display('#mas-tab-flow'), 'block');
     // The rest is exactly the sidebar this project always had — settings
     // stays visible because theme and clipboard work without the agent too.
-    assert.deepEqual(Array.from(page.doc.querySelectorAll('.mas-tab'))
+    assert.deepEqual(Array.from(
+      page.doc.querySelectorAll('.mas-tabs:not(.mas-subtabs) .mas-tab'))
       .filter((node) => !node.hidden).map((node) => node.dataset.tab),
     ['flow', 'record', 'pages', 'settings', 'agent', 'log']);
   } finally {
@@ -2167,11 +2344,10 @@ test('the flow tab has one floating action line above the footer', async () => {
     assert.equal(style.top, '0px', 'it sticks to the top of the pane scroller');
     assert.equal(style.flexWrap, 'nowrap', 'one line only');
     const labels = Array.from(bar.querySelectorAll('button')).map((b) => b.textContent.trim());
-    for (const want of ['\u0630\u062e\u06cc\u0631\u0647', '\u0630\u062e\u06cc\u0631\u0647 \u0628\u0627 \u0646\u0627\u0645',
+    for (const want of ['\u0630\u062e\u06cc\u0631\u0647',
       '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc',
       '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u0645\u0631\u0648\u0631\u06af\u0631',
-      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u062f\u0633\u06a9\u062a\u0627\u067e',
-      '\u067e\u0631\u0627\u0645\u067e\u062a']) {
+      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u062f\u0633\u06a9\u062a\u0627\u067e']) {
       assert.ok(labels.some((label) => label.includes(want)),
         `the line lost its "${want}" button: ` + labels.join(' | '));
     }
@@ -2215,13 +2391,7 @@ test('the flow tab has one floating action line above the footer', async () => {
       '\u062c\u0631\u06cc\u0627\u0646 \u0686\u0633\u0628\u0627\u0646',
       'the pasted flow kept the wrong name');
 
-    // the prompt button jumps into the agent's prompt sub-tab
-    const promptBtn = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-flowbar button'))
-      .find((b) => b.textContent.includes('\u067e\u0631\u0627\u0645\u067e\u062a'));
-    promptBtn.dispatchEvent(new page.window.Event('click'));
-    assert.equal(page.display('#mas-tab-agent'), 'block', 'the agent tab should open');
-    const activeSub = page.doc.querySelector('#mas-tab-agent [data-sub].is-active');
-    assert.equal(activeSub.textContent.trim(), '\u067e\u0631\u0627\u0645\u067e\u062a');
+    // round 25: the prompt shortcut left the bar (the agent tab has it)
   } finally {
     await page.cleanup();
   }
@@ -2486,8 +2656,8 @@ test('the flow action line sits first, right under the header, and the name labe
 
     // the wide-screen rules: full monitor width and the bar spans the grid
     assert.ok(/max-width: none;/.test(CSS), 'the body cap is still limiting the width');
-    assert.ok(CSS.includes('#mas-tab-flow > .mas-flowbar'),
-      'the grid span rule for the action line is missing');
+    assert.ok(CSS.includes('#mas-tab-flow > .mas-steps'),
+      'the full-width rule for the step list is missing');
     assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();

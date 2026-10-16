@@ -62,6 +62,7 @@ PLAIN_SETTINGS = {
     "ui.agentSub": str,
     "ui.tgSub": str,
     "ui.dbSub": str,
+    "ui.brainSub": str,
     "ui.panel": str,
     "ui.chatProvider": str,
     "ui.chatContext": str,
@@ -293,6 +294,15 @@ API_INDEX = [
     ("POST", "/agent/brain/suggestion", "🧠 تصمیم روی پیشنهاد مغز: id به‌علاوهٔ "
                                         "action=run|reject.",
      "Decide on the brain's suggestion: id plus action=run|reject."),
+    ("POST", "/agent/brain/message", "🧠 پیام به مغز: «اجرا: …»، «توقف»، «یادت باشه …»، "
+                                     "«حافظه»، «وضعیت» یا «کمک»؛ هر چیز دیگر یادداشت "
+                                     "حافظه می‌شود.",
+     "Message the brain: 'run: <operation>', 'stop', 'remember ...', 'memory', "
+     "'status' or 'help'; anything else becomes a memory note."),
+    ("POST", "/agent/step-doc", "📝 توضیح فارسی و شکیل یک مرحله، نوشتهٔ ایجنت همکار "
+                                "(دکمهٔ گزارش در تب مراحل).",
+     "A pretty Persian description for one step, written by the coworker agent "
+     "(the report button on the stages tab)."),
     ("DELETE", "/agent/operations/<id>", "📚 حذف یک عملیات (عملیات‌های آماده با "
                                          "restart برمی‌گردند).",
      "Delete an operation; built-ins come back on restart."),
@@ -917,6 +927,49 @@ class AgentHub:
         self.store.audit(actor, "brain.decision",
                          "%s:%s" % (action, suggestion_id))
         return result
+
+    def brain_message(self, text: str, actor: str = "operator") -> Dict[str, Any]:
+        self._guard()
+        value = str(text or "").strip()
+        if not value:
+            raise AgentError("the message must not be empty")
+        try:
+            result = self.brain.respond(value, actor=actor)
+        except ValueError as exc:
+            raise AgentError(str(exc), 400)
+        self.store.audit(actor, "brain.message", value[:120])
+        return result
+
+    def step_doc(self, step: Any, actor: str = "operator") -> Dict[str, Any]:
+        """One pretty Persian description for a step, by the coworker agent."""
+        self._guard()
+        if not isinstance(step, dict) or not step.get("type"):
+            raise AgentError("a step object with a 'type' is required")
+        try:
+            configured = bool(self.llm.describe().get("configured"))
+        except Exception:
+            configured = False
+        if not configured:
+            raise AgentError("the coworker agent is not configured yet", 409)
+        prompt = ("برای این مرحلهٔ اتوماسیون یک توضیح کوتاه، فارسی، شکیل و "
+                  "دوستانه بنویس (یک یا دو جمله؛ طوری که کسی که جریان را می‌بیند "
+                  "فهم این مرحله چه کار می‌کند): %s"
+                  % json.dumps(step, ensure_ascii=False)[:2000])
+        try:
+            reply = self.llm.complete(
+                prompt, system="تو توضیح‌نویس مراحل اتوماسیون هستی؛ فقط همان "
+                               "توضیح را می‌نویسی، بدون مقدمه و بدون نقل‌قول.")
+        except Exception as exc:
+            raise AgentError("the agent could not write the description: %s"
+                             % exc, 502)
+        if isinstance(reply, dict):
+            text = str(reply.get("text") or "").strip()
+        else:
+            text = str(reply or "").strip()
+        if not text:
+            raise AgentError("the agent returned an empty description", 502)
+        self.store.audit(actor, "step.doc", str(step.get("type"))[:30])
+        return {"text": text}
 
     def telegram_send(self, text: str, target: Optional[Any] = None,
                       channel: Optional[str] = None, purpose: str = "manual",

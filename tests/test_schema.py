@@ -200,5 +200,40 @@ class DefaultLabelTest(unittest.TestCase):
             self.assertEqual(schema.default_label(step), expected)
 
 
+class Round25StepTypesTest(unittest.TestCase):
+    """Round 25: python steps and nested operations are first-class."""
+
+    def test_python_and_run_operation_validate(self):
+        normalized, errors = schema.validate_flow(flow(steps=[
+            {"type": "python", "code": "log(1)", "timeout": 30},
+            {"type": "run_operation", "operation": "op-builtin-observe"},
+        ]))
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["steps"][0]["timeout"], 30)
+        self.assertEqual(normalized["steps"][1]["operation"],
+                         "op-builtin-observe")
+        self.assertIn("python", schema.STEP_DOCS)
+        self.assertIn("run_operation", schema.STEP_DOCS)
+
+    def test_python_needs_code_and_run_operation_needs_an_operation(self):
+        _, errors = schema.validate_flow(flow(steps=[{"type": "python"}]))
+        self.assertTrue(any("'code'" in error for error in errors), errors)
+        _, errors = schema.validate_flow(flow(steps=[{"type": "run_operation"}]))
+        self.assertTrue(any("'operation'" in error for error in errors), errors)
+
+    def test_the_error_protocol_settings_default_to_safe(self):
+        normalized, errors = schema.validate_flow(flow())
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["settings"]["errorOperation"], "")
+        self.assertFalse(normalized["settings"]["retryAfterProtocol"])
+
+    def test_the_error_protocol_settings_are_accepted(self):
+        normalized, errors = schema.validate_flow(flow(
+            settings={"errorOperation": "op-fix", "retryAfterProtocol": True}))
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["settings"]["errorOperation"], "op-fix")
+        self.assertTrue(normalized["settings"]["retryAfterProtocol"])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

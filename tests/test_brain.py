@@ -30,6 +30,7 @@ class FakeEngine:
         self.started = []
         self.busy_flag = False
         self.history = []
+        self.stop_calls = 0
 
     def busy(self):
         return self.busy_flag
@@ -40,6 +41,10 @@ class FakeEngine:
     def start(self, flow, run_id=None):
         self.started.append(flow)
         return {"runId": "run-new", "status": "running"}
+
+    def stop(self):
+        self.stop_calls += 1
+        self.busy_flag = False
 
 
 class QuietBackend:
@@ -425,6 +430,133 @@ class ApiAndThreadTest(BrainCase):
         self.assertTrue(self.hub.brain.alive())
         self.hub.stop()
         self.assertFalse(self.hub.brain.alive())
+
+
+class RespondRulesTest(BrainCase):
+    """Round 25: the brain answers the operator by its honest rulebook."""
+
+    def test_help_lists_the_rulebook(self):
+        reply = self.brain.respond("کمک")["reply"]
+        self.assertEqual(reply, self.brain.HELP_TEXT)
+        texts = [row["text"] for row in self.brain.status()["messages"]]
+        self.assertIn("کمک", texts)
+        self.assertIn(self.brain.HELP_TEXT, texts)
+
+    def test_stop_when_idle_says_so(self):
+        self.assertIn("در جریان نیست", self.brain.respond("توقف")["reply"])
+        self.assertEqual(self.engine.stop_calls, 0)
+
+    def test_stop_when_busy_requests_the_stop(self):
+        self.engine.busy_flag = True
+        self.assertIn("درخواست توقف زدم", self.brain.respond("توقف")["reply"])
+        self.assertEqual(self.engine.stop_calls, 1)
+
+    def test_remember_and_recall(self):
+        self.assertIn("به حافظهٔ مغز سپرده شد",
+                      self.brain.respond("یادت باشه فردا ساعت ۸")["reply"])
+        reply = self.brain.respond("حافظه")["reply"]
+        self.assertIn("یادداشت‌های مغز", reply)
+        self.assertIn("فردا ساعت ۸", reply)
+        memory = [row["text"] for row in self.brain.status()["memory"]]
+        self.assertIn("فردا ساعت ۸", memory)
+
+    def test_status_reports_desk_and_brain(self):
+        reply = self.brain.respond("وضعیت")["reply"]
+        self.assertIn("مغز خاموش است", reply)
+        self.assertIn("آزاد است", reply)
+
+    def test_run_an_auto_operation_starts_it_right_away(self):
+        self.hub.operation_list()   # seeds the built-ins
+        reply = self.brain.respond("اجرا: چرخهٔ مشاهده")["reply"]
+        self.assertIn("اجرا را شروع کردم", reply)
+        self.assertEqual(len(self.engine.started), 1)
+
+    def test_run_an_ask_operation_becomes_a_card_suggestion(self):
+        self.hub.operation_list()
+        self.set_permission("op-builtin-observe", "ask")
+        reply = self.brain.respond("اجرا: چرخهٔ مشاهده")["reply"]
+        self.assertIn("روی کارت", reply)
+        self.assertIsNotNone(self.brain.status()["suggestion"])
+
+    def test_anything_else_becomes_a_memory_note(self):
+        reply = self.brain.respond("سلام مغز")["reply"]
+        self.assertIn("دریافت شد", reply)
+        self.assertIn("سلام مغز",
+                      [row["text"] for row in self.brain.status()["memory"]])
+
+    def test_an_empty_message_is_refused(self):
+        self.assertRaises(ValueError, self.brain.respond, "   ")
+        with self.assertRaises(AgentError) as caught:
+            self.hub.brain_message("")
+        self.assertEqual(caught.exception.status, 400)
+
+
+class FakeDocLlm:
+    """A coworker agent that writes whatever the test tells it to."""
+
+    def __init__(self, reply):
+        self.reply = reply
+        self.prompts = []
+
+    def describe(self):
+        return {"provider": "fake", "configured": True}
+
+    def complete(self, prompt, system="", **kwargs):
+        self.prompts.append(prompt)
+        return {"text": self.reply}
+
+
+class BoomLlm(FakeDocLlm):
+    def __init__(self):
+        super().__init__("")
+
+    def complete(self, *args, **kwargs):
+        raise RuntimeError("the browser chat is down")
+
+
+class MessageAndDocRoutesTest(BrainCase):
+    """Round 25: POST /agent/brain/message and POST /agent/step-doc."""
+
+    def call(self, api, method, path, body=None, headers=None):
+        raw = json.dumps(body).encode("utf-8") if body is not None else b""
+        status, _, data = api.handle(
+            method, path, body=raw, query={},
+            headers={"x-automation-token": TOKEN} if headers is None else headers)
+        try:
+            payload = json.loads(data.decode("utf-8"))
+        except ValueError:
+            payload = data[:200]
+        return status, payload
+
+    def api(self):
+        return AutomationApi(None, FlowStore(self.tmp), None, data_dir=self.tmp,
+                             token=TOKEN, agent=self.hub)
+
+    def test_the_message_route_is_gated_shaped_and_answered(self):
+        api = self.api()
+        self.assertEqual(
+            self.call(api, "POST", "/agent/brain/message", {}, headers={})[0], 401)
+        self.assertEqual(self.call(api, "POST", "/agent/brain/message", {})[0], 400)
+        status, payload = self.call(api, "POST", "/agent/brain/message",
+                                    {"text": "وضعیت"})
+        self.assertEqual(status, 200)
+        self.assertIn("مغز", payload["reply"])
+
+    def test_the_step_doc_route_refuses_then_writes_then_reports_failure(self):
+        api = self.api()
+        self.assertEqual(self.call(api, "POST", "/agent/step-doc", {})[0], 400)
+        step = {"type": "click", "x": 1, "y": 2}
+        # no coworker agent configured yet: an honest 409, not a fake text
+        self.assertEqual(
+            self.call(api, "POST", "/agent/step-doc", {"step": step})[0], 409)
+        self.hub.llm = FakeDocLlm("روی دکمهٔ ورود کلیک می‌کند.")
+        status, payload = self.call(api, "POST", "/agent/step-doc", {"step": step})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["text"], "روی دکمهٔ ورود کلیک می‌کند.")
+        # a failing agent is a 502 with the reason, never an empty note
+        self.hub.llm = BoomLlm()
+        self.assertEqual(
+            self.call(api, "POST", "/agent/step-doc", {"step": step})[0], 502)
 
 
 if __name__ == "__main__":

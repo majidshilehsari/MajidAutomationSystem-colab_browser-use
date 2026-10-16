@@ -14,9 +14,9 @@ import {
 } from './core.mjs';
 
 /** Tab order, and the tab the panel opens on. */
-const TAB_ORDER = ['chat', 'library', 'flow', 'record', 'pages',
-  'db', 'ops', 'brain', 'settings', 'agent', 'log'];
-const DEFAULT_TAB = 'chat';
+const TAB_ORDER = ['brain', 'chat', 'library', 'flow', 'record', 'pages',
+  'db', 'ops', 'settings', 'agent', 'log'];
+const DEFAULT_TAB = 'brain';
 
 /** The tab the panel opens on: the remembered one, else the first. */
 function initialTab() {
@@ -63,6 +63,10 @@ const state = {
   logOffset: 0,
   lastRenderedIndex: -1,
   opsSub: 'running',
+  brainSub: 'interact',
+  brainDraft: '',
+  brainMsgCount: 0,
+  brainSugSeen: false,
   clipSyncOn: false,
   clipSyncTimer: null,
   clipLastLocal: null,
@@ -525,6 +529,7 @@ async function refreshAgentTabs() {
       if (str(prefs['ui.agentSub'])) state.agentSub = prefs['ui.agentSub'];
       if (str(prefs['ui.tgSub'])) state.tgSub = prefs['ui.tgSub'];
       if (str(prefs['ui.dbSub'])) state.dbSub = prefs['ui.dbSub'];
+      if (str(prefs['ui.brainSub'])) state.brainSub = prefs['ui.brainSub'];
       let panelPref = null;
       if (prefs['ui.panel'] === '1' || prefs['ui.panel'] === '0') {
         panelPref = prefs['ui.panel'];
@@ -730,8 +735,46 @@ function renderFlow() {
   state.flow.steps.forEach((step, index) => list.appendChild(stepRow(step, index)));
 
   const settings = state.flow.settings;
-  const settingsBox = el('details', { class: 'mas-settings' }, [
-    el('summary', { text: t('settings') }),
+  const settingsRow = el('div', { class: 'mas-row' }, [
+    button('⚙ ' + t('flowSettingsGear'), openFlowSettingsModal),
+  ]);
+
+  // One line of actions that floats right above the footer while - and only
+  // while - the flow tab is the open one (it lives inside the pane, so hiding
+  // the section hides the bar with it; nothing to unmount on tab changes).
+  const ioRow = el('div', { class: 'mas-flowbar' }, [
+    button(t('save'), () => saveFlow(), { class: 'mas-btn mas-primary' }),
+    button(t('load'), loadFlowDialog),
+    button('🪟 ' + t('flowLoadClipBrowser'), () => loadFlowFromClipboard('browser')),
+    button('🖥 ' + t('flowLoadClipDesktop'), () => loadFlowFromClipboard('desktop')),
+    button('📋 ' + t('copyReport'), copyReport, { class: 'mas-btn' }),
+    button('🗑 ' + t('clearAll'), clearAllSteps, { class: 'mas-btn mas-danger' }),
+  ]);
+
+  const errorBox = errors.length
+    ? el('div', { class: 'mas-errors' }, [
+      el('b', { text: t('invalidFlow') }),
+      el('ul', {}, errors.map((e) => el('li', { text: e }))),
+    ])
+    : null;
+
+  // The action line comes FIRST in the DOM: it is sticky at top:0, so it must
+  // start right under the header. When it sat last, sticky anchored it to its
+  // natural place - the bottom of the pane - which is exactly where the user
+  // kept finding it (round 14).
+  replace(pane, ioRow, nameRow, addRow, errorBox, list, settingsRow);
+}
+
+/* Round 25: the flow settings live in a gear modal, so the steps own the
+ * whole width of the pane. Everything saves on change, modal or not. */
+function openFlowSettingsModal() {
+  const settings = state.flow.settings;
+  // `let` + wrapper on purpose: the close button below is built inside the
+  // modalCard() arguments, before the function modalCard returns exists.
+  let close = () => {};
+  close = modalCard([
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '⚙ ' + t('flowSettingsGear') })]),
     el('label', { class: 'mas-field' }, [
       el('span', { text: t('defaultDelay') }),
       el('input', {
@@ -784,42 +827,24 @@ function renderFlow() {
       }),
       el('span', { text: t('stopOnError') }),
     ]),
+    el('label', { class: 'mas-field' }, [
+      el('span', { text: t('flowErrorOp') }),
+      el('input', {
+        class: 'mas-input', value: settings.errorOperation || '',
+        placeholder: 'op-builtin-observe',
+        onInput: (e) => { settings.errorOperation = e.target.value; persistFlow(); },
+      }),
+    ]),
+    el('p', { class: 'mas-hint', text: t('brainPolicy') }),
+    el('label', { class: 'mas-check' }, [
+      el('input', {
+        type: 'checkbox', checked: Boolean(settings.retryAfterProtocol),
+        onChange: (e) => { settings.retryAfterProtocol = e.target.checked; persistFlow(); },
+      }),
+      el('span', { text: t('flowRetryAfterProtocol') }),
+    ]),
+    el('div', { class: 'mas-row' }, [button(t('close'), () => close())]),
   ]);
-
-  // One line of actions that floats right above the footer while - and only
-  // while - the flow tab is the open one (it lives inside the pane, so hiding
-  // the section hides the bar with it; nothing to unmount on tab changes).
-  const ioRow = el('div', { class: 'mas-flowbar' }, [
-    button(t('save'), () => saveFlow(), { class: 'mas-btn mas-primary' }),
-    button(t('saveAs'), () => {
-      const name = window.prompt(t('saveAs'), state.flow.name);
-      if (name) saveFlow(name);
-    }),
-    button(t('load'), loadFlowDialog),
-    button('🪟 ' + t('flowLoadClipBrowser'), () => loadFlowFromClipboard('browser')),
-    button('🖥 ' + t('flowLoadClipDesktop'), () => loadFlowFromClipboard('desktop')),
-    button('JSON ⇩', exportJson),
-    button('🧩 ' + t('flowGotoPrompt'), () => {
-      selectTab('agent');
-      selectAgentSub('prompt');
-      setPanelOpen(true);
-    }),
-    button('📋 ' + t('copyReport'), copyReport, { class: 'mas-btn' }),
-    button('🗑 ' + t('clearAll'), clearAllSteps, { class: 'mas-btn mas-danger' }),
-  ]);
-
-  const errorBox = errors.length
-    ? el('div', { class: 'mas-errors' }, [
-      el('b', { text: t('invalidFlow') }),
-      el('ul', {}, errors.map((e) => el('li', { text: e }))),
-    ])
-    : null;
-
-  // The action line comes FIRST in the DOM: it is sticky at top:0, so it must
-  // start right under the header. When it sat last, sticky anchored it to its
-  // natural place - the bottom of the pane - which is exactly where the user
-  // kept finding it (round 14).
-  replace(pane, ioRow, nameRow, addRow, errorBox, list, settingsBox);
 }
 
 /* ------------------------------------------------------------------ *
@@ -1089,6 +1114,19 @@ function stepRow(step, index, outcomes = stepOutcomes()) {
     el('span', { class: 'mas-type', text: step.type }),
     el('span', { class: 'mas-spacer' }),
     el('button', {
+      class: 'mas-icon', type: 'button', text: '✎', title: t('opEdit'),
+      onClick: () => {
+        state.openStepId = step.id;
+        renderFlow();
+        const node = document.querySelector(`.mas-step[data-id="${step.id}"]`);
+        if (node && node.scrollIntoView) node.scrollIntoView({ block: 'nearest' });
+      },
+    }),
+    el('button', {
+      class: 'mas-icon', type: 'button', text: '📄', title: t('stepNoteTitle'),
+      onClick: () => openStepNoteModal(step),
+    }),
+    el('button', {
       class: 'mas-icon', type: 'button', text: '⧉', title: t('duplicate'),
       onClick: () => {
         const copy = { ...structuredCloneSafe(step), id: `s-${Math.random().toString(16).slice(2, 10)}` };
@@ -1106,6 +1144,34 @@ function stepRow(step, index, outcomes = stepOutcomes()) {
   return row;
 }
 
+function openStepNoteModal(step) {
+  const area = el('textarea', {
+    class: 'mas-input mas-area', rows: '4', value: step.note || '',
+    placeholder: t('stepNoteHint'),
+    onInput: (event) => { step.note = event.target.value; persistFlow(); },
+  });
+  const writeBtn = button(t('stepDocWrite'), async () => {
+    writeBtn.disabled = true;
+    writeBtn.textContent = t('stepDocWorking');
+    try {
+      const data = await api('/agent/step-doc', { method: 'POST', body: { step } });
+      step.note = String((data && data.text) || '').trim();
+      area.value = step.note;
+      persistFlow();
+      toast(t('stepDocSaved'), 'ok');
+    } catch (error) { toast(error.message, 'error'); }
+    writeBtn.disabled = false;
+    writeBtn.textContent = t('stepDocWrite');
+  }, { class: 'mas-btn' });
+  modalCard([
+    el('div', { class: 'mas-card-head' }, [el('b', {
+      text: '📄 ' + t('stepNoteTitle') + ' — ' + (step.label || labelFor(step)),
+    })]),
+    area,
+    el('div', { class: 'mas-row mas-wrap' }, [writeBtn]),
+  ]);
+}
+
 function stepEditor(step) {
   const def = stepDef(step.type);
   const fields = [];
@@ -1120,7 +1186,8 @@ function stepEditor(step) {
       fields.push(el('label', { class: 'mas-field mas-wide' }, [
         el('span', { text: field.key }),
         el('textarea', {
-          class: 'mas-input', rows: '3', value: step[field.key] || '',
+          class: 'mas-input', rows: String(field.rows || 3),
+          value: step[field.key] || '',
           onInput: (event) => { step[field.key] = event.target.value; },
         }),
       ]));
@@ -1717,16 +1784,6 @@ async function loadFlowDialog() {
   } catch (error) {
     toast(error.message, 'error');
   }
-}
-
-function exportJson() {
-  const blob = new Blob([JSON.stringify(state.flow, null, 2)], { type: 'application/json' });
-  const url = URL.createObjectURL(blob);
-  const link = el('a', { href: url, download: `${state.flow.name || 'flow'}.json` });
-  document.body.appendChild(link);
-  link.click();
-  link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 2000);
 }
 
 /* ------------------------------------------------------------------ *
@@ -4486,25 +4543,147 @@ if (document.readyState === 'loading') {
 }
 
 /* ------------------------------------------------------------------ *
- * Brain tab: the awake supervisor that never lets the desk idle
+ * Brain tab: the awake supervisor - the first tab, with two sub-tabs.
+ * "Talk to the brain" is an interactive page: one big start/stop
+ * button, the open suggestion with its two decisions, a conversation
+ * the operator types into and the brain answers by its rulebook, and
+ * the brain's personal memory. "Brain settings" keeps the policies,
+ * the operations as the brain sees them and the brain's own log.
  * ------------------------------------------------------------------ */
 
 async function renderBrain() {
   const pane = document.getElementById('mas-tab-brain');
   if (!pane) return;
-  replace(pane, el('p', { class: 'mas-empty', text: '…' }));
+  const subs = ['interact', 'settings'];
+  const active = subs.includes(state.brainSub) ? state.brainSub : 'interact';
+  const host = el('div', { class: 'mas-subhost' });
+  replace(pane,
+    el('div', { class: 'mas-tabs mas-subtabs' }, subs.map((name) => el('button', {
+      class: 'mas-tab' + (name === active ? ' is-active' : ''),
+      dataset: { brainsub: name }, type: 'button',
+      text: t('brainSub' + name.charAt(0).toUpperCase() + name.slice(1)),
+      onClick: () => {
+        state.brainSub = name;
+        saveUiPref('brainSub', name);
+        renderBrain();
+      },
+    }))),
+    host);
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
   let data;
   try {
     data = await api('/agent/brain');
   } catch (error) {
     stopBrainPolling();
-    replace(pane, el('p', { class: 'mas-hint', text: error.message }),
+    replace(host, el('p', { class: 'mas-hint', text: error.message }),
       el('p', { class: 'mas-hint', text: t('opNeedsAgent') }));
     return;
   }
   state.brainSugSeen = Boolean(data.suggestion);
-  const policy = data.policy || {};
+  state.brainMsgCount = (data.messages || []).length;
+  if (active === 'settings') renderBrainSettings(host, data);
+  else renderBrainInteract(host, data);
+  startBrainPolling();
+}
+
+function renderBrainInteract(host, data) {
+  const messages = data.messages || [];
   const suggestion = data.suggestion;
+  const big = el('button', {
+    class: 'mas-btn mas-brain-big ' + (data.enabled ? 'mas-danger' : 'mas-primary'),
+    type: 'button', id: 'mas-brain-big',
+    text: data.enabled ? t('brainStopBig') : t('brainStartBig'),
+    onClick: () => brainToggle(!data.enabled),
+  });
+  replace(host,
+    el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' }, [el('b', { text: '🧠 ' + t('brainTitle') })]),
+      el('p', {
+        class: 'mas-hint', id: 'mas-brain-state',
+        text: (data.enabled ? t('brainIsOn') : t('brainIsOff'))
+          + ' · ' + (data.alive ? t('brainAlive') : t('brainStopped'))
+          + ' · ' + (data.busy ? t('brainBusy') : t('brainIdle')),
+      }),
+      el('div', { class: 'mas-row' }, [big]),
+    ]),
+    el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' },
+        [el('b', { text: '💡 ' + t('brainSuggestion') })]),
+      suggestion ? el('div', {}, compact([
+        el('p', { text: suggestion.name }),
+        el('div', { class: 'mas-row mas-wrap' }, [
+          button('▶ ' + t('brainRunIt'), () => brainDecide(suggestion.id, 'run'),
+            { class: 'mas-btn mas-primary' }),
+          button('✕ ' + t('brainReject'), () => brainDecide(suggestion.id, 'reject'),
+            { class: 'mas-btn mas-danger' }),
+        ]),
+      ])) : el('p', { class: 'mas-hint', text: t('brainNoSuggestion') }),
+    ]),
+    el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' },
+        [el('b', { text: '💬 ' + t('brainSubInteract') })]),
+      el('p', { class: 'mas-hint', text: t('brainInteractHint') }),
+      el('div', { id: 'mas-brain-msgs', class: 'mas-chat-list' },
+        messages.length ? messages.map(brainBubble)
+          : [el('p', { class: 'mas-empty', text: t('brainNoMessages') })]),
+      el('div', { class: 'mas-chat-compose' }, [
+        el('textarea', {
+          id: 'mas-brain-input', class: 'mas-input mas-area', rows: '2',
+          value: state.brainDraft, placeholder: t('brainChatPlaceholder'),
+          onInput: (event) => { state.brainDraft = event.target.value; },
+          onKeydown: (event) => {
+            if (event.key === 'Enter' && (event.ctrlKey || event.metaKey)) {
+              event.preventDefault();
+              sendBrainMessage();
+            }
+          },
+        }),
+        button('➤ ' + t('brainSend'), sendBrainMessage,
+          { class: 'mas-btn mas-primary', id: 'mas-brain-send' }),
+      ]),
+    ]),
+    el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' },
+        [el('b', { text: '🗃 ' + t('brainMemoryTitle') })]),
+      (data.memory || []).length
+        ? el('div', { class: 'mas-log' }, data.memory.map((row) => el('div', {
+          class: 'mas-log-line',
+        }, compact([
+          el('span', { class: 'mas-log-t', text: formatTime(row.at) }),
+          el('span', { text: row.text }),
+        ]))))
+        : el('p', { class: 'mas-hint', text: t('brainMemoryEmpty') }),
+    ]));
+  const list = document.getElementById('mas-brain-msgs');
+  if (list) list.scrollTop = list.scrollHeight;
+}
+
+function brainBubble(row) {
+  const mine = row.direction === 'in';
+  return el('div', {
+    class: 'mas-bubble ' + (mine ? 'is-mine' : 'is-ai'),
+    dataset: { dir: row.direction },
+  }, compact([
+    el('div', { class: 'mas-hint', text: formatDateTime(row.at) }),
+    el('pre', { class: 'mas-bubble-text', text: row.text || '' }),
+  ]));
+}
+
+async function sendBrainMessage() {
+  const text = String(state.brainDraft || '').trim();
+  if (!text) return;
+  state.brainDraft = '';
+  try {
+    await api('/agent/brain/message', { method: 'POST', body: { text } });
+    renderBrain();
+  } catch (error) {
+    state.brainDraft = text;
+    toast(error.message, 'error');
+  }
+}
+
+function renderBrainSettings(host, data) {
+  const policy = data.policy || {};
   const statusCard = el('div', { class: 'mas-box mas-card' }, [
     el('div', { class: 'mas-card-head' }, [el('b', { text: '🧠 ' + t('brainTitle') })]),
     el('p', { class: 'mas-hint', text: t('brainHint') }),
@@ -4516,26 +4695,8 @@ async function renderBrain() {
         }),
         el('span', { text: t('brainEnabled') }),
       ]),
-      el('span', {
-        class: 'mas-hint', id: 'mas-brain-state',
-        text: (data.alive ? t('brainAlive') : t('brainStopped'))
-          + ' · ' + (data.busy ? t('brainBusy') : t('brainIdle')),
-      }),
       button('↻ ' + t('refresh'), renderBrain),
     ])),
-  ]);
-  const sugCard = el('div', { class: 'mas-box mas-card' }, [
-    el('div', { class: 'mas-card-head' },
-      [el('b', { text: '💡 ' + t('brainSuggestion') })]),
-    suggestion ? el('div', {}, compact([
-      el('p', { text: suggestion.name }),
-      el('div', { class: 'mas-row mas-wrap' }, [
-        button('▶ ' + t('brainRunIt'), () => brainDecide(suggestion.id, 'run'),
-          { class: 'mas-btn mas-primary' }),
-        button('✕ ' + t('brainReject'), () => brainDecide(suggestion.id, 'reject'),
-          { class: 'mas-btn mas-danger' }),
-      ]),
-    ])) : el('p', { class: 'mas-hint', text: t('brainNoSuggestion') }),
   ]);
   const opRow = (op, badge) => el('div', { class: 'mas-op' }, compact([
     el('b', { text: op.name }),
@@ -4587,8 +4748,7 @@ async function renderBrain() {
       el('span', { text: entry.title }),
     ])))),
   ]);
-  replace(pane, statusCard, sugCard, opsCard, policyCard, logCard);
-  startBrainPolling();
+  replace(host, statusCard, opsCard, policyCard, logCard);
 }
 
 function brainNumber(key, value, label) {
@@ -4635,12 +4795,17 @@ function startBrainPolling() {
       const data = await api('/agent/brain');
       const line = document.getElementById('mas-brain-state');
       if (line) {
-        line.textContent = (data.alive ? t('brainAlive') : t('brainStopped'))
+        line.textContent = (data.enabled ? t('brainIsOn') : t('brainIsOff'))
+          + ' · ' + (data.alive ? t('brainAlive') : t('brainStopped'))
           + ' · ' + (data.busy ? t('brainBusy') : t('brainIdle'));
       }
-      // Only a appearing/vanishing suggestion redraws the pane: a full
-      // redraw while the operator types into a policy input would eat text.
-      if (Boolean(data.suggestion) !== Boolean(state.brainSugSeen)) renderBrain();
+      // Redraw only when the conversation grows or a suggestion comes and
+      // goes: a full redraw on every tick would be wasteful, and the draft
+      // lives in state so even a redraw cannot eat what is being typed.
+      if (Boolean(data.suggestion) !== Boolean(state.brainSugSeen)
+          || (data.messages || []).length !== state.brainMsgCount) {
+        renderBrain();
+      }
     } catch (_) { /* the next tick tries again */ }
   }, 5000);
 }

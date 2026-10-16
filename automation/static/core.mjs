@@ -122,9 +122,19 @@ export const STEP_DEFS = [
     { key: 'json', kind: AREA, optional: true },
     { key: 'saveAs', kind: TEXT, optional: true },
     { key: 'timeout', kind: INT, optional: true }] },
+  // Round 25: the coworker agent's own language. A python step is a whole
+  // program - ifs, loops, variables - with the desk as its API; run_operation
+  // nests a library operation inside the flow.
+  { type: 'python', group: 'code', fields: [
+    { key: 'code', kind: AREA, rows: 10 },
+    { key: 'timeout', kind: INT, optional: true }] },
+  { type: 'run_operation', group: 'code', fields: [
+    { key: 'operation', kind: TEXT }] },
 ];
 
 export const STEP_DEFAULTS = {
+  python: { code: '' },
+  run_operation: { operation: '' },
   click: { x: 0, y: 0 },
   double_click: { x: 0, y: 0 },
   drag: { x1: 0, y1: 0, x2: 100, y2: 100 },
@@ -198,6 +208,11 @@ export function labelFor(step) {
     case 'interactive_form': return `form ${quote(step.title)}`;
     case 'secure_input': return `secret input ${quote(step.title)}`;
     case 'secure_http_request': return `secure ${step.method || 'GET'} ${truncate(step.url, 40)}`;
+    case 'python': {
+      const lines = String(step.code || '').split('\n').filter((l) => l.trim()).length;
+      return `python (${lines} line${lines === 1 ? '' : 's'})`;
+    }
+    case 'run_operation': return `run operation ${quote(step.operation)}`;
     default: return step.type;
   }
 }
@@ -279,6 +294,12 @@ export function validateFlow(flow, viewport = DEFAULT_VIEWPORT) {
     }
     if (step.type === 'goto_url' && !/^[a-zA-Z][\w+.-]*:\/\//.test(step.url || '')) {
       errors.push(`${where}: url needs a scheme such as https://`);
+    }
+    if (step.type === 'python' && !String(step.code || '').trim()) {
+      errors.push(`${where}: code must not be empty`);
+    }
+    if (step.type === 'run_operation' && !String(step.operation || '').trim()) {
+      errors.push(`${where}: operation must not be empty`);
     }
     if ((step.type === 'type' || step.type === 'paste') && !step.text) {
       errors.push(`${where}: text must not be empty`);
@@ -643,7 +664,7 @@ export const STRINGS = {
     deleteTextConfirm: 'این متن پاک شود؟', refresh: 'تازه‌سازی', copy: 'کپی',
     flowName: 'نام عملیات', addStep: 'افزودن گام', stepsEmpty: 'هنوز گامی ندارید.',
     run: 'اجرا', pause: 'توقف موقت', resume: 'ادامه', stop: 'قطع', stepOver: 'یک گام',
-    save: 'ذخیره', saveAs: 'ذخیره با نام', load: 'بارگذاری', delete: 'حذف', duplicate: 'تکرار',
+    save: 'ذخیره', load: 'بارگذاری', delete: 'حذف', duplicate: 'تکرار',
     settings: 'تنظیمات', defaultDelay: 'مکث پیش‌فرض (میلی‌ثانیه)', repeat: 'تعداد دفعات',
     screenshotEach: 'عکس بعد از هر گام', stopOnError: 'توقف در خطا',
     recordOn: 'ضبط روشن است', recordOff: 'ضبط خاموش',
@@ -864,7 +885,19 @@ export const STRINGS = {
     flowPasteHint: 'در کادر زیر Ctrl+V بزنید؛ چسباندنِ دستی هیچ اجازه‌ای از مرورگر نمی‌خواهد و همیشه کار می‌کند.',
     flowPastePh: 'JSON جریان را اینجا بچسبانید…',
     flowPasteImport: 'وارد کردن',
-    flowClipDesktopEmpty: 'کلیپ‌بورد دسکتاپ خالی است', flowGotoPrompt: 'پرامپت',
+    flowClipDesktopEmpty: 'کلیپ‌بورد دسکتاپ خالی است',
+    flowSettingsGear: 'تنظیمات جریان', flowErrorOp: 'عملیات پروتکل خطا (نام یا شناسه)',
+    flowRetryAfterProtocol: 'بعد از پروتکل موفق، گام یک بار دوباره امتحان شود',
+    stepNoteTitle: 'توضیح مرحله', stepNoteHint: 'همان چیزی است که وقتی نشانگر روی مرحله می‌رود هم دیده می‌شود.',
+    stepDocWrite: '✨ با ایجنت بنویس', stepDocWorking: 'ایجنت دارد می‌نویسد…',
+    stepDocSaved: 'توضیح مرحله نوشته و ذخیره شد',
+    brainSubInteract: 'تعامل با مغز', brainSubSettings: 'تنظیمات مغز',
+    brainStartBig: '▶ شروع مغز', brainStopBig: '■ توقف مغز',
+    brainIsOn: 'مغز بیدار است و میز را می‌چرخاند', brainIsOff: 'مغز خاموش است؛ هیچ‌چیز خودکار اجرا نمی‌شود',
+    brainChatPlaceholder: 'به مغز بگو… («اجرا: …»، «توقف»، «یادت باشه …»، «حافظه»، «وضعیت»، «کمک»)',
+    brainSend: 'بفرست', brainNoMessages: 'هنوز پیامی نیست؛ اولین جمله را تو بگو.',
+    brainMemoryTitle: 'حافظهٔ مغز', brainMemoryEmpty: 'حافظه خالی است.',
+    brainInteractHint: 'اینجا مستقیم با مغز حرف بزن: دستور بده، سوال بپرس، یادداشت بسپار. پاسخ‌ها قاعده‌محور و صادق‌اند.',
     tabOps: 'مدیریت عملیات',
     tabBrain: 'مغز',
     brainTitle: 'مغزِ بیدار',
@@ -1137,7 +1170,7 @@ export const STRINGS = {
     deleteTextConfirm: 'Delete this text?', refresh: 'Refresh', copy: 'Copy',
     flowName: 'Operation name', addStep: 'Add step', stepsEmpty: 'No steps yet.',
     run: 'Run', pause: 'Pause', resume: 'Resume', stop: 'Stop', stepOver: 'Step',
-    save: 'Save', saveAs: 'Save as', load: 'Load', delete: 'Delete', duplicate: 'Duplicate',
+    save: 'Save', load: 'Load', delete: 'Delete', duplicate: 'Duplicate',
     settings: 'Settings', defaultDelay: 'Default delay (ms)', repeat: 'Repeat',
     screenshotEach: 'Screenshot after each step', stopOnError: 'Stop on error',
     recordOn: 'Recording', recordOff: 'Record',
@@ -1358,7 +1391,19 @@ export const STRINGS = {
     flowPasteHint: 'press Ctrl+V in the box below; a manual paste needs no browser permission and always works.',
     flowPastePh: 'paste the flow JSON here…',
     flowPasteImport: 'import',
-    flowClipDesktopEmpty: 'the desktop clipboard is empty', flowGotoPrompt: 'prompt',
+    flowClipDesktopEmpty: 'the desktop clipboard is empty',
+    flowSettingsGear: 'flow settings', flowErrorOp: 'error-protocol operation (name or id)',
+    flowRetryAfterProtocol: 'retry the step once after a successful protocol',
+    stepNoteTitle: 'the step description', stepNoteHint: 'also shows as a tooltip on the step row.',
+    stepDocWrite: '✨ let the agent write it', stepDocWorking: 'the agent is writing…',
+    stepDocSaved: 'the step description was written and saved',
+    brainSubInteract: 'talk to the brain', brainSubSettings: 'brain settings',
+    brainStartBig: '▶ start the brain', brainStopBig: '■ stop the brain',
+    brainIsOn: 'the brain is awake and keeps the desk moving', brainIsOff: 'the brain is off; nothing runs by itself',
+    brainChatPlaceholder: 'tell the brain… ("run: ...", "stop", "remember ...", "memory", "status", "help")',
+    brainSend: 'send', brainNoMessages: 'no messages yet; say the first word.',
+    brainMemoryTitle: 'the brain memory', brainMemoryEmpty: 'the memory is empty.',
+    brainInteractHint: 'talk to the brain right here: command, ask, or leave a note. Its answers are rule-based and honest.',
     tabOps: 'Operations',
     tabBrain: 'Brain',
     brainTitle: 'The awake brain',

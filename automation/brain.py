@@ -117,8 +117,10 @@ class Brain:
             suggestion = self._suggestion
         if suggestion is not None:
             if now >= float(suggestion.get("expiresAt") or 0):
-                self._say("پیشنهاد «%s» بی‌پاسخ ماند؛ به عملیات‌های همیشه‌مجاز "
-                          "برمی‌گردم." % suggestion.get("name"))
+                line = ("پیشنهاد «%s» بی‌پاسخ ماند؛ به عملیات‌های همیشه‌مجاز "
+                        "برمی‌گردم." % suggestion.get("name"))
+                self._say(line)
+                self._speak(line)
                 with self._lock:
                     self._suggestion = None
             else:
@@ -143,6 +145,7 @@ class Brain:
         run_id = str(latest.get("runId") or "?")
         line = "اجرای %s تمام شد (وضعیت: %s)." % (run_id, status)
         self._say(line)
+        self._speak(line)
         if bool(self.setting("brain.notify")):
             self._tell(line)
         self._next_allowed_at = self._clock() + float(self.setting("brain.runGapSec"))
@@ -186,10 +189,12 @@ class Brain:
             self._hub.operation_run(str(operation.get("id")), actor="brain")
         except Exception as exc:
             self._say("اجرای «%s» ناموفق بود: %s" % (name, exc))
+            self._speak("خواستم «%s» را اجرا کنم اما نشد: %s" % (name, exc))
             self._next_allowed_at = now + max(
                 30.0, float(self.setting("brain.runGapSec")))
             return
         self._say("مغز «%s» را اجرا کرد." % name)
+        self._speak("«%s» را اجرا کردم." % name)
         self._next_allowed_at = now + float(self.setting("brain.runGapSec"))
 
     def _suggest(self, operation: Dict[str, Any], now: float) -> None:
@@ -201,8 +206,10 @@ class Brain:
         with self._lock:
             self._suggestion = suggestion
         self._last_ask_at = now
-        self._say("پیشنهاد: «%s» (تا %d دقیقه منتظر تصمیم می‌ماند)."
-                  % (suggestion["name"], max(1, int(ttl // 60))))
+        line = ("پیشنهاد: «%s» (تا %d دقیقه منتظر تصمیم می‌ماند)."
+                % (suggestion["name"], max(1, int(ttl // 60))))
+        self._say(line)
+        self._speak(line + " در تب مغز «اجرا کن» یا «رد کن» را بزن.")
         if bool(self.setting("brain.notify")):
             self._tell("پیشنهاد مغز: «%s» — در پنل تأیید یا رد کنید."
                        % suggestion["name"])
@@ -321,7 +328,17 @@ class Brain:
         except Exception:
             entries = []
         brain_log = [row for row in entries if row.get("actor") == "brain"][:15]
+        try:
+            messages = self._store.list_brain_msgs(60)
+        except Exception:
+            messages = []
+        try:
+            memory = self._store.list_brain_memory(10)
+        except Exception:
+            memory = []
         return {
+            "messages": messages,
+            "memory": memory,
             "enabled": bool(self.setting("brain.enabled")),
             "alive": self.alive(),
             "busy": busy,
@@ -350,7 +367,110 @@ class Brain:
             "log": brain_log,
         }
 
+    # -- the conversation with the operator ---------------------------------
+    HELP_TEXT = (
+        "من مغزم — سرپرست بیدار. کارهایی که از دستم برمی‌آید:\n"
+        "• «اجرا: <نام عملیات>» → همیشه‌مجازها را فوراً اجرا می‌کنم، بقیه را "
+        "پیشنهاد می‌دهم.\n"
+        "• «توقف» → اجرای جاری را در اولین نقطهٔ امن متوقف می‌کنم.\n"
+        "• «یادت باشه <متن>» → در حافظهٔ مغز ثبت می‌کنم.\n"
+        "• «حافظه» → یادداشت‌هایم را می‌خوانم.\n"
+        "• «وضعیت» → وضعیت میز و مغز را می‌گویم.\n"
+        "• «کمک» → همین راهنما.\n"
+        "هر چیز دیگری بنویسی، به‌عنوان یادداشت در حافظه‌ام می‌ماند.")
+
+    def respond(self, text: str, actor: str = "operator") -> Dict[str, Any]:
+        """One inbound message from the operator, answered by the rulebook.
+
+        The brain is honest about what it is: a duty-bound supervisor. What it
+        does not understand becomes a memory note - the personal memory the
+        operator asked for - instead of a made-up answer.
+        """
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("the message must not be empty")
+        self._store.add_brain_msg("in", text, actor=actor)
+        reply = self._reply(text)
+        self._store.add_brain_msg("out", reply)
+        self._say("پیام کاربر: %s" % text[:120])
+        return {"reply": reply}
+
+    def _reply(self, text: str) -> str:
+        low = text.lower()
+        if low in ("/help", "help", "کمک", "راهنما"):
+            return self.HELP_TEXT
+        if any(word in low for word in ("توقف", "stop", "/stop")):
+            engine = getattr(self._hub, "engine", None)
+            stop = getattr(engine, "stop", None)
+            busy = getattr(engine, "busy", None)
+            if stop is None or busy is None:
+                return "موتوری وصل نیست که متوقفش کنم."
+            try:
+                if not busy():
+                    return "الان اجرایی در جریان نیست."
+                stop()
+                return "درخواست توقف زدم؛ اجرا در اولین نقطهٔ امن می‌ایستد."
+            except Exception as exc:
+                return "توقف ناموفق بود: %s" % exc
+        if low.startswith(("یادت باشه", "به خاطر بسپار", "remember", "/remember")):
+            note = text
+            for prefix in ("یادت باشه", "به خاطر بسپار", "remember", "/remember"):
+                if text.lower().startswith(prefix):
+                    note = text[len(prefix):].strip(" :،-")
+                    break
+            note = note or text
+            self._store.add_brain_memory(note)
+            return "به حافظهٔ مغز سپرده شد: «%s»" % note[:200]
+        if any(word in low for word in ("حافظه", "چه یادته", "memory")):
+            rows = self._store.list_brain_memory(8)
+            if not rows:
+                return "حافظهٔ مغز هنوز خالی است."
+            return "یادداشت‌های مغز:\n" + "\n".join(
+                "• %s" % str(row.get("text"))[:200] for row in rows)
+        if low in ("وضعیت", "status", "/status"):
+            snapshot = self.status()
+            suggestion = snapshot.get("suggestion")
+            return ("مغز %s است؛ میز %s؛ %s"
+                    % ("روشن" if snapshot.get("enabled") else "خاموش",
+                       "درگیر اجراست" if snapshot.get("busy") else "آزاد است",
+                       ("پیشنهاد جاری: «%s»" % suggestion.get("name"))
+                       if suggestion else "پیشنهادی در انتظار نیست."))
+        if "اجرا" in low or low.startswith("/run"):
+            match = self._match_operation(text)
+            if match is not None:
+                if str(match.get("permission") or "ask") == "auto":
+                    self._execute(match, self._clock())
+                    return "«%s» همیشه‌مجاز است؛ اجرا را شروع کردم." % match.get("name")
+                self._suggest(match, self._clock())
+                return ("«%s» با پرسش است؛ پیشنهادش را روی کارت گذاشتم — "
+                        "«اجرا کن» یا «رد کن»." % match.get("name"))
+            return "عملیاتی با این نام پیدا نکردم؛ فهرست کامل در تب کتابخانه است."
+        # Anything else is a note for the brain's own memory.
+        self._store.add_brain_memory(text[:500])
+        return ("دریافت شد و به حافظهٔ مغز رفت. برای کار: «اجرا: <نام عملیات>»، "
+                "«توقف»، «یادت باشه …»، «حافظه»، «وضعیت» یا «کمک».")
+
+    def _match_operation(self, text: str) -> Optional[Dict[str, Any]]:
+        """The first operation whose id or name appears in the message."""
+        low = text.lower()
+        for op in self._operations():
+            op_id = str(op.get("id") or "")
+            if op_id and op_id in text:
+                return op
+        for op in self._operations():
+            name = str(op.get("name") or "")
+            if name and (name in text or name.lower() in low):
+                return op
+        return None
+
     # -- the voice ------------------------------------------------------------
+    def _speak(self, text: str) -> None:
+        """One line in the brain's conversation with the operator."""
+        try:
+            self._store.add_brain_msg("out", text)
+        except Exception:
+            pass
+
     def _say(self, title: str, body: str = "") -> None:
         try:
             self._store.add_devlog(title, body, actor="brain")

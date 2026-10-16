@@ -646,6 +646,209 @@ class BackendCommandTest(unittest.TestCase):
                          "paste 'a b; rm -rf /'")
 
 
+class FakeLibrary:
+    """The slice of the operations library an engine is allowed to see."""
+
+    def __init__(self, ops):
+        self.ops = ops
+
+    def get(self, op_id):
+        return self.ops.get(str(op_id))
+
+    def list(self):
+        return list(self.ops.values())
+
+    def as_flow(self, op):
+        return {"schema": 1, "name": op.get("name", ""),
+                "steps": op.get("steps") or [], "settings": {}}
+
+
+class FakeOpsAgent:
+    """An agent whose only talent is lending its library to run_operation."""
+
+    def __init__(self, ops):
+        self.library = FakeLibrary(ops)
+
+
+class FlakyClickBackend(FakeBackend):
+    """The first click misses; the retry after the protocol succeeds."""
+
+    def __init__(self):
+        super().__init__()
+        self.clicks = 0
+
+    def click(self, x, y, button="left", clicks=1):
+        self.clicks += 1
+        if self.clicks == 1:
+            self.calls.append(("click", x, y, button, clicks))
+            return 1, "", "the first click always misses"
+        return super().click(x, y, button, clicks)
+
+
+ROUND25_OPS = {
+    "op-two": {"id": "op-two", "name": "دو گام", "steps": [
+        {"type": "click", "x": 3, "y": 4},
+        {"type": "move", "x": 5, "y": 6},
+    ]},
+    "op-fix": {"id": "op-fix", "name": "پروتکل خطا", "steps": [
+        {"type": "move", "x": 9, "y": 9},
+    ]},
+    "op-a": {"id": "op-a", "name": "a", "steps": [
+        {"type": "run_operation", "operation": "op-b"}]},
+    "op-b": {"id": "op-b", "name": "b", "steps": [
+        {"type": "run_operation", "operation": "op-c"}]},
+    "op-c": {"id": "op-c", "name": "c", "steps": [
+        {"type": "run_operation", "operation": "op-d"}]},
+    "op-d": {"id": "op-d", "name": "d", "steps": [
+        {"type": "click", "x": 7, "y": 7}]},
+}
+
+
+class PythonStepTest(EngineTestBase):
+    """Round 25, phase 2: steps written as real python."""
+
+    def test_python_step_runs_code_and_captures_output(self):
+        flow = build_flow([{"type": "python",
+                            "code": "click(10, 20)\nlog('done %d' % (6 * 7))"}])
+        status = self.run_to_completion(flow)
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(self.backend.calls, [("click", 10, 20, "left", 1)])
+        self.assertEqual(status["results"][0]["text"], "done 42")
+
+    def test_loops_conditions_and_vars_are_ordinary_python(self):
+        flow = build_flow([{"type": "python", "code": (
+            "total = 0\n"
+            "for i in range(4):\n"
+            "    if i % 2 == 0:\n"
+            "        total += i\n"
+            "vars['total'] = total\n"
+            "log(total)")}])
+        status = self.run_to_completion(flow)
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(status["results"][0]["text"], "2")
+
+    def test_vars_survive_to_the_next_python_step_of_the_run(self):
+        flow = build_flow([
+            {"type": "python", "code": "vars['n'] = 5"},
+            {"type": "python", "code": "log(vars['n'] * 2)"},
+        ])
+        status = self.run_to_completion(flow)
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(status["results"][1]["text"], "10")
+
+    def test_blank_code_fails_with_an_honest_message(self):
+        status = self.run_to_completion(
+            build_flow([{"type": "python", "code": "   "}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("needs code", status["error"])
+
+    def test_an_exception_fails_the_step_and_shows_what_happened(self):
+        status = self.run_to_completion(build_flow(
+            [{"type": "python", "code": "raise ValueError('boom')"}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("ValueError", status["error"])
+        self.assertIn("boom", status["error"])
+
+    def test_a_timeout_abandons_the_worker_and_revokes_its_helpers(self):
+        status = self.run_to_completion(build_flow(
+            [{"type": "python", "timeout": 0.2,
+              "code": "import time\ntime.sleep(30)"}]), timeout=8.0)
+        self.assertEqual(status["status"], "error")
+        self.assertIn("timed out", status["error"])
+
+
+class RunOperationStepTest(EngineTestBase):
+    """Round 25, phase 2: library operations nested inside a flow."""
+
+    def with_ops(self, backend=None):
+        self.engine = AutomationEngine(
+            backend or self.backend, self.tmp, sleep=self.clock.sleep,
+            clock=self.clock.time, agent=FakeOpsAgent(ROUND25_OPS))
+        self.engines.append(self.engine)
+        return self.engine
+
+    def test_runs_the_operation_steps_in_order(self):
+        self.with_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-two"}]))
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(self.backend.calls,
+                         [("click", 3, 4, "left", 1), ("move", 5, 6)])
+        self.assertIn("click → rc=0", status["results"][0]["text"])
+
+    def test_resolves_the_operation_by_its_persian_name(self):
+        self.with_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "دو گام"}]))
+        self.assertEqual(status["status"], "done")
+
+    def test_an_unknown_operation_fails_honestly(self):
+        self.with_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-nope"}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("no operation", status["error"])
+
+    def test_nesting_stops_at_depth_three(self):
+        self.with_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-a"}]))
+        self.assertEqual(status["status"], "error")
+        # the depth refusal is inside the captured per-substep lines
+        self.assertIn("nested too deep", status["results"][0]["text"] or "")
+
+    def test_without_an_agent_the_step_says_so(self):
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-two"}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("no coworker agent", status["error"])
+
+
+class ErrorProtocolTest(EngineTestBase):
+    """Round 25, phase 2: the dedicated error protocol operation."""
+
+    def with_flaky_ops(self):
+        self.backend = FlakyClickBackend()
+        self.engine = AutomationEngine(
+            self.backend, self.tmp, sleep=self.clock.sleep,
+            clock=self.clock.time, agent=FakeOpsAgent(ROUND25_OPS))
+        self.engines.append(self.engine)
+
+    def test_a_failed_step_hands_over_to_the_error_operation(self):
+        self.with_flaky_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "click", "x": 1, "y": 1}], errorOperation="op-fix",
+            screenshotOnError=False))
+        self.assertEqual(status["status"], "error",
+                         "without retryAfterProtocol the step must stay failed")
+        self.assertEqual(self.backend.calls,
+                         [("click", 1, 1, "left", 1), ("move", 9, 9)])
+
+    def test_retry_after_protocol_repeats_the_step_exactly_once(self):
+        self.with_flaky_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "click", "x": 1, "y": 1}], errorOperation="op-fix",
+            retryAfterProtocol=True, screenshotOnError=False))
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(self.backend.calls, [
+            ("click", 1, 1, "left", 1),   # the original failure
+            ("move", 9, 9),               # the error protocol
+            ("click", 1, 1, "left", 1),   # the single retry
+        ])
+
+    def test_the_protocol_without_an_agent_still_fails_the_step(self):
+        self.backend = FlakyClickBackend()
+        self.engine = AutomationEngine(
+            self.backend, self.tmp, sleep=self.clock.sleep,
+            clock=self.clock.time)
+        self.engines.append(self.engine)
+        status = self.run_to_completion(build_flow(
+            [{"type": "click", "x": 1, "y": 1}], errorOperation="op-fix",
+            screenshotOnError=False))
+        self.assertEqual(status["status"], "error")
+        self.assertEqual(self.backend.calls, [("click", 1, 1, "left", 1)])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
 
