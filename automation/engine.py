@@ -345,6 +345,11 @@ class AutomationEngine:
         # Created after the clock: the vault timestamps every handle with it.
         self._vault = SecretVault(clock=self._clock)
         self._lock = threading.RLock()
+        # Round 26: the python-step wrappers need to know where in the run
+        # they are (index, shot dir, label) to archive like the old types did.
+        self._current_index = 0
+        self._current_shot_dir = ""
+        self._current_step_label = ""
         self._wakeup = threading.Event()
         self._state: Optional[RunState] = None
         self._thread: Optional[threading.Thread] = None
@@ -498,6 +503,26 @@ class AutomationEngine:
             if not isinstance(node, dict):
                 return
         node[path[-1]] = value
+
+    def _form_values(self, state: Optional[RunState], output: Any,
+                     index: int, secure: bool = False) -> Any:
+        """The dict form_collect()/secure_collect() just filled (round 26)."""
+        if isinstance(output, dict):
+            namespace = output.get("handle" if secure else "namespace")
+        else:
+            namespace = output
+        if not namespace:
+            namespace = (("form.sec%03d" if secure else "form.step%03d")
+                         % index)
+        node: Any = state.form_outputs if state is not None else {}
+        for part in str(namespace).split("."):
+            if not part or part == "form":
+                continue
+            if isinstance(node, dict) and part in node:
+                node = node[part]
+            else:
+                return {}
+        return node
 
     @staticmethod
     def _validate_form_values(schema: Dict[str, Any], raw: Any) -> Dict[str, Any]:
@@ -1148,6 +1173,9 @@ class AutomationEngine:
                       shot_dir: str, settings: Dict[str, Any]) -> None:
         label = step.get("label") or step.get("type")
         kind = step.get("type")
+        self._current_index = index
+        self._current_shot_dir = shot_dir
+        self._current_step_label = str(label or "")
         self._log("step", "#%d %s" % (index, label), stepId=step.get("id"), type=kind)
 
         if step.get("requiresConfirmation"):
@@ -1383,22 +1411,216 @@ class AutomationEngine:
         def log(message: Any = "") -> None:
             outputs.append(str(message))
 
-        def screenshot(name: str = "") -> Optional[str]:
-            shot_name = str(name or "py-%d.png" % int(self._clock() * 1000))
-            run_dir = os.path.join(self.data_dir, "runs",
-                                   state.run_id if state else "misc")
-            return self._capture(run_dir, shot_name)
+        def screenshot(name: str = "") -> Tuple[int, str, str]:
+            shot_dir = self._current_shot_dir or os.path.join(
+                self.data_dir, "runs", state.run_id if state else "misc")
+            shot_name = str(name or "").strip()
+            if not shot_name:
+                shot_name = "py-%d.png" % int(self._clock() * 1000)
+            elif not shot_name.lower().endswith(".png"):
+                shot_name = "step-%03d-%s.png" % (self._current_index,
+                                                  shot_name)
+            path = self._capture(shot_dir, shot_name)
+            if not path:
+                return 1, "", "screenshot failed"
+            published = self._publish(path) or path
+            if self._shots is not None and state is not None:
+                self._shots.add({
+                    "name": os.path.basename(path), "role": "shot",
+                    "runId": state.run_id, "stepIndex": self._current_index,
+                    "stepLabel": self._current_step_label,
+                    "stepType": "python", "image": png_size(path),
+                    "status": "ok",
+                })
+            return 0, published, ""
+
+        def capture_text(limit: int = 4000) -> Tuple[int, str, str]:
+            rc, out, err = self._page_text()
+            if rc != 0:
+                return rc, "", err or "page text failed"
+            text = (out or "")[:int(limit)]
+            if self._texts is not None and state is not None:
+                self._texts.add({
+                    "text": text, "source": "capture_text",
+                    "runId": state.run_id, "stepIndex": self._current_index,
+                    "stepLabel": self._current_step_label, "chars": len(text),
+                })
+            return 0, text, ""
+
+        def type_text(text: Any, mode: Optional[str] = None,
+                      delay_ms: Optional[int] = None) -> Tuple[int, str, str]:
+            settings_now: Dict[str, Any] = {}
+            if state is not None:
+                settings_now = (state.flow or {}).get("settings") or {}
+            if delay_ms is None:
+                resolved = str(mode or settings_now.get("typingMode")
+                               or "normal")
+                delay_ms = TYPING_DELAYS_MS.get(
+                    resolved, TYPING_DELAYS_MS["normal"])
+            return self.backend.type_text(str(text), int(delay_ms))
 
         def wait(seconds: float) -> None:
-            self._interruptible_sleep(max(0.0, float(seconds)))
+            if not self._interruptible_sleep(max(0.0, float(seconds))):
+                raise _Stopped()
+
+        def wait_for_text(text: str, timeout_ms: int = 15000,
+                          absent: bool = False) -> Tuple[int, str, str]:
+            return self._wait_for_text({
+                "text": str(text), "timeoutMs": int(timeout_ms),
+                "absent": bool(absent)})
+
+        def human_verify(prompt: str) -> Tuple[int, str, str]:
+            if state is None:
+                return 1, "", "no run is active"
+            handoff_step = {
+                "type": "pause_for_human_verification", "id": "py",
+                "prompt": str(prompt),
+                "label": self._current_step_label or "human verification"}
+            self._create_handoff(state, self._current_index, handoff_step,
+                                 self._current_shot_dir or "",
+                                 "manual_verification", str(prompt))
+            return 0, "human verification confirmed", ""
+
+        def form_collect(title: str, fields: Any, message: str = "",
+                         submit_label: Optional[str] = None,
+                         cancel_label: Optional[str] = None,
+                         position: Optional[str] = None,
+                         timeout_ms: Optional[int] = None,
+                         output: Any = None) -> Tuple[int, Any, str]:
+            form_step: Dict[str, Any] = {
+                "type": "interactive_form", "title": str(title),
+                "fields": list(fields or []),
+                "label": self._current_step_label or str(title)}
+            if message:
+                form_step["message"] = str(message)
+            if submit_label:
+                form_step["submitLabel"] = str(submit_label)
+            if cancel_label:
+                form_step["cancelLabel"] = str(cancel_label)
+            if position:
+                form_step["position"] = str(position)
+            if timeout_ms:
+                form_step["timeoutMs"] = int(timeout_ms)
+            if output is not None:
+                form_step["output"] = output
+            rc, out, err = self._run_interactive_form(
+                state, self._current_index, form_step)
+            if rc != 0:
+                return rc, None, err or out or "the form was never completed"
+            return 0, self._form_values(state, form_step.get("output"),
+                                        self._current_index), ""
+
+        def secure_collect(title: str, fields: Any, policy: Any,
+                           message: str = "",
+                           position: Optional[str] = None,
+                           timeout_ms: Optional[int] = None,
+                           output: Any = None) -> Tuple[int, Any, str]:
+            sec_step: Dict[str, Any] = {
+                "type": "secure_input", "title": str(title),
+                "fields": list(fields or []), "policy": policy or {},
+                "label": self._current_step_label or str(title)}
+            if message:
+                sec_step["message"] = str(message)
+            if position:
+                sec_step["position"] = str(position)
+            if timeout_ms:
+                sec_step["timeoutMs"] = int(timeout_ms)
+            if output is not None:
+                sec_step["output"] = output
+            rc, out, err = self._run_secure_input(
+                state, self._current_index, sec_step)
+            if rc != 0:
+                return rc, None, err or out or "no secret reached the vault"
+            return 0, self._form_values(state, sec_step.get("output"),
+                                        self._current_index, secure=True), ""
+
+        def http_request(method: str, url: str,
+                         handle: Optional[str] = None,
+                         secret_ref: Optional[str] = None,
+                         json_body: Any = None,
+                         save_as: Optional[str] = None,
+                         timeout: Optional[float] = None
+                         ) -> Tuple[int, str, str]:
+            req_step: Dict[str, Any] = {
+                "type": "secure_http_request", "method": str(method),
+                "url": str(url)}
+            if handle:
+                req_step["handle"] = str(handle)
+            if secret_ref:
+                req_step["secretRef"] = str(secret_ref)
+            if json_body is not None:
+                req_step["json"] = json_body
+            if save_as:
+                req_step["saveAs"] = save_as
+            if timeout:
+                req_step["timeout"] = timeout
+            return self._run_secure_http(state, req_step)
+
+        def notify_progress(title: str, message: str = "",
+                            level: str = "info", duration_ms: int = 0,
+                            dismissible: bool = True,
+                            position: Optional[str] = None
+                            ) -> Tuple[int, str, str]:
+            notice_step: Dict[str, Any] = {
+                "type": "progress_notice", "title": str(title),
+                "message": str(message), "level": str(level),
+                "durationMs": int(duration_ms or 0),
+                "dismissible": bool(dismissible)}
+            if position:
+                notice_step["position"] = str(position)
+            return self._run_progress_notice(notice_step)
+
+        def open_agent(provider: Optional[str] = None,
+                       url: Optional[str] = None) -> Tuple[int, Any, str]:
+            rc, out, err = self._agent_open(
+                {"type": "agent_open", "provider": provider, "url": url})
+            if rc == 0:
+                try:
+                    return 0, json.loads(out), ""
+                except ValueError:
+                    pass
+            return rc, out, err
+
+        def ask_agent(prompt: str, provider: Optional[str] = None,
+                      timeout: Optional[float] = None,
+                      fresh_chat: Optional[bool] = None,
+                      save_as: Any = False) -> Tuple[int, str, str]:
+            return self._agent_ask({
+                "type": "agent_ask", "prompt": str(prompt),
+                "provider": provider, "timeout": timeout,
+                "freshChat": fresh_chat, "saveAs": save_as})
+
+        def solve_captcha(label: str = "", auto_click: Optional[bool] = None,
+                          notify: Optional[bool] = None,
+                          shot: str = "") -> Tuple[int, Any, str]:
+            cap_step: Dict[str, Any] = {
+                "type": "captcha_solve", "label": str(label or "captcha step")}
+            if auto_click is not None:
+                cap_step["autoClick"] = bool(auto_click)
+            if notify is not None:
+                cap_step["notify"] = bool(notify)
+            if shot:
+                cap_step["shot"] = str(shot)
+            rc, out, err = self._captcha_solve(cap_step)
+            if rc == 0:
+                try:
+                    return 0, json.loads(out), ""
+                except ValueError:
+                    pass
+            return rc, out, err
 
         def run_operation(operation: str) -> Tuple[int, str, str]:
-            return self._run_operation_step({"operation": str(operation)}, None)
+            return self._run_operation_step({"operation": str(operation)},
+                                            None)
 
-        def ask_agent(prompt: str, provider: Optional[str] = None) -> Any:
-            if self._agent is None:
-                raise RuntimeError("no coworker agent is attached")
-            return self._agent.ai_ask(prompt=str(prompt), provider=provider)
+        def check(result: Any) -> Any:
+            """check(click(1, 2)): fail this step when the call failed."""
+            if isinstance(result, tuple) and len(result) == 3:
+                rc, out, err = result
+                if int(rc or 0) != 0:
+                    raise RuntimeError(str(err or out or ("rc=%s" % rc)))
+                return out
+            return result
 
         namespace: Dict[str, Any] = {
             "click": lambda x, y, button="left", clicks=1:
@@ -1410,7 +1632,7 @@ class AutomationEngine:
                 self.backend.drag(int(x1), int(y1), int(x2), int(y2), button),
             "scroll": lambda amount, x=None, y=None:
                 self.backend.scroll(int(amount), x, y),
-            "type_text": lambda text: self.backend.type_text(str(text)),
+            "type_text": type_text,
             "paste": lambda text: self.backend.paste(str(text)),
             "press_key": lambda keys: self.backend.key(
                 keys if isinstance(keys, list) else [str(keys)]),
@@ -1423,6 +1645,17 @@ class AutomationEngine:
             "shell": lambda command: self.backend.shell(str(command)),
             "ask_agent": ask_agent,
             "run_operation": run_operation,
+            "check": check,
+            "wait_for_text": wait_for_text,
+            "human_verify": human_verify,
+            "form_collect": form_collect,
+            "secure_collect": secure_collect,
+            "http_request": http_request,
+            "notify_progress": notify_progress,
+            "open_agent": open_agent,
+            "solve_captcha": solve_captcha,
+            "capture_text": capture_text,
+            "forms": state.form_outputs if state is not None else {},
             "log": log,
             "print": lambda *args: outputs.append(" ".join(str(a) for a in args)),
             "vars": py_vars,
@@ -1449,6 +1682,7 @@ class AutomationEngine:
             try:
                 exec(compile(code, "<python step>", "exec"), namespace)
             except BaseException as exc:
+                holder["exc"] = exc
                 holder["error"] = "%s: %s\n%s" % (
                     type(exc).__name__, exc,
                     "".join(traceback.format_tb(exc.__traceback__))[-800:])
@@ -1463,6 +1697,10 @@ class AutomationEngine:
             return 1, "\n".join(outputs), (
                 "python step timed out after %gs; the worker was abandoned "
                 "and its helpers were revoked" % timeout)
+        if isinstance(holder.get("exc"), _Stopped):
+            # A stop (or a declined human handoff) inside a python step must
+            # still stop the whole run, exactly like it did for old types.
+            raise holder["exc"]
         if "error" in holder:
             return 1, "\n".join(outputs), holder["error"]
         return 0, "\n".join(outputs), ""
