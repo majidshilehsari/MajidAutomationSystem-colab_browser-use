@@ -44,7 +44,7 @@ chmod 700 "$STATE_DIR" "$LOG_DIR" "$PROFILE_DIR"
 start_chrome() {
   # --test-type hides the "unsupported command-line flag: --no-sandbox"
   # warning bar Chrome would otherwise pin to every window (no-sandbox is
-  # required inside Colab); the Hostim launcher has carried it since round 20.
+  # required inside Colab); the Docker deployment launcher already carries it.
   nohup env DISPLAY="$DISPLAY_ID" google-chrome \
     --no-sandbox \
     --test-type \

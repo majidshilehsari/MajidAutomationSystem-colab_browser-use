@@ -1449,6 +1449,95 @@ function setConnected(ok, needsToken = false) {
   dot.title = ok ? t('connected') : (needsToken ? t('needToken') : 'offline');
 }
 
+/* Mount a form/secret card's fields into the given host. Shared by the panel
+ * overlay and the desktop-view handoff card (round 27, item 2): same formId
+ * means the fields already on screen ARE the draft, so no host ever rebuilds
+ * them on a poll tick and resets what the human typed. */
+function mountConfirmForm(formHost, waiting, kind) {
+  if (!formHost || formHost.dataset.formId === waiting.formId) return;
+  const schema = waiting.formSchema || {};
+  draftRestore(waiting.formId);
+  const bits = [el('p', { class: 'mas-hint', text: schema.message || '' })];
+  if (kind === 'secret') {
+    const policy = schema.policy || {};
+    bits.push(el('p', { class: 'mas-form-warn', text: t('secretWarn') }));
+    bits.push(el('p', {
+      class: 'mas-form-policy',
+      text: `${t('secretScope')}: ${(policy.allowedHosts || []).join('، ')} · `
+        + `${(policy.allowedPaths || []).join('، ')} · `
+        + `${(policy.methods || []).join('/')} · TTL ${policy.ttlSeconds || 900}s · `
+        + `max ${policy.maxUses || 20}`,
+    }));
+  }
+  (schema.fields || []).forEach((field) => bits.push(formFieldNode(field, schema)));
+  formHost.dataset.formId = waiting.formId;
+  replace(formHost, ...bits);
+}
+
+/* Round 27, item 2: the "needs human action" box must be on the desktop view
+ * AND the big panel at the same time. Both read the same server state and
+ * press the same endpoints (/control confirm, /forms submit), so acting on
+ * either one advances the flow. The card sits bottom-right and covers only
+ * its own box: during a challenge the human keeps working on the live page. */
+function renderDesktopHandoff() {
+  if (document.getElementById('mas-panel')) return;   // panel mode owns #mas-confirm
+  const status = state.status || {};
+  const waiting = status.awaitingConfirmation;
+  let card = document.getElementById('mas-desktop-handoff');
+  if (!waiting) {
+    if (card) card.hidden = true;
+    return;
+  }
+  const kind = waiting.kind;
+  const humanHandoff = kind === 'challenge' || kind === 'manual_verification';
+  const formKind = kind === 'form' || kind === 'secret';
+  const schema = waiting.formSchema || {};
+  const sig = [kind, waiting.formId || '', waiting.index || 0, waiting.label || '',
+    waiting.message || '', waiting.publicShot || ''].join('|');
+  if (!card) {
+    card = el('div', { id: 'mas-desktop-handoff', class: 'mas-desktop-handoff' });
+    document.body.appendChild(card);
+  }
+  card.hidden = false;
+  const mountedForm = card.querySelector('#mas-desktop-form');
+  if (card.dataset.sig === sig && (!formKind || mountedForm)) {
+    if (formKind) mountConfirmForm(mountedForm, waiting, kind);
+    return;
+  }
+  replace(card,
+    el('h3', { text: '✋ ' + (kind === 'challenge' ? t('challengeTitle')
+      : kind === 'manual_verification' ? t('manualHandoffTitle') : t('confirmTitle')) }),
+    el('p', {
+      class: 'mas-hint',
+      text: `#${(waiting.index || 0) + 1} ${waiting.label || waiting.type || ''}`
+        + (waiting.pageOrigin ? ` · ${waiting.pageOrigin}` : ''),
+    }),
+    el('p', { text: kind === 'challenge' ? t('challengeBody') : (waiting.message || '') }),
+    waiting.publicShot ? el('a', {
+      href: `${API_PREFIX}/public/shot/${encodeURIComponent(waiting.publicShot)}`,
+      target: '_blank', rel: 'noopener', class: 'mas-confirm-shot',
+      text: t('viewChallengeShot'),
+    }) : null,
+    formKind ? el('div', { id: 'mas-desktop-form', class: 'mas-confirm-form' }) : null,
+    el('div', { class: 'mas-row' }, [
+      el('button', {
+        id: 'mas-desktop-approve', class: 'mas-btn mas-primary', type: 'button',
+        text: formKind ? (schema.submitLabel || t('approve'))
+          : humanHandoff ? t('humanContinue') : t('approve'),
+        onClick: () => confirmAction(true),
+      }),
+      el('button', {
+        id: 'mas-desktop-refuse', class: 'mas-btn', type: 'button',
+        text: formKind ? (schema.cancelLabel || t('refuse'))
+          : humanHandoff ? t('humanStop') : t('refuse'),
+        onClick: () => confirmAction(false),
+      }),
+    ]),
+  );
+  card.dataset.sig = sig;
+  if (formKind) mountConfirmForm(card.querySelector('#mas-desktop-form'), waiting, kind);
+}
+
 function renderStatus() {
   const status = state.status;
   const line = document.getElementById('mas-statusline');
@@ -1498,26 +1587,7 @@ function renderStatus() {
         const schema = waiting.formSchema || {};
         approve.textContent = schema.submitLabel || t('approve');
         refuse.textContent = schema.cancelLabel || t('refuse');
-        // Same formId => the fields already on screen ARE the local state;
-        // rebuilding them is what reset the human's edits every poll tick.
-        if (formHost.dataset.formId !== waiting.formId) {
-          draftRestore(waiting.formId);
-          const bits = [el('p', { class: 'mas-hint', text: schema.message || '' })];
-          if (kind === 'secret') {
-            const policy = schema.policy || {};
-            bits.push(el('p', { class: 'mas-form-warn', text: t('secretWarn') }));
-            bits.push(el('p', {
-              class: 'mas-form-policy',
-              text: `${t('secretScope')}: ${(policy.allowedHosts || []).join('، ')} · `
-                + `${(policy.allowedPaths || []).join('، ')} · `
-                + `${(policy.methods || []).join('/')} · TTL ${policy.ttlSeconds || 900}s · `
-                + `max ${policy.maxUses || 20}`,
-            }));
-          }
-          (schema.fields || []).forEach((field) => bits.push(formFieldNode(field, schema)));
-          formHost.dataset.formId = waiting.formId;
-          replace(formHost, ...bits);
-        }
+        mountConfirmForm(formHost, waiting, kind);
       } else if (formHost.dataset.formId) {
         formHost.dataset.formId = '';
         formDraft = { id: null, values: {}, touched: {} };
@@ -1526,6 +1596,7 @@ function renderStatus() {
   }
   const run = document.getElementById('mas-run');
   if (run) run.disabled = isRunning();
+  renderDesktopHandoff();
   renderRunPanel(raw, label);
 }
 
@@ -4382,6 +4453,11 @@ function start() {
     document.body.classList.add('mas-desktop-dark');
     buildDesktopLauncher();
     startClipSync();
+    // Round 27, item 2: the desktop view polls the same server state as the
+    // big panel, so the "needs human action" card can appear here at the
+    // same time. Both press the same endpoints; either one advances the flow.
+    refreshStatus();
+    setInterval(refreshStatus, 900);
     return;
   }
   buildPanel();

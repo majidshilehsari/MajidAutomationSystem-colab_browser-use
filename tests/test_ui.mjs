@@ -397,7 +397,7 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
 async function mount({ readyStateComplete = true, standalone = true, flow = null,
                       status: statusPayload = null, noAgent = false,
                       clipText = null, supaEmpty = false, supaOn = false,
-                      uiPrefs = null } = {}) {
+                      uiPrefs = null, token = null } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -454,6 +454,7 @@ async function mount({ readyStateComplete = true, standalone = true, flow = null
   // A cache-busting query gives every mount its own module instance.
   // The sidebar reads its flow from localStorage at import time, so seed first.
   if (flow) window.localStorage.setItem('mas.flow', JSON.stringify(flow));
+  if (token) window.localStorage.setItem('mas.token', token);
 
   const moduleUrl = `../automation/static/automation.js?run=${Math.random()}`;
   let importError = null;
@@ -693,6 +694,95 @@ test('the desktop view stays clean: no slide-out panel, one launcher button', as
     assert.ok(page.doc.getElementById('mas-toast'),
       'clipboard-sync toasts still need a host in the desktop view');
     assert.ok(page.doc.getElementById('noVNC_canvas'), 'noVNC must still be in the page');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 27: the desktop view shows the human-action card too', async () => {
+  // Item 2: the "needs human action" box must be on the desktop view AND the
+  // big panel at the same time. Same server state, same endpoints - acting on
+  // either one advances the flow.
+  const status = {
+    runId: 'r-handoff', status: 'waiting', index: 1, stepCount: 3, elapsedMs: 900,
+    currentStep: null,
+    awaitingConfirmation: {
+      index: 1, label: 'verify page', type: 'python', kind: 'challenge',
+      message: 'Review the page yourself.', pageOrigin: 'https://example.com',
+      publicShot: 'challenge-1.png',
+    },
+    entries: [], results: [], handoffs: [],
+  };
+  const page = await mount({ standalone: false, status, token: VALID_TOKEN });
+  try {
+    const card = () => page.doc.getElementById('mas-desktop-handoff');
+    assert.ok(await page.until(() => card() && !card().hidden),
+      'the human-action card never appeared on the desktop view');
+    assert.equal(page.doc.getElementById('mas-panel'), null,
+      'the card must not resurrect the removed slide-out panel');
+    assert.ok(card().textContent.includes('\u0628\u0631\u0631\u0633\u06cc \u0627\u0645\u0646\u06cc\u062a\u06cc'),
+      'the card must carry the challenge title');
+    assert.equal(page.doc.getElementById('mas-desktop-approve').textContent,
+      '\u0627\u062f\u0627\u0645\u0647 \u067e\u0633 \u0627\u0632 \u0628\u0631\u0631\u0633\u06cc \u0627\u0646\u0633\u0627\u0646\u06cc');
+    assert.equal(page.doc.getElementById('mas-desktop-refuse').textContent,
+      '\u062a\u0648\u0642\u0641 \u062c\u0631\u06cc\u0627\u0646');
+    assert.equal(
+      page.doc.querySelector('#mas-desktop-handoff a.mas-confirm-shot').getAttribute('href'),
+      '/automation/api/public/shot/challenge-1.png');
+
+    page.doc.getElementById('mas-desktop-approve')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    const posted = page.posts.find((p) => p.url.endsWith('/control'));
+    assert.ok(posted, 'the desktop card did not call the control endpoint');
+    assert.deepEqual(JSON.parse(posted.body), { action: 'confirm', approve: true });
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 27: the desktop handoff card carries interactive forms', async () => {
+  const status = {
+    runId: 'r-dform', status: 'running', stepCount: 1, stepIndex: 0,
+    currentStep: null,
+    awaitingConfirmation: {
+      index: 0, label: 'form', type: 'python', kind: 'form',
+      formId: 'form-d1-000',
+      formSchema: {
+        title: '\u067e\u0631\u0633\u0634 \u0627\u0632 \u06a9\u0627\u0631\u0628\u0631',
+        message: '\u0644\u0637\u0641\u0627\u064b \u067e\u0627\u0633\u062e \u0631\u0627 \u0628\u0646\u0648\u06cc\u0633\u06cc\u062f',
+        fields: [{ id: 'answer', type: 'text', label: '\u067e\u0627\u0633\u062e', required: true }],
+        submitLabel: '\u0627\u0631\u0633\u0627\u0644 \u067e\u0627\u0633\u062e',
+        cancelLabel: '\u0628\u06cc\u200c\u062e\u06cc\u0627\u0644',
+      },
+    },
+    entries: [], results: [], handoffs: [],
+  };
+  const page = await mount({ standalone: false, status, token: VALID_TOKEN });
+  try {
+    assert.ok(await page.until(() => page.doc.getElementById('mas-ff-answer')),
+      'the form field never rendered inside the desktop card');
+    assert.equal(page.doc.getElementById('mas-desktop-approve').textContent,
+      '\u0627\u0631\u0633\u0627\u0644 \u067e\u0627\u0633\u062e');
+    assert.equal(page.doc.getElementById('mas-desktop-refuse').textContent,
+      '\u0628\u06cc\u200c\u062e\u06cc\u0627\u0644');
+
+    // a required field left empty must warn and never post, here too
+    page.doc.getElementById('mas-desktop-approve')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    assert.ok(!page.posts.some((p) => p.url.endsWith('/submit')),
+      'an incomplete form must not be submitted from the desktop card either');
+
+    page.doc.getElementById('mas-ff-answer').value = '\u06f4\u06f2';
+    page.doc.getElementById('mas-desktop-approve')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    const posted = page.posts.find((p) => p.url.endsWith('/forms/form-d1-000/submit'));
+    assert.ok(posted, 'the desktop card did not call the form route');
+    assert.deepEqual(JSON.parse(posted.body).values, { answer: '\u06f4\u06f2' });
+    assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
   }
