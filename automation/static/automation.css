@@ -2246,6 +2246,27 @@ body.mas-desktop-dark #noVNC_transition_text {
 #mas-desktop-handoff .mas-confirm-shot { display: inline-block; margin: 6px 0; }
 #mas-desktop-handoff .mas-row { display: flex; gap: 8px; margin-top: 10px; }
 #mas-desktop-handoff .mas-btn { flex: 1; }
+
+/* ------------------------------------------------------------------
+ * Round 27, item 3: the letters sub-tab of the database section.
+ * ------------------------------------------------------------------ */
+.mas-letters { display: flex; flex-direction: column; gap: 8px; }
+.mas-letter {
+  border: 1px solid var(--mas-border, rgba(128, 128, 128, 0.35));
+  border-radius: 8px; padding: 8px 10px;
+}
+.mas-letter.is-new { border-color: var(--mas-accent, #3d8bfd); }
+.mas-letter-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  margin-bottom: 4px;
+}
+.mas-letter-when { color: var(--mas-muted, #94a3b8); font-size: 12px; }
+.mas-letter-body {
+  margin: 0; white-space: pre-wrap; word-break: break-word;
+  font: inherit; font-size: 13px;
+}
+.mas-badge-user { background: rgba(61, 139, 253, 0.18); }
+.mas-badge-agent { background: rgba(126, 87, 194, 0.22); }
 .mas-desktop-launcher .mas-launcher-btn {
   display: inline-flex;
   align-items: center;

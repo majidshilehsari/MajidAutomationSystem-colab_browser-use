@@ -81,6 +81,7 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
             || clean.endsWith('/agent/brain/toggle')
             || clean.endsWith('/agent/brain/suggestion')
             || clean.endsWith('/agent/brain/message')
+            || clean.endsWith('/agent/letters')
             || clean.endsWith('/agent/step-doc')
             || clean.includes('/agent/suggestion-'))) {
       return json({ ok: true, page: { id: 7, title: 'x' },
@@ -355,6 +356,20 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
     if (clean.endsWith('/agent/cursor')) {
       return json({ cursor: { enabled: true, size: 44, color: '#ffd400',
                               outline: '#1b1b1b', ripple: true, applied: true } });
+    }
+    if (clean.endsWith('/agent/letters')) {
+      return json({
+        unread: 1,
+        letters: [
+          { id: 2, at: 1760000100, direction: 'to_user', subject: '',
+            body: '\u06cc\u06a9 \u062c\u0631\u06cc\u0627\u0646 \u0622\u0645\u0627\u062f\u0647 \u0633\u0627\u062e\u062a\u0645.',
+            status: 'read', actor: 'agent' },
+          { id: 1, at: 1760000000, direction: 'to_agent',
+            subject: '\u062a\u0648\u0627\u0646\u0627\u06cc\u06cc \u062a\u0627\u0632\u0647',
+            body: '\u062d\u0627\u0644\u0627 \u0645\u06cc\u200c\u062a\u0648\u0627\u0646\u06cc \u0645\u0631\u062d\u0644\u0647\u200c\u0647\u0627\u06cc \u067e\u0627\u06cc\u062a\u0648\u0646 \u0628\u0646\u0648\u06cc\u0633\u06cc.',
+            status: 'new', actor: 'operator' },
+        ],
+      });
     }
     if (path.endsWith('/pages')) {
       return json({ pages: [{ id: 'p1', pageKey: 'lmarena.ai/', title: 'Battle Arena',
@@ -1398,6 +1413,57 @@ test('the texts tab lists saved text and can save a new note', async () => {
     const posted = page.posts.find((p) => p.url.endsWith('/texts'));
     assert.ok(posted, '/texts was never posted');
     assert.equal(JSON.parse(posted.body).text, 'یادداشت دستی من');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 27: the letters sub-tab keeps the two-way mail with the agent', async () => {
+  const page = await mount();
+  try {
+    const input = page.doc.getElementById('mas-token-input');
+    input.value = VALID_TOKEN;
+    page.byText('button', '\u062b\u0628\u062a').dispatchEvent(new page.window.Event('click'));
+    await page.wait(60);
+    clickTab(page, 'db');
+    clickDbSub(page, 'letters');
+
+    const pane = page.doc.getElementById('mas-tab-db');
+    assert.ok(await page.until(() => pane.querySelectorAll('.mas-letter').length === 2),
+      'the letters never listed: ' + pane.textContent);
+    assert.ok(pane.querySelector('[data-dbsub="letters"].is-active'));
+    assert.ok(pane.querySelector('.mas-badge-user'), 'the me\u2192agent badge is missing');
+    assert.ok(pane.querySelector('.mas-badge-agent'), 'the agent\u2192me badge is missing');
+    assert.ok(pane.querySelector('.mas-letter.is-new'),
+      'an undelivered letter must be marked');
+    assert.ok(pane.textContent.includes('\u0646\u0631\u0633\u06cc\u062f\u0647'),
+      'the delivery chip is missing');
+
+    // composing a letter to the agent
+    const subject = pane.querySelector('#mas-letters-subject');
+    subject.value = '\u062a\u063a\u06cc\u06cc\u0631 \u062a\u0627\u0632\u0647';
+    subject.dispatchEvent(new page.window.Event('input'));
+    const body = pane.querySelector('#mas-letters-body');
+    body.value = '\u0627\u0632 \u0627\u0645\u0631\u0648\u0632 \u0639\u0645\u0644\u06cc\u0627\u062a \u0634\u0631\u0637\u06cc \u0647\u0645 \u062f\u0627\u0631\u06cc\u0645.';
+    body.dispatchEvent(new page.window.Event('input'));
+    const send = Array.from(pane.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('\u0627\u0631\u0633\u0627\u0644 \u0646\u0627\u0645\u0647'));
+    assert.ok(send, 'the send button is missing');
+    send.dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((p) => p.url.endsWith('/agent/letters')), 2000);
+    const posted = page.posts.find((p) => p.url.endsWith('/agent/letters'));
+    assert.deepEqual(JSON.parse(posted.body), {
+      direction: 'to_agent',
+      subject: '\u062a\u063a\u06cc\u06cc\u0631 \u062a\u0627\u0632\u0647',
+      body: '\u0627\u0632 \u0627\u0645\u0631\u0648\u0632 \u0639\u0645\u0644\u06cc\u0627\u062a \u0634\u0631\u0637\u06cc \u0647\u0645 \u062f\u0627\u0631\u06cc\u0645.' });
+
+    // deleting a letter reaches its own route
+    page.window.confirm = () => true;
+    await page.until(() => pane.querySelector('.mas-letter .mas-danger'), 2000);
+    pane.querySelector('.mas-letter .mas-danger')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.requests.some((u) => u.includes('/agent/letters/')), 2000);
+    assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
   }
@@ -2467,14 +2533,15 @@ test('the standalone header is one line: tabs, dot and desktop button', async ()
   }
 });
 
-test('the database tab groups backups, screenshots and texts', async () => {
+test('the database tab groups backups, letters, screenshots and texts', async () => {
   const page = await mount();
   try {
     await authenticate(page);
     clickTab(page, 'db');
     const labels = Array.from(page.doc.querySelectorAll('#mas-tab-db [data-dbsub]'))
       .map((node) => node.textContent.trim());
-    assert.deepEqual(labels, ['پشتیبان‌گیری', 'اسکرین‌شات‌ها', 'متون استخراج‌شده']);
+    assert.deepEqual(labels,
+      ['پشتیبان‌گیری', 'نامه‌ها', 'اسکرین‌شات‌ها', 'متون استخراج‌شده']);
     assert.ok(await page.until(() =>
       page.doc.getElementById('mas-tab-db').textContent.includes('mas-backup-test') ||
       page.doc.getElementById('mas-tab-db').textContent.includes('پشتیبان')),

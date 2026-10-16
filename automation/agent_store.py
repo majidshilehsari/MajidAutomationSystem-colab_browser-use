@@ -174,6 +174,16 @@ CREATE TABLE IF NOT EXISTS brain_memory (
     text      TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS letters (
+    id        INTEGER PRIMARY KEY AUTOINCREMENT,
+    at        REAL NOT NULL,
+    direction TEXT NOT NULL DEFAULT 'to_agent',
+    subject   TEXT NOT NULL DEFAULT '',
+    body      TEXT NOT NULL DEFAULT '',
+    status    TEXT NOT NULL DEFAULT 'new',
+    actor     TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS suggestions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at   REAL NOT NULL,
@@ -198,6 +208,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
 
 CREATE INDEX IF NOT EXISTS idx_devlog_at ON devlog (at);
 CREATE INDEX IF NOT EXISTS idx_pages_updated ON agent_pages (updated_at);
+CREATE INDEX IF NOT EXISTS idx_letters_queue ON letters (direction, status);
 CREATE INDEX IF NOT EXISTS idx_sugg_status ON suggestions (status);
 """
 
@@ -753,6 +764,68 @@ class AgentStore:
         return self._query(
             "SELECT * FROM brain_memory ORDER BY id DESC LIMIT ?",
             (max(1, min(200, int(limit))),))
+
+    # -- letters between the operator and the coworker agent --------------
+    # Round 27, item 3: the operator explains new abilities and changes in
+    # letters so the agent is never confused ('to_agent'), and the agent's
+    # important replies are archived the same way ('to_user'). Unread
+    # 'to_agent' letters are injected into the agent's next prompt and then
+    # marked read, so every letter is delivered exactly once.
+    def add_letter(self, direction: str, body: str, subject: str = "",
+                   actor: str = "") -> Dict[str, Any]:
+        way = "to_user" if str(direction) == "to_user" else "to_agent"
+        text = str(body or "").strip()[:20000]
+        now = round(self._clock(), 3)
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO letters (at, direction, subject, body, status, actor)"
+                " VALUES (?, ?, ?, ?, 'new', ?)",
+                (now, way, str(subject or "").strip()[:300], text,
+                 str(actor or "")[:60]))
+            self._db.commit()
+            row_id = int(cursor.lastrowid)
+        rows = self._query("SELECT * FROM letters WHERE id = ?", (row_id,))
+        return rows[0] if rows else {"id": row_id}
+
+    def list_letters(self, limit: int = 200,
+                     direction: Optional[str] = None) -> List[Dict[str, Any]]:
+        """Newest first."""
+        limit = max(1, min(int(limit), 500))
+        if direction in ("to_agent", "to_user"):
+            return self._query(
+                "SELECT * FROM letters WHERE direction = ?"
+                " ORDER BY id DESC LIMIT ?", (direction, limit))
+        return self._query(
+            "SELECT * FROM letters ORDER BY id DESC LIMIT ?", (limit,))
+
+    def unread_letters(self, direction: str = "to_agent",
+                       limit: int = 50) -> List[Dict[str, Any]]:
+        """Oldest first: undelivered letters read like a queue."""
+        return self._query(
+            "SELECT * FROM letters WHERE direction = ? AND status = 'new'"
+            " ORDER BY id ASC LIMIT ?",
+            (direction, max(1, min(int(limit), 200))))
+
+    def mark_letters_read(self, ids: Iterable[int]) -> int:
+        changed = 0
+        with self._lock:
+            for letter_id in ids:
+                cursor = self._db.execute(
+                    "UPDATE letters SET status = 'read'"
+                    " WHERE id = ? AND status = 'new'", (int(letter_id),))
+                changed += cursor.rowcount or 0
+            self._db.commit()
+        return changed
+
+    def delete_letter(self, letter_id: int, actor: str = "operator") -> bool:
+        with self._lock:
+            cursor = self._db.execute("DELETE FROM letters WHERE id = ?",
+                                      (int(letter_id),))
+            self._db.commit()
+            gone = bool(cursor.rowcount)
+        if gone:
+            self.audit(actor, "letter.delete", str(letter_id))
+        return gone
 
     def list_devlog(self, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 500))

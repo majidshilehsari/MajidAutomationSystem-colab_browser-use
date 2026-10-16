@@ -258,6 +258,20 @@ API_INDEX = [
      "Save a flow the model proposed inside a chat answer."),
     ("POST", "/agent/chat/clear", "💬 پاک کردن تاریخچهٔ گفت‌وگو.",
      "Clear the conversation history."),
+    ("GET", "/agent/letters", "✉️ صندوق نامه‌های بین کاربر و ایجنت: نامهٔ «من → ایجنت»"
+                              " (توضیح توانایی‌ها و تغییرات تازه تا ایجنت گیج نشود) و"
+                              " «ایجنت → من»، با وضعیت نرسیده/رسیده.",
+     "The letter box between the operator and the agent: me-to-agent letters"
+     " (explaining new abilities and changes) and agent-to-me letters, with"
+     " their delivered state."),
+    ("POST", "/agent/letters", "✉️ نوشتن نامهٔ تازه: direction='to_agent' یا"
+                               " 'to_user' با subject و body. نامه‌های نرسیده در"
+                               " شروع گفت‌وگوی بعدی کامل به ایجنت داده می‌شوند.",
+     "Write a new letter: direction 'to_agent' or 'to_user' with subject and"
+     " body. Undelivered letters reach the agent at the start of its next"
+     " conversation."),
+    ("DELETE", "/agent/letters/<id>", "✉️ حذف یک نامه از صندوق.",
+     "Delete one letter from the box."),
     ("POST", "/agent/key/reveal", "🔑 نمایش خودِ کلید — این کار در audit ثبت می‌شود.",
      "Reveal the key itself; this is written to the audit log."),
     ("POST", "/agent/key/rotate", "🔑 ساخت کلید تازه؛ کلید قبلی همان لحظه از کار "
@@ -742,6 +756,9 @@ class AgentHub:
         lines = ["تو دستیار گفت‌وگوی این سامانهٔ اتوماسیون مرورگر هستی. روان، "
                  "کوتاه و به زبان کاربر جواب بده. اگر کاربر جریان اتوماسیون "
                  "خواست، همان JSON جریان را با کلید steps برگردان."]
+        letters = self.letters_section()
+        if letters:
+            lines.append("\n" + letters)
         if with_context:
             lines.append("\n--- context فعلی اتوماسیون (فقط خواندنی) ---")
             lines.append(self._chat_context())
@@ -1784,6 +1801,61 @@ class AgentHub:
 
     def audit(self, limit: int = 200) -> List[Dict[str, Any]]:
         return self.store.list_audit(limit=limit)
+
+    # -- letters between the operator and the coworker agent --------------
+    def letters_list(self, limit: int = 200,
+                     direction: str = "") -> Dict[str, Any]:
+        return {"letters": self.store.list_letters(limit, direction or None),
+                "unread": len(self.store.unread_letters("to_agent"))}
+
+    def letter_add(self, direction: str, body: str, subject: str = "",
+                   actor: str = "operator") -> Dict[str, Any]:
+        self._guard()
+        text = str(body or "").strip()
+        if not text:
+            raise AgentError("a letter needs a body")
+        way = "to_user" if str(direction) == "to_user" else "to_agent"
+        letter = self.store.add_letter(way, text,
+                                       subject=str(subject or "").strip(),
+                                       actor=actor)
+        self.store.audit(actor, "letter.add", "%s #%s" % (way, letter.get("id")))
+        return letter
+
+    def letter_delete(self, letter_id: str,
+                      actor: str = "operator") -> Dict[str, Any]:
+        try:
+            numeric = int(str(letter_id))
+        except (TypeError, ValueError):
+            raise AgentError("no letter with id %s" % letter_id, 404)
+        if not self.store.delete_letter(numeric, actor=actor):
+            raise AgentError("no letter with id %s" % letter_id, 404)
+        return {"deleted": numeric}
+
+    def letters_section(self, mark_read: bool = True) -> str:
+        """Undelivered operator letters as one Persian block for a prompt.
+
+        Round 27, item 3: the operator writes letters explaining new abilities
+        and changes; the agent reads every undelivered letter at the start of
+        its next turn (chat tab or assistant), so it is never confused about
+        what the system can do now. Building the section marks the letters
+        delivered - each one arrives exactly once.
+        """
+        letters = self.store.unread_letters("to_agent")
+        if not letters:
+            return ""
+        lines = ["--- نامه‌های تازهٔ کاربر به تو ---",
+                 "کاربر توانایی‌ها یا تغییرات تازهٔ سامانه را در این نامه‌ها توضیح"
+                 " داده است. همه را کامل بخوان و در پاسخت کوتاه بگو چه چیزهای"
+                 " تازه‌ای یاد گرفتی. اگر نامه‌ای با آنچه قبلاً می‌دانستی در تضاد"
+                 " است، نامهٔ کاربر مقدم است."]
+        for item in letters:
+            subject = str(item.get("subject") or "").strip()
+            head = "نامهٔ #%s%s" % (item.get("id"),
+                                    " — " + subject if subject else "")
+            lines.append("%s:\n%s" % (head, str(item.get("body") or "")[:4000]))
+        if mark_read:
+            self.store.mark_letters_read([item["id"] for item in letters])
+        return "\n".join(lines)
 
     # -- devlog: the development-progress journal -----------------------
     DEVLOG_SEED_TITLE = "نامه به ایجنت همکار — آنچه تا اینجا ساخته شده"

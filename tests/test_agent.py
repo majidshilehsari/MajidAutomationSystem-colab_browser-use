@@ -2321,6 +2321,101 @@ class ChatTabTest(HubCase):
         self.assertEqual(hub.chat_messages(), [])
 
 
+class LettersTest(HubCase):
+    """Round 27, item 3: the two-way letter box between the operator and the
+    coworker agent, and its delivery into the agent's prompts."""
+
+    def test_store_roundtrip_and_queue(self):
+        hub, backend, flows = self.build()
+        first = hub.store.add_letter("to_agent", " capability note ",
+                                     subject=" تازه ")
+        second = hub.store.add_letter("to_user", "agent reply")
+        self.assertEqual(first["direction"], "to_agent")
+        self.assertEqual(first["status"], "new")
+        self.assertEqual(first["body"], "capability note")     # trimmed
+        self.assertEqual(first["subject"], "تازه")
+        letters = hub.store.list_letters()
+        self.assertEqual([item["id"] for item in letters],
+                         [second["id"], first["id"]])          # newest first
+        self.assertEqual([item["id"] for item in
+                          hub.store.list_letters(direction="to_user")],
+                         [second["id"]])
+        queue = hub.store.unread_letters("to_agent")
+        self.assertEqual([item["id"] for item in queue], [first["id"]])
+        self.assertEqual(hub.store.mark_letters_read([first["id"]]), 1)
+        self.assertEqual(hub.store.mark_letters_read([first["id"]]), 0)
+        self.assertEqual(hub.store.unread_letters("to_agent"), [])
+        self.assertTrue(hub.store.delete_letter(second["id"]))
+        self.assertFalse(hub.store.delete_letter(second["id"]))
+
+    def test_hub_validation_and_listing(self):
+        hub, backend, flows = self.build()
+        with self.assertRaises(AgentError):
+            hub.letter_add("to_agent", "   ")
+        letter = hub.letter_add("sideways", "متن نامه")
+        self.assertEqual(letter["direction"], "to_agent")      # unknown -> to_agent
+        data = hub.letters_list()
+        self.assertEqual(data["unread"], 1)
+        self.assertEqual(len(data["letters"]), 1)
+        with self.assertRaises(AgentError):
+            hub.letter_delete("nope")
+        with self.assertRaises(AgentError) as ctx:
+            hub.letter_delete("99999")
+        self.assertEqual(ctx.exception.status, 404)
+
+    def test_letters_ride_into_the_chat_prompt_once(self):
+        hub, backend, flows = self.build()
+        hub.letter_add("to_agent", "از امروز عملیات شرطی داریم.",
+                       subject="توانایی تازه")
+        user = hub.store.add_chat("user", "سلام")
+        prompt = hub._chat_prompt(user["id"], "سلام", False)
+        self.assertIn("نامه‌های تازهٔ کاربر به تو", prompt)
+        self.assertIn("توانایی تازه", prompt)
+        self.assertIn("از امروز عملیات شرطی داریم.", prompt)
+        # delivered exactly once: the next turn no longer carries it
+        second = hub.store.add_chat("user", "دوباره")
+        self.assertNotIn("نامه‌های تازهٔ کاربر به تو",
+                         hub._chat_prompt(second["id"], "دوباره", False))
+
+    def test_routes(self):
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        status, payload = self.call(api, "POST", "/agent/letters",
+                                    {"direction": "to_agent", "subject": "موضوع",
+                                     "body": "متن"})
+        self.assertEqual(status, 200)
+        letter_id = payload["letter"]["id"]
+        status, payload = self.call(api, "GET", "/agent/letters")
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["unread"], 1)
+        self.assertEqual(payload["letters"][0]["subject"], "موضوع")
+        status, _ = self.call(api, "POST", "/agent/letters", {"body": ""})
+        self.assertEqual(status, 400)
+        status, _ = self.call(api, "GET", "/agent/letters", headers={})
+        self.assertEqual(status, 401)
+        status, payload = self.call(api, "DELETE", "/agent/letters/%s" % letter_id)
+        self.assertEqual(status, 200)
+        self.assertEqual(payload, {"deleted": letter_id})
+        status, _ = self.call(api, "DELETE", "/agent/letters/%s" % letter_id)
+        self.assertEqual(status, 404)
+
+    def test_build_prompt_carries_letters(self):
+        hub, backend, flows = self.build()
+        api = self.api_for(hub, backend, flows)
+        hub.letter_add("to_agent", "قابلیت تازه: پایتون.")
+        status, _, data = api.handle("POST", "/prompt", body=b"{}",
+                                     headers={"x-automation-token": TOKEN})
+        self.assertEqual(status, 200)
+        text = data.decode("utf-8")
+        self.assertIn("قابلیت تازه: پایتون.", text)
+        self.assertIn("نامه‌های تازهٔ کاربر به تو", text)
+        # consumed: a second prompt no longer carries the letter
+        status, _, data = api.handle("POST", "/prompt", body=b"{}",
+                                     headers={"x-automation-token": TOKEN})
+        self.assertEqual(status, 200)
+        self.assertNotIn("نامه‌های تازهٔ کاربر به تو", data.decode("utf-8"))
+
+
 class TelegramChannelsTest(HubCase):
     def test_both_channels_can_be_on_at_once(self):
         hub, _, _ = self.build()

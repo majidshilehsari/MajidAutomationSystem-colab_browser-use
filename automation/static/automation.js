@@ -3609,6 +3609,17 @@ function chatBubble(message) {
   const actions = [];
   if (!mine && message.body) {
     actions.push(button('📋 ' + t('copy'), () => copyText(message.body)));
+    // Round 27, item 3: one click archives this reply as a letter FROM the
+    // agent, kept in the database's letters sub-tab.
+    actions.push(button('📨 ' + t('lettersSaveReply'), async () => {
+      try {
+        await api('/agent/letters', {
+          method: 'POST',
+          body: { direction: 'to_user', subject: '', body: message.body },
+        });
+        toast(t('lettersSavedReply'), 'ok');
+      } catch (error) { toast(error.message, 'error'); }
+    }));
   }
   if (!mine && meta.flow && (meta.flow.steps || []).length) {
     actions.push(button(`⤓ ${t('chatApplyFlow')} (${(meta.flow.steps || []).length})`,
@@ -4786,9 +4797,11 @@ async function setOperationPermission(op, permission) {
 async function renderDatabase() {
   const pane = document.getElementById('mas-tab-db');
   if (!pane) return;
-  // The operator's grouping: backups, screenshots and extracted texts all
-  // live under the database tab as three sub-tabs, same behaviour as before.
-  const subs = ['backups', 'shots', 'texts'];
+  // The operator's grouping: backups, letters, screenshots and extracted
+  // texts all live under the database tab as sub-tabs.
+  // Round 27, item 3: 'letters' is the dedicated home of the two-way mail
+  // between the operator and the coworker agent.
+  const subs = ['backups', 'letters', 'shots', 'texts'];
   const active = subs.includes(state.dbSub) ? state.dbSub : 'backups';
   const host = el('div', { class: 'mas-subhost' });
   replace(pane,
@@ -4801,7 +4814,115 @@ async function renderDatabase() {
     host);
   if (active === 'shots') return renderShots(host);
   if (active === 'texts') return renderTexts(host);
+  if (active === 'letters') return renderLetters(host);
   return renderBackups(host);
+}
+
+/* Round 27, item 3: نامه‌ها - the letter box between the operator and the
+ * coworker agent. Operator letters explain new abilities and changes so the
+ * agent is never confused; undelivered ones are handed to the agent at the
+ * start of its next conversation turn (chat tab and assistant alike) and
+ * then marked delivered. Agent replies can be archived here with one click
+ * from the chat bubble, and the agent itself may post through its key. */
+async function renderLetters(host) {
+  const pane = host;
+  replace(pane, el('p', { class: 'mas-empty', text: '…' }));
+  let data;
+  try {
+    data = await api('/agent/letters');
+  } catch (error) {
+    replace(pane, el('p', { class: 'mas-warn', text: error.message || String(error) }));
+    return;
+  }
+  const letters = data.letters || [];
+  const draft = { direction: 'to_agent', subject: '', body: '' };
+
+  const compose = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '✉️ ' + t('lettersComposeTitle') }),
+      el('span', {
+        class: 'mas-chip', id: 'mas-letters-unread',
+        text: `${data.unread || 0} ${t('lettersUnreadChip')}`,
+      }),
+    ]),
+    el('p', { class: 'mas-hint', text: t('lettersHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      el('label', { class: 'mas-field' }, [
+        el('span', { text: t('lettersDirection') }),
+        el('select', {
+          id: 'mas-letters-direction', class: 'mas-input',
+          onChange: (event) => { draft.direction = event.target.value; },
+        }, [
+          el('option', { value: 'to_agent', selected: true }, t('lettersDirToAgent')),
+          el('option', { value: 'to_user' }, t('lettersDirToUser')),
+        ]),
+      ]),
+      el('label', { class: 'mas-field mas-grow' }, [
+        el('span', { text: t('lettersSubject') }),
+        el('input', {
+          id: 'mas-letters-subject', class: 'mas-input', type: 'text',
+          placeholder: t('lettersSubjectPh'),
+          onInput: (event) => { draft.subject = event.target.value; },
+        }),
+      ]),
+    ]),
+    el('textarea', {
+      id: 'mas-letters-body', class: 'mas-input mas-area', rows: '5',
+      placeholder: t('lettersBodyPh'),
+      onInput: (event) => { draft.body = event.target.value; },
+    }),
+    el('div', { class: 'mas-row' }, [
+      button('📨 ' + t('lettersSend'), async () => {
+        if (!draft.body.trim()) { toast(t('lettersNeedBody'), 'warn'); return; }
+        try {
+          await api('/agent/letters', {
+            method: 'POST',
+            body: { direction: draft.direction, subject: draft.subject,
+                    body: draft.body },
+          });
+          toast(t('lettersSent'), 'ok');
+          renderDatabase();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+    ]),
+  ]);
+
+  const listCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '🗃 ' + t('lettersListTitle') }),
+      button('🔄', () => renderDatabase(), { class: 'mas-btn' }),
+    ]),
+    letters.length ? el('div', { class: 'mas-letters' }, letters.map((item) => el('div', {
+      class: 'mas-letter' + (item.direction === 'to_agent' && item.status === 'new'
+        ? ' is-new' : ''),
+    }, [
+      el('div', { class: 'mas-letter-head' }, [
+        el('span', {
+          class: 'mas-badge ' + (item.direction === 'to_agent'
+            ? 'mas-badge-user' : 'mas-badge-agent'),
+          text: item.direction === 'to_agent'
+            ? '🧍 ' + t('lettersDirToAgent') : '🤖 ' + t('lettersDirToUser'),
+        }),
+        item.subject ? el('b', { text: item.subject }) : null,
+        el('span', { class: 'mas-letter-when', text: tehranWhen(item.at) }),
+        item.direction === 'to_agent' ? el('span', {
+          class: 'mas-chip',
+          text: item.status === 'new' ? t('lettersStatusNew') : t('lettersStatusRead'),
+        }) : null,
+        button('🗑', async () => {
+          if (!window.confirm(t('lettersDeleteConfirm'))) return;
+          try {
+            await api(`/agent/letters/${encodeURIComponent(item.id)}`,
+              { method: 'DELETE' });
+            renderDatabase();
+          } catch (error) { toast(error.message, 'error'); }
+        }, { class: 'mas-btn mas-mini mas-danger', title: t('lettersDelete') }),
+      ]),
+      el('pre', { class: 'mas-letter-body', text: item.body || '' }),
+    ]))) : el('p', { class: 'mas-hint', text: t('lettersEmpty') }),
+  ]);
+
+  replace(pane, compose, listCard);
 }
 
 async function renderBackups(host) {

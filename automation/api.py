@@ -265,6 +265,10 @@ class AutomationApi:
             ("POST", "/agent/chat/send", self.route_agent_chat_send),
             ("POST", "/agent/chat/clear", self.route_agent_chat_clear),
             ("POST", "/agent/chat/apply-flow", self.route_agent_chat_apply_flow),
+            # letters between the operator and the coworker agent
+            ("GET", "/agent/letters", self.route_agent_letters_list),
+            ("POST", "/agent/letters", self.route_agent_letter_add),
+            ("DELETE", "/agent/letters/*", self.route_agent_letter_delete),
             # the generated agent key
             ("GET", "/agent/key", self.route_agent_key_info),
             ("POST", "/agent/key/reveal", self.route_agent_key_reveal),
@@ -965,6 +969,15 @@ class AutomationApi:
         report = _report_section(self.engine.status(), public_base)
         if report:
             parts.append(report)
+        # Round 27, item 3: undelivered operator letters ride along with every
+        # prompt, so the agent learns about new abilities before answering.
+        if getattr(self, "agent", None) is not None:
+            try:
+                letters = self.agent.letters_section()
+            except Exception:  # noqa: BLE001 - letters never break a prompt
+                letters = ""
+            if letters:
+                parts.append(letters)
         parts.append(_reply_instructions())
         return "\n\n---\n\n".join(parts)
 
@@ -1195,6 +1208,24 @@ class AutomationApi:
         if not message_id:
             raise ApiError(400, "missing 'id'")
         return json_response(200, {"flow": self.agent.chat_apply_flow(message_id)})
+
+    # -- letters between the operator and the coworker agent ----------------
+    def route_agent_letters_list(self, query: Dict[str, List[str]],
+                                 **_: Any) -> Response:
+        limit = int((query.get("limit") or ["200"])[0])
+        direction = str((query.get("direction") or [""])[0])
+        return json_response(200, self.agent.letters_list(limit, direction))
+
+    def route_agent_letter_add(self, *, body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        return json_response(200, {"letter": self.agent.letter_add(
+            str(payload.get("direction") or "to_agent"),
+            str(payload.get("body") or ""),
+            subject=str(payload.get("subject") or ""))})
+
+    def route_agent_letter_delete(self, *, params: Dict[str, str],
+                                  **_: Any) -> Response:
+        return json_response(200, self.agent.letter_delete(params["*"]))
 
     # -- the generated agent key --------------------------------------------
     def route_agent_key_info(self, **_: Any) -> Response:
