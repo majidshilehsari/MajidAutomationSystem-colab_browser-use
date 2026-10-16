@@ -248,6 +248,8 @@ API_INDEX = [
      "Take an immediate data snapshot to Supabase Storage (operator only)."),
     ("POST", "/supabase/restore", "♻️ بازیابی snapshot از Supabase (پیش‌فرض آخرین نسخه؛ با name می‌توان یک نسخهٔ قدیمی‌تر از فهرست را برگرداند) و راه‌اندازی مجدد سرور (فقط اپراتور؛ هنگام اجرای فعال رد می‌شود).",
      "Restore a Supabase snapshot (latest by default; pass name to pick an older version from the history) and restart the server (operator only; refused while a run is active)."),
+    ("POST", "/supabase/delete", "🗑 حذف یک snapshot خیلی قدیمی از Supabase با نام کامل (فقط history/snapshot-*.tar.gz؛ آخرین نسخه هرگز حذف نمی‌شود) — مدیریت فضای ابر از مدال بازیابی (فقط اپراتور).",
+     "Delete one very old Supabase snapshot by its full name (only history/snapshot-*.tar.gz; the latest pointer is never deletable) — cloud-storage management from the restore modal (operator only)."),
     ("GET", "/supabase/history", "🗂 فهرست نسخه‌های snapshot نگه‌داشته‌شده در Supabase: نام، اندازه و زمان — برای بازیابی یک نسخهٔ قدیمی‌تر (فقط اپراتور).",
      "List of the snapshot versions kept in Supabase: name, size and time — for restoring an older one (operator only)."),
     ("GET", "/supabase/status", "وضعیت همگام‌سازی Supabase: پیکربندی ماسک‌شده، آخرین نتیجه، دورهٔ زمانی (فقط اپراتور).",

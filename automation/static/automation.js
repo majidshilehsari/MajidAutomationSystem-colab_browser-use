@@ -5379,6 +5379,80 @@ async function renderBackups(host) {
       supaReloadSoon();
     } catch (error) { toast(error.message, 'error'); }
   };
+  // Round 27, item 10: «بازیابی + راه‌اندازی مجدد» opens ONE management
+  // modal listing ALL the snapshots: restore any version (restore +
+  // restart), delete a single one, or sweep the very old ones in one go.
+  const openSupaManager = async () => {
+    const body = el('div', {});
+    const close = modalCard([
+      el('div', { class: 'mas-card-head' },
+        [el('b', { text: '☁️ ' + t('supaManageTitle') })]),
+      el('p', { class: 'mas-hint', text: t('supaManageHint') }),
+      body,
+      // deferred: `close` is what modalCard returns, so the handler may only
+      // look it up at click time (a direct reference is a TDZ crash)
+      el('div', { class: 'mas-row' }, [button('✕ ' + t('supaClose'), () => close())]),
+    ]);
+    const pruneOld = async (rows) => {
+      const cutoff = Date.now() - 30 * 24 * 3600 * 1000;
+      const old = rows.filter((row) => row.createdAt
+        && Date.parse(row.createdAt) < cutoff);
+      if (!old.length) { toast(t('supaPruneNone'), 'warn'); return; }
+      if (!window.confirm(`${t('supaPruneConfirm')} (${old.length})`)) return;
+      let gone = 0;
+      for (const row of old) {
+        try {
+          await api('/supabase/delete', { method: 'POST', body: { name: row.name } });
+          gone += 1;
+        } catch (error) { toast(error.message, 'error'); }
+      }
+      toast(`${t('supaPruned')}: ${gone}`, 'ok');
+      fill();
+      loadSupa();
+    };
+    const fill = async () => {
+      replace(body, el('p', { class: 'mas-empty', text: '…' }));
+      let rows = [];
+      try {
+        rows = ((await api('/supabase/history')).history) || [];
+      } catch (error) {
+        replace(body, el('p', { class: 'mas-warn', text: error.message }));
+        return;
+      }
+      const bits = [el('div', { class: 'mas-row mas-wrap' }, [
+        button('♻️ ' + t('supaRestoreLatest'), () => { close(); supaRestore(''); },
+          { class: 'mas-btn mas-primary' }),
+        button('🗑 ' + t('supaPruneOld'), () => pruneOld(rows),
+          { class: 'mas-btn mas-danger' }),
+      ])];
+      bits.push(rows.length
+        ? agentTable(
+            [t('dbColWhen'), t('dbColSize'), t('dbColActions')],
+            rows.map((row) => [
+              (row.createdAt
+                ? tehranWhen(Math.floor(Date.parse(row.createdAt) / 1000)) : '')
+                || row.name,
+              `${((row.size || 0) / 1024).toFixed(0)} KB`,
+              el('div', { class: 'mas-row' }, [
+                button('♻️ ' + t('supaRestoreVersion'),
+                  () => { close(); supaRestore(row.name); }),
+                button('🗑 ' + t('supaDeleteVersion'), async () => {
+                  if (!window.confirm(t('supaDeleteConfirm'))) return;
+                  try {
+                    await api('/supabase/delete',
+                      { method: 'POST', body: { name: row.name } });
+                    toast(t('supaDeleted'), 'ok');
+                    fill();
+                    loadSupa();
+                  } catch (error) { toast(error.message, 'error'); }
+                }, { class: 'mas-btn mas-danger' }),
+              ]),
+            ]))
+        : el('p', { class: 'mas-empty', text: t('supaHistoryEmpty') }));
+      replace(body, ...bits);
+    };
+    fill();
+  };
   const loadSupa = async () => {
     let st;
     try {
@@ -5459,7 +5533,7 @@ async function renderBackups(host) {
           loadSupa();
         } catch (error) { toast(error.message, 'error'); }
       } }),
-      el('button', { class: 'mas-btn', type: 'button', text: '📥 ' + t('supaRestore'), onClick: () => supaRestore('') }),
+      el('button', { class: 'mas-btn', type: 'button', text: '📥 ' + t('supaRestore'), onClick: () => openSupaManager() }),
       el('button', { class: 'mas-btn', type: 'button', text: '💾 ' + t('supaSave'), onClick: async () => {
         const body = {
           'supabase.bucket': supaBucket.value.trim() || 'mas-snapshots',

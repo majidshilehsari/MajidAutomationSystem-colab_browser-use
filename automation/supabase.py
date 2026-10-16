@@ -332,6 +332,31 @@ class SupabaseSync:
         except Exception:  # noqa: BLE001
             LOG.warning("pruning old snapshots failed; keeping them")
 
+    def delete_snapshot(self, cfg: Dict[str, Any], name: str) -> bool:
+        """Round 27, item 10: the operator manages the cloud versions from
+        the restore modal - including deleting the very old ones.
+
+        Only a real ``history/snapshot-*.tar.gz`` object name can ever be
+        deleted; the latest pointer is off limits (it is what a fresh
+        machine's boot restore depends on)."""
+        path = str(name or "").strip()
+        if not self._NAME_RE.match(path):
+            raise SupabaseError("that is not a snapshot name: %r" % path, 400)
+        payload = json.dumps({"prefixes": [path]}).encode()
+        try:
+            with _http("%s/storage/v1/object/%s" % (cfg["url"], cfg["bucket"]),
+                       "DELETE", cfg["key"], data=payload,
+                       headers={"Content-Type": "application/json"},
+                       timeout=30):
+                pass
+        except urllib.error.HTTPError as exc:
+            if exc.code == 404:
+                return False
+            raise SupabaseError("delete failed: HTTP %d" % exc.code, 502)
+        except Exception as exc:  # noqa: BLE001
+            raise SupabaseError("delete failed: %s" % type(exc).__name__, 502)
+        return True
+
     #: Only these object names may ever be downloaded/restored.
     _NAME_RE = re.compile(r"^history/snapshot-[\w.\-]+\.tar\.gz$")
 

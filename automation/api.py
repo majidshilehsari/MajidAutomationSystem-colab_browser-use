@@ -199,6 +199,7 @@ class AutomationApi:
             ("POST", "/supabase/connect", self.route_supabase_connect),
             ("POST", "/supabase/sync", self.route_supabase_sync),
             ("POST", "/supabase/restore", self.route_supabase_restore),
+            ("POST", "/supabase/delete", self.route_supabase_delete),
             ("GET", "/supabase/history", self.route_supabase_history),
             ("GET", "/supabase/status", self.route_supabase_status),
             ("POST", "/screenshot", self.route_screenshot),
@@ -687,6 +688,26 @@ class AutomationApi:
             _restart_later()
         return json_response(200, {"ok": True, "restored": count,
                                    "restarting": restarting})
+
+    def route_supabase_delete(self, *, body: bytes = b"", **_: Any) -> Response:
+        """Round 27, item 10: snapshot management from the restore modal -
+        one very old cloud version at a time, operator-confirmed. Only a
+        real history snapshot name is ever accepted."""
+        self._require_operator()
+        if self.supabase is None:
+            raise ApiError(409, "همگام‌سازی Supabase در این سرور فعال نیست.")
+        payload = self.read_json(body)
+        name = str(payload.get("name") or "").strip()
+        cfg = self.supabase.config()
+        if not cfg["enabled"]:
+            raise ApiError(409, "Supabase تنظیم نشده؛ اول نشانی و کلید را بده.")
+        try:
+            deleted = self.supabase.delete_snapshot(cfg, name)
+        except SupabaseError as exc:
+            raise ApiError(exc.status, str(exc))
+        if not deleted:
+            raise ApiError(404, "هیچ snapshot‌ای با این نام در باکت پیدا نشد.")
+        return json_response(200, {"ok": True, "deleted": name})
 
     def route_supabase_connect(self, *, body: bytes = b"", **_: Any) -> Response:
         """One-paste onboarding: validate, store the credentials, and — when

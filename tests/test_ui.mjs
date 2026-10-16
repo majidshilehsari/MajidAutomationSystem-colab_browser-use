@@ -75,6 +75,9 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
     if (clean.endsWith('/supabase/restore')) {
       return json({ ok: true, restored: 3, restarting: true });
     }
+    if (clean.endsWith('/supabase/delete')) {
+      return json({ ok: true, deleted: 'history/snapshot-20261015-101010.tar.gz' });
+    }
     if ((options.method || 'GET').toUpperCase() === 'POST'
         && (clean.endsWith('/clipboard') || clean.endsWith('/agent/devlog')
             || clean.endsWith('/agent/pages') || clean.endsWith('/agent/suggestions')
@@ -3177,21 +3180,92 @@ test('the supabase card lives in the database backups sub-tab and fully works th
     assert.ok(page.posts.some((p) => p.url.endsWith('/supabase/sync')),
       'the backup button did not call /supabase/sync');
 
+    // round 27, item 10: the restore button opens the snapshot management
+    // modal; the newest-version button inside it is what confirms+restores
     let asked = false;
     const original = page.window.confirm;
     page.window.confirm = () => { asked = true; return true; };
     page.byText('button', '📥 بازیابی + راه‌اندازی مجدد').dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => Array.from(
+      page.doc.querySelectorAll('.mas-modal button'))
+      .some((b) => b.textContent.includes('تازه‌ترین'))),
+      'the newest-version restore button never appeared');
+    const newest = Array.from(page.doc.querySelectorAll('.mas-modal button'))
+      .find((b) => b.textContent.includes('تازه‌ترین'));
+    newest.dispatchEvent(new page.window.Event('click'));
     await page.wait(30);
     page.window.confirm = original;
     assert.ok(asked, 'restore must ask for confirmation first');
     assert.ok(page.posts.some((p) => p.url.endsWith('/supabase/restore')),
-      'the restore button did not call /supabase/restore');
+      'the newest-version restore did not call /supabase/restore');
     assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
   }
 });
 
+
+test('round 27: the supabase restore button opens the snapshot management modal', async () => {
+  // Item 10: «بازیابی + راه‌اندازی مجدد» must not restore blindly - it
+  // opens a modal listing ALL the snapshots, each restorable and deletable,
+  // plus one sweep for the very old ones.
+  const page = await mount({ supaOn: true });
+  try {
+    await authenticate(page);
+    page.window.confirm = () => true;
+    clickTab(page, 'db');
+    clickDbSub(page, 'backups');
+    const pane = page.doc.getElementById('mas-tab-db');
+    assert.ok(await page.until(() => pane.textContent.includes('Supabase')),
+      'the supabase card never rendered');
+    const open = Array.from(pane.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('بازیابی + راه'));
+    assert.ok(open, 'the restore + restart button is missing');
+    open.dispatchEvent(new page.window.Event('click'));
+
+    const modal = () => page.doc.querySelector('.mas-modal');
+    // both fixture versions must be listed (the when-column shows the
+    // Tehran date, so the rows are counted by their restore buttons)
+    assert.ok(await page.until(() => modal()
+      && (modal().textContent.match(/بازیابی این نسخه/g) || []).length === 2),
+      'the modal never listed every snapshot: '
+      + (modal() ? modal().textContent.slice(0, 300) : 'NO MODAL'));
+    const buttons = () => Array.from(modal().querySelectorAll('button'))
+      .map((b) => b.textContent.trim());
+    assert.ok(buttons().some((text) => text.includes('تازه‌ترین')),
+      'the newest-version restore is missing');
+    assert.ok(buttons().some((text) => text.includes('خیلی قدیمی')),
+      'the very-old sweep is missing');
+
+    // delete one snapshot: only that name goes to the API
+    const del = Array.from(modal().querySelectorAll('button'))
+      .find((b) => b.textContent.trim() === '🗑 حذف');
+    assert.ok(del, 'the per-version delete button is missing');
+    del.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts
+      .some((p) => p.url.endsWith('/supabase/delete'))),
+      'the delete never reached the API');
+    const deleted = page.posts.find((p) => p.url.endsWith('/supabase/delete'));
+    assert.equal(JSON.parse(deleted.body).name,
+      'history/snapshot-20261015-101010.tar.gz');
+
+    // restore one version: restore + restart, and the modal closes
+    const restoreOne = Array.from(modal().querySelectorAll('button'))
+      .find((b) => b.textContent.includes('بازیابی این نسخه'));
+    restoreOne.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts
+      .some((p) => p.url.endsWith('/supabase/restore'))),
+      'the per-version restore never reached the API');
+    const restored = page.posts.find((p) => p.url.endsWith('/supabase/restore'));
+    assert.equal(JSON.parse(restored.body).name,
+      'history/snapshot-20261015-101010.tar.gz');
+    assert.ok(await page.until(() => !page.doc.querySelector('.mas-modal')),
+      'the modal must close once the restore starts');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
 test('a fresh session is asked for the Supabase connection when entering the panel', async () => {
   const page = await mount({ supaEmpty: true });
   try {

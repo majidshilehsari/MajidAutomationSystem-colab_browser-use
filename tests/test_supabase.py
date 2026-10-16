@@ -202,6 +202,46 @@ class SyncCycleTests(unittest.TestCase):
         self.assertEqual(len(prefixes), 3)  # 8 - KEEP(5)
 
 
+class DeleteSnapshotTests(unittest.TestCase):
+    """Round 27, item 10: the management modal deletes single snapshots -
+    only real history names, never the latest pointer."""
+
+    def setUp(self):
+        self.tmp = make_data_dir()
+        self.sync = SupabaseSync(self.tmp)
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_delete_removes_only_real_snapshot_names(self):
+        fake = FakeUrlopen({
+            ("DELETE", "/storage/v1/object/mas-snapshots"): FakeResponse(b"{}"),
+        })
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch("urllib.request.urlopen", fake):
+            cfg = self.sync.config()
+            self.assertTrue(self.sync.delete_snapshot(
+                cfg, "history/snapshot-20261015-101010.tar.gz"))
+            for bad in ("snapshot-latest", "latest", "../../etc",
+                        "history/not-a-tar"):
+                with self.assertRaises(SupabaseError, msg=bad):
+                    self.sync.delete_snapshot(cfg, bad)
+        deletes = [c for c in fake.calls if c["method"] == "DELETE"]
+        self.assertEqual(len(deletes), 1,
+                         "a rejected name must never reach the network")
+        prefixes = json.loads(deletes[0]["data"].decode())["prefixes"]
+        self.assertEqual(prefixes, ["history/snapshot-20261015-101010.tar.gz"])
+
+    def test_delete_reports_a_missing_snapshot_as_false(self):
+        fake = FakeUrlopen({
+            ("DELETE", "/storage/v1/object/mas-snapshots"): 404,
+        })
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch("urllib.request.urlopen", fake):
+            self.assertFalse(self.sync.delete_snapshot(
+                self.sync.config(), "history/snapshot-x.tar.gz"))
+
+
 class BootRestoreTests(unittest.TestCase):
     def setUp(self):
         self.tmp = make_data_dir(with_db=False)
@@ -283,11 +323,43 @@ class ApiRouteTests(unittest.TestCase):
                 self.api.route_supabase_restore(body=b"{}")
         self.assertEqual(ctx.exception.status, 404)
 
+    def test_delete_route_removes_one_named_snapshot(self):
+        fake = FakeUrlopen({
+            ("DELETE", "/storage/v1/object/mas-snapshots"): FakeResponse(b"{}"),
+        })
+        body = json.dumps(
+            {"name": "history/snapshot-20261015-101010.tar.gz"}).encode()
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch("urllib.request.urlopen", fake):
+            status, _headers, data = self.api.route_supabase_delete(body=body)
+        self.assertEqual(status, 200)
+        self.assertEqual(json.loads(data.decode())["deleted"],
+                         "history/snapshot-20261015-101010.tar.gz")
+
+    def test_delete_route_rejects_anything_that_is_not_a_snapshot(self):
+        with mock.patch.dict(os.environ, ENV):
+            with self.assertRaises(ApiError) as ctx:
+                self.api.route_supabase_delete(
+                    body=json.dumps({"name": "snapshot-latest"}).encode())
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_delete_route_reports_a_missing_snapshot_as_404(self):
+        fake = FakeUrlopen({
+            ("DELETE", "/storage/v1/object/mas-snapshots"): 404,
+        })
+        body = json.dumps({"name": "history/snapshot-x.tar.gz"}).encode()
+        with mock.patch.dict(os.environ, ENV), \
+                mock.patch("urllib.request.urlopen", fake):
+            with self.assertRaises(ApiError) as ctx:
+                self.api.route_supabase_delete(body=body)
+        self.assertEqual(ctx.exception.status, 404)
+
     def test_agent_key_is_refused(self):
         self.api._last_verdict = "agent"
         for call in (lambda: self.api.route_supabase_status(),
                      lambda: self.api.route_supabase_sync(body=b"{}"),
                      lambda: self.api.route_supabase_restore(body=b"{}"),
+                     lambda: self.api.route_supabase_delete(body=b"{}"),
                      lambda: self.api.route_supabase_connect(body=b"{}"),
                      lambda: self.api.route_supabase_history()):
             with self.assertRaises(ApiError) as ctx:
