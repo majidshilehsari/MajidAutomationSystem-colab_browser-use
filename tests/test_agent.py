@@ -405,6 +405,62 @@ class SchedulerTest(TempDirCase):
     def raise_busy(self, job):
         raise SchedulerBusy("the desktop is busy")
 
+    def test_only_the_next_due_occurrence_is_queued_and_reported(self):
+        # Round 27, item 4: only the NEXT due occurrence of a scheduled job
+        # ever sits in the queue; after a run only the next due one returns.
+        # Both facts must be reportable and verifiable.
+        job = self.store.upsert_job({"name": "every-minute", "kind": "every",
+                                     "schedule": "60", "target": "x"})
+        scheduler = self.make()
+        scheduler.ensure_schedules()
+        queue = [row for row in self.store.list_step_reports("scheduler")
+                 if row["phase"] == "صف"]
+        self.assertEqual(len(queue), 1)
+        self.assertIn("فقط همین یک موعد", queue[0]["message"])
+        # "down" for three whole intervals: the job comes due ONCE, not three
+        # times, and the queue afterwards holds exactly the next occurrence.
+        self.clock.advance(181)
+        results = scheduler.tick()
+        self.assertEqual(len(results), 1)
+        self.assertEqual(self.fired, ["every-minute"])
+        refreshed = self.store.get_job(job["id"])
+        self.assertAlmostEqual(refreshed["next_run_at"], self.clock() + 60,
+                               delta=1)
+        self.assertEqual(scheduler.due_jobs(self.clock()), [],
+                         "only one due time may exist per job")
+        outcome = [row for row in self.store.list_step_reports("scheduler")
+                   if row["phase"] == "نتیجه"]
+        self.assertEqual(len(outcome), 1)
+        self.assertIn("فقط موعد بعدی", outcome[0]["message"])
+        self.assertTrue(outcome[0]["ok"])
+
+    def test_a_deferred_job_keeps_its_single_queue_slot(self):
+        self.store.upsert_job({"name": "busy-job", "kind": "every",
+                               "schedule": "60", "target": "x"})
+        scheduler = self.make(runner=self.raise_busy)
+        scheduler.ensure_schedules()
+        self.clock.advance(61)
+        scheduler.tick()
+        queued = [row for row in self.store.list_step_reports("scheduler")
+                  if "موکول" in row["message"]]
+        self.assertEqual(len(queued), 1)
+        self.assertIn("همان یک موعد", queued[0]["message"])
+        job = self.store.list_jobs()[0]
+        self.assertAlmostEqual(job["next_run_at"], self.clock() + 30, delta=1)
+
+    def test_a_one_shot_leaves_the_queue_and_says_so(self):
+        self.store.upsert_job({"name": "once-more", "kind": "at",
+                               "schedule": str(self.clock() + 5), "target": "x"})
+        scheduler = self.make()
+        scheduler.ensure_schedules()
+        self.clock.advance(6)
+        scheduler.tick()
+        outcome = [row for row in self.store.list_step_reports("scheduler")
+                   if row["phase"] == "نتیجه"]
+        self.assertEqual(len(outcome), 1)
+        self.assertIn("از صف خارج شد", outcome[0]["message"])
+        self.assertEqual(scheduler.due_jobs(self.clock()), [])
+
     def test_a_failing_job_is_recorded_and_still_reschedules(self):
         def boom(job):
             raise RuntimeError("the flow exploded")

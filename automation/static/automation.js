@@ -4614,6 +4614,28 @@ function renderBrainInteract(host, data) {
           el('span', { text: row.text }),
         ]))))
         : el('p', { class: 'mas-hint', text: t('brainMemoryEmpty') }),
+    ]),
+    // Round 27, item 4: the brain's continuous step report - every decision,
+    // run, suggestion and observation with its exact timestamp. The coworker
+    // agent reads the same stream through GET /agent/reports?kind=brain.
+    el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' }, [
+        el('b', { text: '📜 ' + t('brainStepsTitle') }),
+        button('🔄 ' + t('brainStepsAll'), loadBrainSteps,
+          { class: 'mas-btn mas-mini', id: 'mas-brain-steps-all' }),
+      ]),
+      el('p', { class: 'mas-hint', text: t('brainStepsHint') }),
+      (data.steps || []).length
+        ? el('div', { id: 'mas-brain-steps', class: 'mas-log' },
+          data.steps.map((row) => el('div', {
+            class: 'mas-log-line' + (row.ok ? '' : ' mas-log-error'),
+          }, compact([
+            el('span', { class: 'mas-log-t', text: formatDateTime(row.at) }),
+            el('span', { class: 'mas-chip', text: row.phase }),
+            el('span', { text: row.message }),
+          ]))))
+        : el('p', { id: 'mas-brain-steps', class: 'mas-hint',
+            text: t('brainStepsEmpty') }),
     ]));
   const list = document.getElementById('mas-brain-msgs');
   if (list) list.scrollTop = list.scrollHeight;
@@ -4628,6 +4650,24 @@ function brainBubble(row) {
     el('div', { class: 'mas-hint', text: formatDateTime(row.at) }),
     el('pre', { class: 'mas-bubble-text', text: row.text || '' }),
   ]));
+}
+
+/* Round 27, item 4: the full step-report stream straight from the database -
+ * the same route the coworker agent reads (GET /agent/reports?kind=brain). */
+async function loadBrainSteps() {
+  const host = document.getElementById('mas-brain-steps');
+  if (!host) return;
+  try {
+    const data = await api('/agent/reports?kind=brain&limit=200');
+    const rows = data.reports || [];
+    replace(host, rows.length ? rows.map((row) => el('div', {
+      class: 'mas-log-line' + (row.ok ? '' : ' mas-log-error'),
+    }, compact([
+      el('span', { class: 'mas-log-t', text: formatDateTime(row.at) }),
+      el('span', { class: 'mas-chip', text: row.phase }),
+      el('span', { text: row.message }),
+    ]))) : [el('p', { class: 'mas-hint', text: t('brainStepsEmpty') })]);
+  } catch (error) { toast(error.message, 'error'); }
 }
 
 async function sendBrainMessage() {
@@ -4681,6 +4721,7 @@ function renderBrainSettings(host, data) {
       brainNumber('brain.runGapSec', policy.runGapSec, t('brainRunGap')),
       brainNumber('brain.opCooldownMin', policy.opCooldownMin, t('brainCooldown')),
       brainNumber('brain.suggestTtlMin', policy.suggestTtlMin, t('brainTtl')),
+      brainNumber('brain.reportGapSec', policy.reportGapSec, t('brainReportGap')),
       brainNumber('log.shotKeepDays', policy.shotKeepDays, t('brainShotKeep')),
       brainNumber('log.errShotKeepDays', policy.errShotKeepDays, t('brainErrKeep')),
     ]),

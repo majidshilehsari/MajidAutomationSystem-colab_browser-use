@@ -809,6 +809,11 @@ export const STRINGS = {
     lettersEmpty: 'هنوز نامه‌ای نیست.', lettersStatusNew: 'نرسیده', lettersStatusRead: 'رسیده',
     lettersDelete: 'حذف نامه', lettersDeleteConfirm: 'این نامه حذف شود؟',
     lettersSaveReply: 'نامه کن', lettersSavedReply: 'پاسخ به‌عنوان نامهٔ ایجنت ذخیره شد',
+    brainStepsTitle: 'گزارش قدم‌های مغز',
+    brainStepsHint: 'مغز هر چند دقیقه یک‌بار و در هر اتفاق مهم، قدمش را با زمانِ دقیق گزارش می‌کند؛ ایجنت همکار هم می‌تواند بعداً همین گزارش‌ها را بخواند تا بفهمد در غیابش چه گذشته.',
+    brainStepsEmpty: 'هنوز قدمی گزارش نشده — مغز را روشن کن.',
+    brainStepsAll: 'گزارش کامل',
+    brainReportGap: 'فاصلهٔ گزارش مشاهده (ثانیه)',
     settingsLangTitle: 'زبان پنل', settingsLangHint: 'زبان و تم هر دو این‌جا زندگی می‌کنند؛ هدر فقط یک خط می‌ماند.',
   },
   en: {
@@ -1324,6 +1329,11 @@ export const STRINGS = {
     lettersEmpty: 'no letters yet.', lettersStatusNew: 'undelivered', lettersStatusRead: 'delivered',
     lettersDelete: 'delete letter', lettersDeleteConfirm: 'delete this letter?',
     lettersSaveReply: 'save as letter', lettersSavedReply: 'the reply was archived as an agent letter',
+    brainStepsTitle: 'the brain\'s step report',
+    brainStepsHint: 'the brain reports every important step - and one observation line every few minutes - with exact timestamps; the coworker agent can read the same stream later.',
+    brainStepsEmpty: 'nothing reported yet - turn the brain on.',
+    brainStepsAll: 'full report',
+    brainReportGap: 'observation report gap (seconds)',
     settingsLangTitle: 'panel language', settingsLangHint: 'language and theme both live here; the header stays one line.',
   },
 };

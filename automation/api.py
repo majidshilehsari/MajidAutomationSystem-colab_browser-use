@@ -267,6 +267,8 @@ class AutomationApi:
             ("POST", "/agent/chat/apply-flow", self.route_agent_chat_apply_flow),
             # letters between the operator and the coworker agent
             ("GET", "/agent/letters", self.route_agent_letters_list),
+            # step reports of the brain, the scheduler and the agent
+            ("GET", "/agent/reports", self.route_agent_reports_list),
             ("POST", "/agent/letters", self.route_agent_letter_add),
             ("DELETE", "/agent/letters/*", self.route_agent_letter_delete),
             # the generated agent key
@@ -1208,6 +1210,13 @@ class AutomationApi:
         if not message_id:
             raise ApiError(400, "missing 'id'")
         return json_response(200, {"flow": self.agent.chat_apply_flow(message_id)})
+
+    # -- step reports of the brain, the scheduler and the agent -------------
+    def route_agent_reports_list(self, query: Dict[str, List[str]],
+                                 **_: Any) -> Response:
+        limit = int((query.get("limit") or ["100"])[0])
+        kind = str((query.get("kind") or [""])[0])
+        return json_response(200, self.agent.reports_list(kind, limit))
 
     # -- letters between the operator and the coworker agent ----------------
     def route_agent_letters_list(self, query: Dict[str, List[str]],

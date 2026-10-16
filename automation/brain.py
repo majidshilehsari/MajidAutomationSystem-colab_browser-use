@@ -36,6 +36,7 @@ DEFAULTS: Dict[str, Any] = {
     "brain.opCooldownMin": 10,
     "brain.suggestTtlMin": 15,
     "brain.askCooldownMin": 30,
+    "brain.reportGapSec": 300,
     "log.forceStepShots": True,
     "log.shotKeepDays": 7,
     "log.errShotKeepDays": 30,
@@ -65,6 +66,7 @@ class Brain:
         self._last_ask_at = 0.0
         self._last_busy = False
         self._last_prune = 0.0
+        self._last_heartbeat = 0.0
 
     # -- lifecycle ------------------------------------------------------
     def start(self) -> None:
@@ -91,6 +93,7 @@ class Brain:
                 self.tick()
             except Exception as exc:   # a crashing brain must not kill the server
                 self._say("خطای داخلی مغز: %s" % exc)
+                self._report("خطا", "چرخهٔ فکر با خطا مواجه شد: %s" % exc, ok=False)
             self._sleep(self._interval)
 
     # -- settings -------------------------------------------------------
@@ -106,6 +109,7 @@ class Brain:
             return
         engine = getattr(self._hub, "engine", None)
         busy = bool(engine is not None and engine.busy())
+        self._heartbeat(now, busy)
         if self._last_busy and not busy:
             self._run_just_ended(engine)
         self._last_busy = busy
@@ -121,6 +125,7 @@ class Brain:
                         "برمی‌گردم." % suggestion.get("name"))
                 self._say(line)
                 self._speak(line)
+                self._report("پیشنهاد", line)
                 with self._lock:
                     self._suggestion = None
             else:
@@ -146,6 +151,7 @@ class Brain:
         line = "اجرای %s تمام شد (وضعیت: %s)." % (run_id, status)
         self._say(line)
         self._speak(line)
+        self._report("پایان اجرا", line, ok=status in ("done", "stopped"))
         if bool(self.setting("brain.notify")):
             self._tell(line)
         self._next_allowed_at = self._clock() + float(self.setting("brain.runGapSec"))
@@ -185,16 +191,20 @@ class Brain:
 
     def _execute(self, operation: Dict[str, Any], now: float) -> None:
         name = str(operation.get("name") or operation.get("id"))
+        self._report("اجرا", "عملیات «%s» را برای اجرا به صف سپردم." % name)
         try:
             self._hub.operation_run(str(operation.get("id")), actor="brain")
         except Exception as exc:
             self._say("اجرای «%s» ناموفق بود: %s" % (name, exc))
             self._speak("خواستم «%s» را اجرا کنم اما نشد: %s" % (name, exc))
+            self._report("اجرا", "اجرای «%s» ناموفق بود: %s" % (name, exc),
+                         ok=False)
             self._next_allowed_at = now + max(
                 30.0, float(self.setting("brain.runGapSec")))
             return
         self._say("مغز «%s» را اجرا کرد." % name)
         self._speak("«%s» را اجرا کردم." % name)
+        self._report("اجرا", "عملیات «%s» اجرا شد." % name)
         self._next_allowed_at = now + float(self.setting("brain.runGapSec"))
 
     def _suggest(self, operation: Dict[str, Any], now: float) -> None:
@@ -210,6 +220,7 @@ class Brain:
                 % (suggestion["name"], max(1, int(ttl // 60))))
         self._say(line)
         self._speak(line + " در تب مغز «اجرا کن» یا «رد کن» را بزن.")
+        self._report("پیشنهاد", line)
         if bool(self.setting("brain.notify")):
             self._tell("پیشنهاد مغز: «%s» — در پنل تأیید یا رد کنید."
                        % suggestion["name"])
@@ -228,6 +239,8 @@ class Brain:
         if action == "reject":
             self._last_ask_at = now
             self._say("پیشنهاد «%s» رد شد." % suggestion.get("name"))
+            self._report("تصمیم", "کاربر پیشنهاد «%s» را رد کرد؛ به سراغ "
+                         "عملیات‌های همیشه‌مجاز می‌روم." % suggestion.get("name"))
             return {"decision": "reject", "name": suggestion.get("name")}
         operation = None
         for candidate in self._operations():
@@ -309,6 +322,8 @@ class Brain:
         if removed:
             self._say("هرزسازی گزارش‌ها: %d مورد قدیمی پاک شد (متن‌ها همیشگی‌اند)."
                       % removed)
+            self._report("پاک‌سازی", "%d تصویر/پوشهٔ قدیمی پاک شد؛ متن‌ها و "
+                         "گزارش‌ها همیشگی‌اند." % removed)
 
     # -- the panel surface --------------------------------------------------
     def status(self) -> Dict[str, Any]:
@@ -336,9 +351,14 @@ class Brain:
             memory = self._store.list_brain_memory(10)
         except Exception:
             memory = []
+        try:
+            steps = self._store.list_step_reports("brain", 30)
+        except Exception:
+            steps = []
         return {
             "messages": messages,
             "memory": memory,
+            "steps": steps,
             "enabled": bool(self.setting("brain.enabled")),
             "alive": self.alive(),
             "busy": busy,
@@ -348,6 +368,7 @@ class Brain:
                 "runGapSec": int(self.setting("brain.runGapSec")),
                 "opCooldownMin": int(self.setting("brain.opCooldownMin")),
                 "suggestTtlMin": int(self.setting("brain.suggestTtlMin")),
+                "reportGapSec": int(self.setting("brain.reportGapSec")),
                 "notify": bool(self.setting("brain.notify")),
                 "forceStepShots": bool(self.setting("log.forceStepShots")),
                 "shotKeepDays": int(self.setting("log.shotKeepDays")),
@@ -393,6 +414,7 @@ class Brain:
         reply = self._reply(text)
         self._store.add_brain_msg("out", reply)
         self._say("پیام کاربر: %s" % text[:120])
+        self._report("گفت‌وگو", "پیام کاربر «%s» را پاسخ دادم." % text[:120])
         return {"reply": reply}
 
     def _reply(self, text: str) -> str:
@@ -462,6 +484,36 @@ class Brain:
             if name and (name in text or name.lower() in low):
                 return op
         return None
+
+    # -- the continuous step report -----------------------------------------
+    def _report(self, phase: str, message: str, ok: bool = True) -> None:
+        """One line of the brain's step report (round 27, item 4).
+
+        A precise, timestamped stream of everything the brain does; the
+        operator reads it in the brain tab and the coworker agent can read it
+        later through GET /agent/reports?kind=brain, so it always understands
+        what happened while it was away.
+        """
+        try:
+            self._store.add_step_report("brain", phase, message, ok=ok)
+        except Exception:
+            pass   # reporting must never break the thinking cycle
+
+    def _heartbeat(self, now: float, busy: bool) -> None:
+        """The observation cycle, reported continuously but throttled: at
+        most one line per brain.reportGapSec seconds, so the stream stays
+        readable instead of flooding the database every five seconds."""
+        gap = max(30.0, float(self.setting("brain.reportGapSec")))
+        if now - self._last_heartbeat < gap:
+            return
+        self._last_heartbeat = now
+        with self._lock:
+            suggestion = self._suggestion
+        desk = "میز مشغول اجراست" if busy else "میز آزاد است"
+        waiting = ("؛ پیشنهاد «%s» منتظر تصمیم انسانی است"
+                   % suggestion.get("name")) if suggestion else ""
+        self._report("مشاهده", "چرخهٔ مشاهده: %s%s. در نبودِ کارِ واجب، آمادهٔ "
+                     "انتخاب عملیات بعدی می‌مانم." % (desk, waiting))
 
     # -- the voice ------------------------------------------------------------
     def _speak(self, text: str) -> None:

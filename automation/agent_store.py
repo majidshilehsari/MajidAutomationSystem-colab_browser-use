@@ -184,6 +184,15 @@ CREATE TABLE IF NOT EXISTS letters (
     actor     TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS step_reports (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    at      REAL NOT NULL,
+    kind    TEXT NOT NULL DEFAULT 'brain',
+    phase   TEXT NOT NULL DEFAULT '',
+    message TEXT NOT NULL DEFAULT '',
+    ok      INTEGER NOT NULL DEFAULT 1
+);
+
 CREATE TABLE IF NOT EXISTS suggestions (
     id           INTEGER PRIMARY KEY AUTOINCREMENT,
     created_at   REAL NOT NULL,
@@ -209,6 +218,7 @@ CREATE TABLE IF NOT EXISTS suggestions (
 CREATE INDEX IF NOT EXISTS idx_devlog_at ON devlog (at);
 CREATE INDEX IF NOT EXISTS idx_pages_updated ON agent_pages (updated_at);
 CREATE INDEX IF NOT EXISTS idx_letters_queue ON letters (direction, status);
+CREATE INDEX IF NOT EXISTS idx_step_reports_kind ON step_reports (kind, id);
 CREATE INDEX IF NOT EXISTS idx_sugg_status ON suggestions (status);
 """
 
@@ -826,6 +836,38 @@ class AgentStore:
         if gone:
             self.audit(actor, "letter.delete", str(letter_id))
         return gone
+
+    # -- step reports: the continuous "what am I doing" stream --------------
+    # Round 27, items 4+5: one precise, timestamped stream for the brain
+    # (kind='brain'), the scheduler (kind='scheduler') and the coworker agent
+    # (kind='agent'). Text is permanent like every other report; the operator
+    # reads it in the panel and the agent through GET /agent/reports.
+    def add_step_report(self, kind: str, phase: str, message: str,
+                        ok: bool = True) -> Dict[str, Any]:
+        kind = str(kind or "brain")[:20]
+        phase = str(phase or "")[:60]
+        text = str(message or "")[:4000]
+        now = round(self._clock(), 3)
+        with self._lock:
+            cursor = self._db.execute(
+                "INSERT INTO step_reports (at, kind, phase, message, ok)"
+                " VALUES (?, ?, ?, ?, ?)",
+                (now, kind, phase, text, 1 if ok else 0))
+            self._db.commit()
+            row_id = int(cursor.lastrowid)
+        return {"id": row_id, "at": now, "kind": kind, "phase": phase,
+                "message": text, "ok": 1 if ok else 0}
+
+    def list_step_reports(self, kind: Optional[str] = None,
+                          limit: int = 100) -> List[Dict[str, Any]]:
+        """Newest first."""
+        limit = max(1, min(int(limit), 500))
+        if kind:
+            return self._query(
+                "SELECT * FROM step_reports WHERE kind = ?"
+                " ORDER BY id DESC LIMIT ?", (str(kind)[:20], limit))
+        return self._query(
+            "SELECT * FROM step_reports ORDER BY id DESC LIMIT ?", (limit,))
 
     def list_devlog(self, limit: int = 50) -> List[Dict[str, Any]]:
         limit = max(1, min(int(limit), 500))

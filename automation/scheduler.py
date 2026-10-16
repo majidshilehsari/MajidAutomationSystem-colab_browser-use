@@ -206,6 +206,23 @@ class Scheduler:
             except Exception:  # noqa: BLE001 - logging must never break the loop
                 pass
 
+    @staticmethod
+    def _when(moment: Optional[float]) -> str:
+        if not moment:
+            return "هیچ (یک‌بار اجرا شد و از صف خارج شد)"
+        return datetime.fromtimestamp(float(moment)).strftime("%Y-%m-%d %H:%M:%S")
+
+    def _report(self, phase: str, message: str, ok: bool = True) -> None:
+        """Round 27, item 4: every queue movement is reported with its exact
+        timestamp, so the operator - and the coworker agent through
+        GET /agent/reports?kind=scheduler - can verify the queue rule: only
+        the NEXT due occurrence of a scheduled job ever sits in the queue,
+        and after a run only the next due one returns."""
+        try:
+            self.store.add_step_report("scheduler", phase, message, ok=ok)
+        except Exception:  # noqa: BLE001 - reporting must never break the loop
+            pass
+
     def _loop(self) -> None:
         while not self._stop.is_set():
             try:
@@ -231,6 +248,9 @@ class Scheduler:
                           % (job.get("name"), exc))
                 continue
             self.store.set_job_next_run(job["id"], moment)
+            self._report("صف", "وظیفهٔ «%s»: موعد بعدی محاسبه و در صف گذاشته "
+                         "شد: %s — در صف فقط همین یک موعد است."
+                         % (job.get("name") or job["id"], self._when(moment)))
             fixed.append(job["id"])
         return fixed
 
@@ -266,23 +286,33 @@ class Scheduler:
         job_id = job["id"]
         name = job.get("name") or job_id
         if self.store.kill_switch_engaged():
+            moment = self._reschedule(job, now)
             self.store.record_job_run(job_id, "skipped", "kill switch is on",
-                                      self._reschedule(job, now))
+                                      moment)
             self._log("warn", "job %s skipped: the kill switch is on" % name)
+            self._report("صف", "وظیفهٔ «%s» اجرا نشد (کلید قطع روشن است)؛ "
+                         "موعد بعدی در صف: %s." % (name, self._when(moment)),
+                         ok=False)
             return {"id": job_id, "status": "skipped", "reason": "kill switch"}
         self.running_job = job_id
+        self._report("اجرا", "وظیفهٔ «%s» به موعدش رسید و شروع شد." % name)
         started = self._clock()
         try:
             outcome = self.runner(job) or {}
         except SchedulerBusy as exc:
-            self.store.record_job_run(job_id, "deferred", str(exc),
-                                      now + RETRY_AFTER_BUSY)
+            moment = now + RETRY_AFTER_BUSY
+            self.store.record_job_run(job_id, "deferred", str(exc), moment)
             self._log("info", "job %s deferred: %s" % (name, exc))
+            self._report("صف", "وظیفهٔ «%s» موکول شد (میز مشغول: %s)؛ همان یک "
+                         "موعد در صف می‌ماند، تلاش بعدی: %s."
+                         % (name, exc, self._when(moment)))
             return {"id": job_id, "status": "deferred", "reason": str(exc)}
         except Exception as exc:  # noqa: BLE001 - one bad job must not stop the rest
-            self.store.record_job_run(job_id, "failed", str(exc),
-                                      self._reschedule(job, now))
+            moment = self._reschedule(job, now)
+            self.store.record_job_run(job_id, "failed", str(exc), moment)
             self._log("warn", "job %s failed: %s" % (name, exc))
+            self._report("نتیجه", "وظیفهٔ «%s» شکست خورد: %s — موعد بعدی در "
+                         "صف: %s." % (name, exc, self._when(moment)), ok=False)
             return {"id": job_id, "status": "failed", "error": str(exc),
                     "elapsed": round(self._clock() - started, 2)}
         finally:
@@ -293,9 +323,15 @@ class Scheduler:
             # A one-shot job is done; leaving it enabled would fire it forever.
             self.store.record_job_run(job_id, status, error, None)
             self.store.upsert_job({"enabled": False}, job_id=job_id, actor="scheduler")
+            self._report("نتیجه", "وظیفهٔ یک‌بارِ «%s» تمام شد (%s) و از صف "
+                         "خارج شد." % (name, status), ok=status == "done")
         else:
-            self.store.record_job_run(job_id, status, error,
-                                      self._reschedule(job, now))
+            moment = self._reschedule(job, now)
+            self.store.record_job_run(job_id, status, error, moment)
+            self._report("نتیجه", "وظیفهٔ «%s» تمام شد (%s)؛ چون تکراری است "
+                         "فقط موعد بعدی در صف برگشت: %s."
+                         % (name, status, self._when(moment)),
+                         ok=status == "done")
         self._log("info", "job %s finished: %s" % (name, status))
         return {"id": job_id, "status": status, "error": error,
                 "elapsed": round(self._clock() - started, 2)}

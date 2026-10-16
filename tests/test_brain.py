@@ -572,3 +572,99 @@ class MessageAndDocRoutesTest(BrainCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class StepReportTest(BrainCase):
+    """Round 27, item 4: the brain continuously reports its steps and the
+    coworker agent can read the stream back later (GET /agent/reports)."""
+
+    def reports(self):
+        return self.hub.store.list_step_reports("brain")
+
+    def phases(self):
+        return [row["phase"] for row in self.reports()]
+
+    def joined(self):
+        return " ".join(row["message"] for row in self.reports())
+
+    def test_a_disabled_brain_reports_nothing(self):
+        self.brain.tick()
+        self.assertEqual(self.reports(), [])
+
+    def test_the_observation_heartbeat_is_reported_but_throttled(self):
+        self.enable()
+        self.brain.tick()
+        observed = [row for row in self.reports() if row["phase"] == "مشاهده"]
+        self.assertEqual(len(observed), 1)
+        self.assertIn("چرخهٔ مشاهده", observed[0]["message"])
+        self.assertIn("میز آزاد است", observed[0]["message"])
+        # a tick every 5s must NOT flood the stream: the gap throttles it
+        for _ in range(10):
+            self.now[0] += 5
+            self.brain.tick()
+        observed = [row for row in self.reports() if row["phase"] == "مشاهده"]
+        self.assertEqual(len(observed), 1)
+        # past brain.reportGapSec a new observation line appears
+        self.now[0] += DEFAULTS["brain.reportGapSec"] + 1
+        self.brain.tick()
+        observed = [row for row in self.reports() if row["phase"] == "مشاهده"]
+        self.assertEqual(len(observed), 2)
+        for row in self.reports():
+            self.assertTrue(row["at"] > 0, "every step carries a timestamp")
+
+    def test_executions_and_suggestions_and_answers_are_reported(self):
+        self.enable()
+        self.only_observe_left()
+        self.brain.tick()                       # the auto operation runs
+        self.assertIn("اجرا", self.phases())
+        self.assertIn("چرخهٔ مشاهده", self.joined())
+        # an ask-first desk becomes a reported suggestion
+        self.set_permission("op-builtin-observe", "ask")
+        self.now[0] += 601
+        self.brain.tick()
+        self.assertIn("پیشنهاد", self.phases())
+        # the operator's conversation with the brain is reported too
+        self.brain.respond("وضعیت")
+        self.assertIn("گفت‌وگو", self.phases())
+        self.assertIn("پاسخ دادم", self.joined())
+
+    def test_a_failed_run_is_reported_as_not_ok(self):
+        self.enable()
+        self.only_observe_left()
+
+        def boom(operation_id, actor=""):
+            raise RuntimeError("desk on fire")
+
+        self.hub.operation_run = boom
+        self.brain.tick()
+        bad = [row for row in self.reports() if not row["ok"]]
+        self.assertTrue(bad, "a failed execution must be reported with ok=0")
+        self.assertIn("ناموفق", bad[0]["message"])
+
+    def test_the_status_and_reports_route_carry_the_stream(self):
+        self.enable()
+        self.brain.tick()
+        steps = self.brain.status()["steps"]
+        self.assertTrue(steps)
+        self.assertEqual(steps[0]["kind"], "brain")
+        api = AutomationApi(None, FlowStore(self.tmp), None, data_dir=self.tmp,
+                            token=TOKEN, agent=self.hub)
+        status, _, data = api.handle(
+            "GET", "/agent/reports", query={"kind": ["brain"]},
+            headers={"x-automation-token": TOKEN})
+        self.assertEqual(status, 200)
+        payload = json.loads(data.decode("utf-8"))
+        self.assertTrue(payload["reports"])
+        self.assertEqual({row["kind"] for row in payload["reports"]}, {"brain"})
+        # an unknown kind is refused, and the route needs the key
+        self.assertEqual(api.handle(
+            "GET", "/agent/reports", query={"kind": ["nope"]},
+            headers={"x-automation-token": TOKEN})[0], 400)
+        self.assertEqual(api.handle("GET", "/agent/reports", query={},
+                                    headers={})[0], 401)
+        # the agent can also filter the other two kinds
+        for kind in ("scheduler", "agent"):
+            status, _, data = api.handle(
+                "GET", "/agent/reports", query={"kind": [kind]},
+                headers={"x-automation-token": TOKEN})
+            self.assertEqual(status, 200)

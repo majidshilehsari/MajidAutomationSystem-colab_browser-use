@@ -322,6 +322,12 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
         askOps: [{ id: 'op-1', name: 'my operation', permission: 'ask' }],
         log: [{ id: 1, at: 1760000000, actor: 'brain', title: 'brain said hi',
                 body: '' }],
+        steps: [
+          { id: 2, at: 1760000300, kind: 'brain', phase: '\u0645\u0634\u0627\u0647\u062f\u0647',
+            message: '\u0686\u0631\u062e\u0647\u0654 \u0645\u0634\u0627\u0647\u062f\u0647: \u0645\u06cc\u0632 \u0622\u0632\u0627\u062f \u0627\u0633\u062a.', ok: 1 },
+          { id: 1, at: 1760000000, kind: 'brain', phase: '\u0627\u062c\u0631\u0627',
+            message: '\u0639\u0645\u0644\u06cc\u0627\u062a \u0686\u0631\u062e\u0647\u0654 \u0645\u0634\u0627\u0647\u062f\u0647 \u0627\u062c\u0631\u0627 \u0634\u062f.', ok: 0 },
+        ],
         messages: [
           { id: 1, at: 1760000000, direction: 'in', text: 'سلام مغز',
             actor: 'operator' },
@@ -356,6 +362,14 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
     if (clean.endsWith('/agent/cursor')) {
       return json({ cursor: { enabled: true, size: 44, color: '#ffd400',
                               outline: '#1b1b1b', ripple: true, applied: true } });
+    }
+    if (clean.startsWith('/automation/api/agent/reports')
+        || clean.endsWith('/agent/reports')) {
+      return json({ reports: [
+        { id: 9, at: 1760000900, kind: 'brain',
+          phase: '\u0645\u0634\u0627\u0647\u062f\u0647',
+          message: '\u0686\u0631\u062e\u0647\u0654 \u0645\u0634\u0627\u0647\u062f\u0647: \u0645\u06cc\u0632 \u0622\u0632\u0627\u062f \u0627\u0633\u062a.', ok: 1 },
+      ] });
     }
     if (clean.endsWith('/agent/letters')) {
       return json({
@@ -1463,6 +1477,35 @@ test('round 27: the letters sub-tab keeps the two-way mail with the agent', asyn
     pane.querySelector('.mas-letter .mas-danger')
       .dispatchEvent(new page.window.Event('click'));
     await page.until(() => page.requests.some((u) => u.includes('/agent/letters/')), 2000);
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 27: the brain tab shows the continuous step report', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'brain');
+    const pane = page.doc.getElementById('mas-tab-brain');
+    assert.ok(await page.until(() => pane.querySelector('#mas-brain-steps')),
+      'the steps card never rendered: ' + pane.textContent);
+    assert.ok(pane.textContent.includes('\u06af\u0632\u0627\u0631\u0634 \u0642\u062f\u0645\u200c\u0647\u0627\u06cc \u0645\u063a\u0632'),
+      'the step-report title is missing');
+    const lines = pane.querySelectorAll('#mas-brain-steps .mas-log-line');
+    assert.equal(lines.length, 2, 'both step reports must be listed');
+    assert.ok(lines[1].classList.contains('mas-log-error'),
+      'a not-ok step must be marked as an error line');
+    assert.match(lines[0].textContent, /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/,
+      'each step must carry its exact timestamp');
+    // the full-report button reads the same route the agent uses
+    page.doc.getElementById('mas-brain-steps-all')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.requests.some((u) => u.includes('/agent/reports')),
+      2000);
+    assert.ok(pane.textContent.includes('\u0645\u06cc\u0632 \u0622\u0632\u0627\u062f \u0627\u0633\u062a'),
+      'the full report never replaced the card');
     assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();

@@ -103,6 +103,7 @@ PLAIN_SETTINGS = {
     "brain.opCooldownMin": int,
     "brain.suggestTtlMin": int,
     "brain.askCooldownMin": int,
+    "brain.reportGapSec": int,
     "log.forceStepShots": bool,
     "log.shotKeepDays": int,
     "log.errShotKeepDays": int,
@@ -272,6 +273,11 @@ API_INDEX = [
      " conversation."),
     ("DELETE", "/agent/letters/<id>", "✉️ حذف یک نامه از صندوق.",
      "Delete one letter from the box."),
+    ("GET", "/agent/reports", "📜 گزارش قدم‌ها: کارهایی که مغز، زمان‌بند و ایجنت"
+                              " انجام داده‌اند با زمانِ دقیق — برای فهمیدنِ اینکه"
+                              " در غیاب تو چه گذشته (kind=brain|scheduler|agent).",
+     "Step reports: what the brain, the scheduler and the coworker agent did,"
+     " precisely timestamped (kind=brain|scheduler|agent)."),
     ("POST", "/agent/key/reveal", "🔑 نمایش خودِ کلید — این کار در audit ثبت می‌شود.",
      "Reveal the key itself; this is written to the audit log."),
     ("POST", "/agent/key/rotate", "🔑 ساخت کلید تازه؛ کلید قبلی همان لحظه از کار "
@@ -1803,6 +1809,16 @@ class AgentHub:
         return self.store.list_audit(limit=limit)
 
     # -- letters between the operator and the coworker agent --------------
+    def reports_list(self, kind: str = "", limit: int = 100) -> Dict[str, Any]:
+        """Round 27, items 4+5: the continuous step reports of the brain, the
+        scheduler and (item 5) the coworker agent itself - newest first, with
+        exact timestamps, readable by the operator in the panel and by the
+        agent through its key."""
+        allowed = ("", "brain", "scheduler", "agent")
+        if kind not in allowed:
+            raise AgentError("kind must be one of: brain, scheduler, agent")
+        return {"reports": self.store.list_step_reports(kind or None, limit)}
+
     def letters_list(self, limit: int = 200,
                      direction: str = "") -> Dict[str, Any]:
         return {"letters": self.store.list_letters(limit, direction or None),
