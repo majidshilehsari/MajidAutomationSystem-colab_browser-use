@@ -106,9 +106,15 @@ class BuiltinAndSchemaTest(BrainCase):
         ops = self.hub.operation_list()   # the panel path, seeds built-ins
         ops = {op["id"]: op for op in ops}
         self.assertIn("op-builtin-observe", ops)
-        self.assertEqual(ops["op-builtin-observe"]["permission"], "auto")
+        # round 26: the brain's three thinking tools (observe, consult pi,
+        # choose the next operation) run on auto; everything else still asks.
+        thinking = ("op-builtin-observe", "op-builtin-pi-consult",
+                    "op-builtin-pi-next")
+        for op_id in thinking:
+            self.assertEqual(ops[op_id]["permission"], "auto",
+                             "%s is part of the brain's thinking" % op_id)
         for op_id, op in ops.items():
-            if op_id != "op-builtin-observe":
+            if op_id not in thinking:
                 self.assertEqual(op["permission"], "ask",
                                  "%s must default to ask-first" % op_id)
         # The fixed thinking is one screenshot plus one text capture -
@@ -400,8 +406,9 @@ class ApiAndThreadTest(BrainCase):
                     "autoOps", "askOps", "log"):
             self.assertIn(key, payload)
         self.assertEqual(payload["enabled"], False)
-        self.assertEqual([op["id"] for op in payload["autoOps"]],
-                         ["op-builtin-observe"])
+        self.assertEqual(sorted(op["id"] for op in payload["autoOps"]),
+                         ["op-builtin-observe", "op-builtin-pi-consult",
+                          "op-builtin-pi-next"])
         self.assertEqual(self.call(api, "GET", "/agent/brain", headers={})[0],
                          401)
         self.assertEqual(self.call(api, "POST", "/agent/brain/toggle", {})[0],

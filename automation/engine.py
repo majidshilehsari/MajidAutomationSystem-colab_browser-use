@@ -1590,6 +1590,49 @@ class AutomationEngine:
                                "settings.allowShellSteps to enable them")
             return self.backend.shell(str(command))
 
+        def operations_list() -> Tuple[int, List[str], str]:
+            """operations_list(): نام همهٔ عملیات‌های کتابخانه، برای انتخاب مغز."""
+            library = getattr(self._agent, "library", None) \
+                if self._agent is not None else None
+            if library is None:
+                return 1, [], "no agent library"
+            try:
+                names = [str(row.get("name") or "") for row in library.list()]
+            except Exception as exc:
+                return 1, [], str(exc)
+            return 0, names, ""
+
+        def brain_note(text: Any) -> Tuple[int, str, str]:
+            """brain_note('...'): یک خط در آرشیو «تعامل با مغز» می‌نویسد
+            (جایی که پاسخ مشورت‌ها برای استفادهٔ بعدی ثبت می‌شود)."""
+            brain = getattr(self._agent, "brain", None) \
+                if self._agent is not None else None
+            if brain is None:
+                return 1, "", "the brain is not attached to this engine"
+            try:
+                brain._speak(str(text))
+            except Exception as exc:
+                return 1, "", str(exc)
+            return 0, "", ""
+
+        def brain_suggest(answer: Any, why: str = "") -> Tuple[int, str, str]:
+            """brain_suggest(پاسخ مشاوره): نام عملیات را در متن پیدا می‌کند و
+            آن را در «پیشنهاد جاری» مغز می‌گذارد."""
+            brain = getattr(self._agent, "brain", None) \
+                if self._agent is not None else None
+            if brain is None:
+                return 1, "", "the brain is not attached to this engine"
+            try:
+                match = brain._match_operation(str(answer))
+                if match is None:
+                    brain._speak("عملیات بعدی در کتابخانه پیدا نشد؛ پاسخ مشاوره: %s"
+                                 % str(answer)[:200])
+                    return 0, "", "no operation matched the consultation answer"
+                brain._suggest(match, self._clock())
+            except Exception as exc:
+                return 1, "", str(exc)
+            return 0, str(match.get("name") or ""), ""
+
         def run_operation(operation: str) -> Tuple[int, str, str]:
             return self._run_operation_step({"operation": str(operation)},
                                             None)
@@ -1631,6 +1674,9 @@ class AutomationEngine:
             "page_text": lambda limit=20000: self.page_text(int(limit)),
             "shell": shell,
             "ask_agent": ask_agent,
+            "operations_list": operations_list,
+            "brain_note": brain_note,
+            "brain_suggest": brain_suggest,
             "run_operation": run_operation,
             "check": check,
             "wait_for_text": wait_for_text,
@@ -1718,6 +1764,12 @@ class AutomationEngine:
                     break
         if operation is None:
             return 1, "", "no operation with id or name %r" % wanted
+        if str(operation.get("scope") or "general") == "brain":
+            # round 26: brain-only tools never run inside an ordinary flow;
+            # the brain itself starts them directly, not through run_operation
+            return 1, "", ("عملیات «%s» اختصاصی مغز است (دامنه: مغز) و داخل "
+                           "جریان‌های معمولی اجرا نمی‌شود"
+                           % operation.get("name"))
         try:
             flow = convert_flow(library.as_flow(operation))
         except Exception as exc:

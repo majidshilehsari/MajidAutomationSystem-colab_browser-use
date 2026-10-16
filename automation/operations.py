@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Dict, List, Optional, Tuple
 
+from . import convert
 from . import schema
 from .agent_store import AgentStore
 
@@ -26,91 +27,153 @@ BUILTINS: List[Dict[str, Any]] = [
     {
         "id": "op-builtin-lmarena",
         "builtin": "lmarena",
-        "name": "اتصال به ایجنت lmarena",
-        "description": "سایت lmarena.ai را در مرورگر اتوماسیون باز می‌کند، کمی صبر "
-                       "می‌کند تا صفحه بالا بیاید و متن صفحه را برای گزارش اجرا "
-                       "می‌گیرد. اگر دیوار لاگین دیدید، مرحلهٔ pause را دستی اضافه کنید.",
+        "name": "باز کردن lmarena",
+        "description": "سایت lmarena.ai را در مرورگر اتوماسیون باز می‌کند، کمی "
+                       "صبر می‌کند تا صفحه بالا بیاید و متن صفحه را برای گزارش "
+                       "اجرا می‌گیرد. اگر دیوار لاگین دیدید، یک مرحلهٔ پایتون "
+                       "برای مکث دستی اضافه کنید.",
         "tags": ["وب", "چت"],
         "steps": [
-            {"id": "lm-1", "type": "goto_url", "url": "https://lmarena.ai/",
+            {"id": "lm-1", "type": "python",
+             "code": "check(goto('https://lmarena.ai/'))",
              "label": "باز کردن lmarena.ai"},
-            {"id": "lm-2", "type": "wait", "ms": 3500, "label": "صبر برای بارگذاری"},
-            {"id": "lm-3", "type": "capture_text", "label": "خواندن متن صفحه"},
+            {"id": "lm-2", "type": "python", "code": "wait(3.5)",
+             "label": "صبر برای بارگذاری"},
+            {"id": "lm-3", "type": "python",
+             "code": "log(check(capture_text()))",
+             "label": "خواندن متن صفحه"},
         ],
     },
     {
         "id": "op-builtin-captcha",
         "builtin": "captcha",
-        "name": "شناسایی یا حل کپچا",
-        "description": "از صفحهٔ فعال اسکرین‌شات می‌گیرد و زنجیرهٔ حل کپچا را اجرا "
-                       "می‌کند: اول بینایی (مدل)، بعد انسان (تلگرام)، بعد افزونه. "
-                       "خروجی یک *پیشنهاد* است و بدون تأیید شما کلیک نمی‌شود، مگر "
-                       "اینکه captcha.autoClick روشن باشد.",
+        "name": "حل کپچا",
+        "description": "از صفحهٔ فعال اسکرین‌شات می‌گیرد و زنجیرهٔ حل کپچا را "
+                       "اجرا می‌کند: اول بینایی (مدل)، بعد انسان (تلگرام)، بعد "
+                       "افزونه. خروجی یک *پیشنهاد* است و بدون تأیید شما کلیک "
+                       "نمی‌شود، مگر اینکه captcha.autoClick روشن باشد.",
         "tags": ["کپچا", "امنیت"],
         "steps": [
-            {"id": "cp-1", "type": "captcha_solve",
+            {"id": "cp-1", "type": "python",
+             "code": "check(solve_captcha(label='کپچای صفحهٔ فعال'))",
              "label": "بررسی و حل کپچای صفحهٔ فعال"},
         ],
     },
     {
         "id": "op-builtin-deepseek-open",
         "builtin": "deepseek-open",
-        "name": "اتصال به دیپ‌سیک",
-        "description": "مرورگر اختصاصی ایجنت (نمایش :2، پورت 9223) را روی صفحهٔ چت "
-                       "دیپ‌سیک می‌برد. اولین بار باید دستی لاگین کنید؛ نشست در "
-                       "/data/ai-profile می‌ماند.",
+        "name": "باز کردن دیپ‌سیک",
+        "description": "مرورگر اختصاصی ایجنت (نمایش :2، پورت 9223) را روی صفحهٔ "
+                       "چت دیپ‌سیک می‌برد. اولین بار باید دستی لاگین کنید؛ نشست "
+                       "در /data/ai-profile می‌ماند.",
         "tags": ["ایجنت", "چت"],
         "steps": [
-            {"id": "ds-1", "type": "agent_open", "provider": "deepseek",
+            {"id": "ds-1", "type": "python",
+             "code": "check(open_agent(provider='deepseek'))",
              "label": "باز کردن چت دیپ‌سیک در مرورگر ایجنت"},
         ],
     },
     {
         "id": "op-builtin-deepseek-ask",
         "builtin": "deepseek-ask",
-        "name": "پرامپت دادن به دیپ‌سیک و دریافت پیامش",
-        "description": "چت دیپ‌سیک را باز می‌کند، پرامپت را تایپ می‌کند، تا پایان "
+        "name": "پرسش از دیپ‌سیک",
+        "description": "چت دیپ‌سیک را باز می‌کند، پرسش را تایپ می‌کند، تا پایان "
                        "پاسخ صبر می‌کند (تشخیص پایان: متن دو بار پشت سر هم عوض "
-                       "نشود) و متن پاسخ را در گزارش اجرا و در یادداشت‌ها می‌گذارد.",
+                       "نشود) و متن پاسخ را در گزارش اجرا و در یادداشت‌ها "
+                       "می‌گذارد.",
         "tags": ["ایجنت", "چت"],
         "steps": [
-            {"id": "da-1", "type": "agent_open", "provider": "deepseek",
+            {"id": "da-1", "type": "python",
+             "code": "check(open_agent(provider='deepseek'))",
              "label": "باز کردن چت دیپ‌سیک"},
-            {"id": "da-2", "type": "agent_ask", "provider": "deepseek",
-             "prompt": "سلام. وضعیت فعلی صفحهٔ من را در یک پاراگراف خلاصه کن.",
-             "saveAs": True, "label": "پرسیدن و گرفتن پاسخ"},
+            {"id": "da-2", "type": "python",
+             "code": "answer = check(ask_agent('سلام. وضعیت فعلی صفحهٔ من را در یک پاراگراف خلاصه کن.', provider='deepseek', save_as=True))\nlog(answer)",
+             "label": "پرسیدن و گرفتن پاسخ"},
         ],
     },
     {
         "id": "op-builtin-snapshot",
         "builtin": "snapshot",
-        "name": "عکس و متن صفحهٔ فعال",
+        "name": "دیدن صفحهٔ فعال",
         "description": "یک اسکرین‌شات از دسکتاپ می‌گیرد و متن دیده‌شدهٔ صفحه را "
                        "استخراج می‌کند؛ پایهٔ بیشتر عملیات‌های دیگر.",
         "tags": ["تشخیص"],
         "steps": [
-            {"id": "sn-1", "type": "screenshot", "name": "manual",
+            {"id": "sn-1", "type": "python",
+             "code": "check(screenshot('manual'))",
              "label": "اسکرین‌شات از دسکتاپ"},
-            {"id": "sn-2", "type": "capture_text", "label": "متن صفحه"},
+            {"id": "sn-2", "type": "python",
+             "code": "log(check(capture_text()))",
+             "label": "متن صفحه"},
         ],
     },
     {
         # The brain's fixed thinking: one screenshot of whatever is on screen
         # right now, one capture of all visible text, and both archived into
-        # the log. Safe at any moment, so it is always allowed.
+        # the log. Safe at any moment, so it is always allowed. Round 26: it
+        # belongs to the brain alone (scope: brain).
         "id": "op-builtin-observe",
         "builtin": "observe",
         "name": "چرخهٔ مشاهده",
         "description": "یک اسکرین‌شات از صفحهٔ فعلی + ضبط کامل متنِ دیده‌شدنی؛ "
-                       "هر دو به آرشیو گزارش‌ها می‌روند. این نگاهِ ثابتِ مغز است و "
-                       "در هر لحظه بی‌خطر است، پس همیشه مجاز است.",
+                       "هر دو به آرشیو گزارش‌ها می‌روند. این نگاهِ ثابتِ مغز است "
+                       "و در هر لحظه بی‌خطر است، پس همیشه مجاز است. اختصاصی مغز.",
         "tags": ["مغز", "مشاهده", "گزارش"],
         "permission": "auto",
+        "scope": "brain",
         "steps": [
-            {"id": "ob-1", "type": "screenshot", "name": "observe",
+            {"id": "ob-1", "type": "python",
+             "code": "check(screenshot('observe'))",
              "label": "اسکرین‌شاتِ چرخهٔ مشاهده"},
-            {"id": "ob-2", "type": "capture_text", "limit": 20000,
+            {"id": "ob-2", "type": "python",
+             "code": "log(check(capture_text(limit=20000)))",
              "label": "متن کاملِ صفحهٔ فعلی"},
+        ],
+    },
+    {
+        # Round 26, brain tool #2: ask pi.ai for advice about whatever is on
+        # screen and file the answer into the brain conversation so it can be
+        # used later (تعامل با مغز).
+        "id": "op-builtin-pi-consult",
+        "builtin": "pi-consult",
+        "name": "مشورت با پی‌آی",
+        "description": "پی‌آی (pi.ai) را در مرورگر ایجنت باز می‌کند، متن صفحهٔ "
+                       "فعال را برایش می‌فرستد و پاسخ مشاوره را هم در گزارش "
+                       "اجرا و هم در «تعامل با مغز» ثبت می‌کند تا بعداً قابل "
+                       "استفاده باشد. اختصاصی مغز.",
+        "tags": ["مغز", "مشورت", "پی‌آی"],
+        "permission": "auto",
+        "scope": "brain",
+        "steps": [
+            {"id": "pc-1", "type": "python",
+             "code": "check(open_agent(provider='pi'))",
+             "label": "باز کردن پی‌آی در مرورگر ایجنت"},
+            {"id": "pc-2", "type": "python",
+             "code": "context = check(capture_text(4000))\nanswer = check(ask_agent('تو مشاور یک سیستم اتوماسیون فارسی‌زبان هستی. متن صفحهٔ فعال را می‌فرستم؛ در حداکثر سه جمله بگو اقدام بعدی چه باشد و چرا.\\nمتن صفحه:\\n' + context, provider='pi'))\nlog(answer)\ncheck(brain_note('مشورت با پی‌آی: ' + str(answer)[:1500]))",
+             "label": "پرسیدن و نوشتن پاسخ در تعامل با مغز"},
+        ],
+    },
+    {
+        # Round 26, brain tool #3: send pi.ai a fixed prompt (the operation
+        # list plus the visible page) and put the chosen operation into the
+        # running suggestion (پیشنهاد جاری).
+        "id": "op-builtin-pi-next",
+        "builtin": "pi-next",
+        "name": "انتخاب عملیات بعدی",
+        "description": "فهرست عملیات‌ها و متن صفحهٔ فعال را با یک پرامپت ثابت "
+                       "برای پی‌آی می‌فرستد؛ نام عملیاتی را که پی‌آی انتخاب "
+                       "کرده در کتابخانه پیدا می‌کند و در «پیشنهاد جاری» مغز "
+                       "می‌گذارد. اختصاصی مغز.",
+        "tags": ["مغز", "مشورت", "پی‌آی", "پیشنهاد"],
+        "permission": "auto",
+        "scope": "brain",
+        "steps": [
+            {"id": "pn-1", "type": "python",
+             "code": "check(open_agent(provider='pi'))",
+             "label": "باز کردن پی‌آی در مرورگر ایجنت"},
+            {"id": "pn-2", "type": "python",
+             "code": "names = '، '.join(check(operations_list()))\ncontext = check(capture_text(2500))\nanswer = check(ask_agent('عملیات‌های موجود: ' + names + '\\nمتن صفحهٔ فعال: ' + context + '\\nفقط نام یکی از عملیات‌ها را به عنوان اقدام بعدی انتخاب کن و در یک جمله بگو چرا.', provider='pi'))\nlog(answer)\ncheck(brain_suggest(answer, 'مشورت با پی‌آی'))",
+             "label": "مشورت برای انتخاب و گذاشتن در پیشنهاد جاری"},
         ],
     },
 ]
@@ -148,9 +211,36 @@ class OperationLibrary:
                 {"name": definition["name"], "description": definition["description"],
                  "kind": "steps", "builtin": definition["builtin"],
                  "tags": definition["tags"], "steps": steps,
-                 "permission": definition.get("permission") or "ask"},
+                 "permission": definition.get("permission") or "ask",
+                 "scope": definition.get("scope") or "general"},
                 operation_id=definition["id"], actor=actor)
             created += 1
+        # Round-26 migration: factory operations that are still written in the
+        # old step language are re-seeded into the one language (uniform
+        # names, python steps, scope). Rows already spoken in python keep
+        # whatever edits the operator made; only a drifted scope is corrected.
+        rows = {row["id"]: row for row in self.store.list_operations()}
+        for definition in BUILTINS:
+            row = rows.get(definition["id"])
+            if row is None:
+                continue
+            scope = definition.get("scope") or "general"
+            stale = convert.needs_conversion({"steps": row.get("steps") or []})
+            if stale:
+                steps, errors = self.validate_steps(definition["steps"])
+                if errors:  # a shipped operation must never be invalid
+                    raise OperationError("builtin %s is invalid: %s"
+                                         % (definition["id"], "; ".join(errors)), 500)
+                self.store.update_operation(
+                    definition["id"],
+                    {"name": definition["name"],
+                     "description": definition["description"],
+                     "steps": steps, "tags": definition["tags"],
+                     "permission": definition.get("permission") or "ask",
+                     "scope": scope}, actor=actor)
+            elif str(row.get("scope") or "general") != scope:
+                self.store.update_operation(definition["id"], {"scope": scope},
+                                            actor=actor)
         return created
 
     def builtins(self) -> Dict[str, Dict[str, Any]]:
@@ -173,7 +263,8 @@ class OperationLibrary:
         updated = self.store.update_operation(
             operation_id,
             {"name": definition["name"], "description": definition["description"],
-             "steps": steps, "tags": definition["tags"]}, actor=actor)
+             "steps": steps, "tags": definition["tags"],
+             "scope": definition.get("scope") or "general"}, actor=actor)
         return updated or {}
 
     # -- CRUD -------------------------------------------------------------
@@ -212,12 +303,20 @@ class OperationLibrary:
         permission = str(data.get("permission") or "").strip()
         if permission and permission not in ("auto", "ask"):
             raise OperationError("permission must be 'auto' or 'ask'")
+        # Round-26 scope: 'general' operations serve the coworker agent and
+        # the brain alike; 'brain' operations are the brain's own tools and
+        # refuse to run inside an ordinary flow.
+        scope = str(data.get("scope") or "").strip()
+        if scope and scope not in ("general", "brain"):
+            raise OperationError("scope must be 'general' or 'brain'")
         payload = {"name": name,
                    "description": str(data.get("description") or ""),
                    "tags": [str(tag) for tag in (data.get("tags") or [])],
                    "steps": steps}
         if permission:
             payload["permission"] = permission
+        if scope:
+            payload["scope"] = scope
         if operation_id:
             updated = self.store.update_operation(operation_id, payload, actor=actor)
             if updated is None:

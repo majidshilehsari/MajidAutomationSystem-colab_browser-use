@@ -50,6 +50,18 @@ DEFAULT_PROVIDERS: Dict[str, Dict[str, Any]] = {
         "newChatButtons": ["a[href='/']", "button[aria-label*=new i]",
                            "[class*=new-chat]"],
     },
+    # Round 26: pi.ai is the brain's free consultant (مشورت با پی‌آی and
+    # انتخاب عملیات بعدی). No API key - the agent browser simply chats.
+    "pi": {
+        "url": "https://pi.ai/talk",
+        "inputs": ["textarea", "[contenteditable='true']",
+                   "div[contenteditable]"],
+        "submitWithEnter": True,
+        "sendButtons": ["button[type=submit]", "button[aria-label*=send i]",
+                        "div[role=button][aria-label*=send i]"],
+        "answers": ["[class*=markdown]", "[class*=message]"],
+        "newChatButtons": ["a[href='/talk']", "button[aria-label*=new i]"],
+    },
     "generic": {
         "url": "",
         "inputs": ["textarea", "[contenteditable='true']"],

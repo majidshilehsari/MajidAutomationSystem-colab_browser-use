@@ -776,6 +776,26 @@ class RunOperationStepTest(EngineTestBase):
         # the trace shows each substep by its Persian label
         self.assertIn("کلیک در (3، 4) → rc=0", status["results"][0]["text"])
 
+    def test_a_brain_only_operation_refuses_to_run_inside_a_flow(self):
+        # Round 26: scope='brain' operations are the brain's own tools; a
+        # flow written by the coworker agent must not be able to call them.
+        self.engine = AutomationEngine(
+            self.backend, self.tmp, sleep=self.clock.sleep,
+            clock=self.clock.time, agent=FakeOpsAgent({
+                "op-brain": {"id": "op-brain", "name": "چرخهٔ مشاهده",
+                             "scope": "brain",
+                             "steps": [{"id": "b1", "type": "python",
+                                        "code": "check(screenshot('observe'))"}]}}))
+        self.engines.append(self.engine)
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-brain"}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("اختصاصی مغز", status["error"])
+        # the refusal must not touch the desktop (an error screenshot is the
+        # only call the protocol itself is allowed to make)
+        self.assertEqual([call for call in self.backend.calls
+                          if call[0] != "screenshot"], [])
+
     def test_resolves_the_operation_by_its_persian_name(self):
         self.with_ops()
         status = self.run_to_completion(build_flow(

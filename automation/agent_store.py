@@ -111,6 +111,7 @@ CREATE TABLE IF NOT EXISTS operations (
     kind        TEXT NOT NULL DEFAULT 'steps',
     builtin     TEXT NOT NULL DEFAULT '',
     permission  TEXT NOT NULL DEFAULT 'ask',   -- brain: auto = run it, ask = propose
+    scope       TEXT NOT NULL DEFAULT 'general', -- round 26: general | brain
     tags        TEXT NOT NULL DEFAULT '[]',
     steps       TEXT NOT NULL DEFAULT '[]',
     created_at  REAL NOT NULL,
@@ -264,7 +265,9 @@ class AgentStore:
         is still missing.
         """
         additions = (("operations", "permission",
-                      "TEXT NOT NULL DEFAULT 'ask'"),)
+                      "TEXT NOT NULL DEFAULT 'ask'"),
+                     ("operations", "scope",
+                      "TEXT NOT NULL DEFAULT 'general'"))
         with self._lock:
             for table, column, spec in additions:
                 try:
@@ -877,14 +880,15 @@ class AgentStore:
             operation_id = "op-%s" % uuid.uuid4().hex[:10]
         self._execute(
             "INSERT INTO operations (id, name, description, kind, builtin, tags,"
-            " steps, created_at, updated_at, permission)"
-            " VALUES (?,?,?,?,?,?,?,?,?,?)",
+            " steps, created_at, updated_at, permission, scope)"
+            " VALUES (?,?,?,?,?,?,?,?,?,?,?)",
             (operation_id, str(data.get("name") or "عملیات"),
              str(data.get("description") or ""), str(data.get("kind") or "steps"),
              str(data.get("builtin") or ""),
              json.dumps(data.get("tags") or [], ensure_ascii=False),
              json.dumps(data.get("steps") or [], ensure_ascii=False), now, now,
-             str(data.get("permission") or "ask")[:10]))
+             str(data.get("permission") or "ask")[:10],
+             str(data.get("scope") or "general")[:10]))
         self.audit(actor, "operation.created", operation_id)
         return self.get_operation(operation_id) or {}
 
@@ -894,7 +898,7 @@ class AgentStore:
         if row is None:
             return None
         fields, args = [], []
-        for key in ("name", "description", "kind", "permission"):
+        for key in ("name", "description", "kind", "permission", "scope"):
             if key in data:
                 fields.append("%s = ?" % key)
                 args.append(str(data[key]))

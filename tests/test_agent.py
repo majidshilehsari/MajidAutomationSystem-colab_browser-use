@@ -1935,7 +1935,7 @@ class OperationsLibraryTest(HubCase):
         first = hub.operation_list()
         ids = [row["id"] for row in first]
         self.assertEqual(len(ids), len(set(ids)), "a built-in was seeded twice")
-        self.assertEqual(len(first), 6)
+        self.assertEqual(len(first), 8)
         names = " ".join(row["name"] for row in first)
         for needle in ("lmarena", "کپچا", "دیپ‌سیک", "مشاهده"):
             self.assertIn(needle, names)
@@ -1969,6 +1969,51 @@ class OperationsLibraryTest(HubCase):
         self.assertIn("chat.deepseek.com", DEFAULT_PROVIDERS["deepseek"]["url"],
                       "the profile is what carries the address")
 
+    def test_the_pi_consultations_are_brain_only_operations(self):
+        # Round 26: the brain's three own tools are scope='brain' and auto;
+        # the shared tools stay scope='general'.
+        hub, _, _ = self.build()
+        by_key = {row["builtinKey"]: row for row in hub.operation_list()}
+        self.assertEqual(by_key["observe"]["scope"], "brain")
+        self.assertEqual(by_key["pi-consult"]["scope"], "brain")
+        self.assertEqual(by_key["pi-next"]["scope"], "brain")
+        self.assertEqual(by_key["pi-consult"]["permission"], "auto")
+        self.assertEqual(by_key["pi-next"]["permission"], "auto")
+        self.assertEqual(by_key["deepseek-open"]["scope"], "general")
+        codes = " ".join(step.get("code", "")
+                         for step in by_key["pi-next"]["steps"])
+        self.assertIn("operations_list()", codes)
+        self.assertIn("brain_suggest(", codes)
+        consult = " ".join(step.get("code", "")
+                           for step in by_key["pi-consult"]["steps"])
+        self.assertIn("brain_note(", consult)
+        self.assertIn("provider='pi'", consult)
+
+    def test_an_old_builtin_row_is_migrated_to_the_one_language(self):
+        hub, _, _ = self.build()
+        # simulate a pre-round-26 installation: the factory row is still the
+        # old JSON with the old name
+        hub.store.update_operation(
+            "op-builtin-snapshot",
+            {"name": "عکس و متن صفحهٔ فعال",
+             "steps": [{"id": "sn-1", "type": "screenshot", "name": "manual"},
+                       {"id": "sn-2", "type": "capture_text"}]})
+        hub.library.ensure_builtins()
+        row = {r["id"]: r for r in hub.operation_list()}["op-builtin-snapshot"]
+        self.assertEqual(row["name"], "دیدن صفحهٔ فعال")
+        self.assertEqual([step["type"] for step in row["steps"]],
+                         ["python", "python"])
+        self.assertIn("screenshot('manual')", row["steps"][0]["code"])
+
+    def test_scope_is_validated_and_saved(self):
+        hub, _, _ = self.build()
+        with self.assertRaises(AgentError):
+            hub.operation_save({"name": "x", "scope": "secret",
+                                "steps": [{"type": "python", "code": "wait(1)"}]})
+        op = hub.operation_save({"name": "y", "scope": "brain",
+                                 "steps": [{"type": "python", "code": "wait(1)"}]})
+        self.assertEqual(op["scope"], "brain")
+
     def test_an_operation_can_be_created_edited_and_deleted(self):
         hub, _, _ = self.build()
         created = hub.operation_save({"name": "ورود به سایت",
@@ -1985,7 +2030,7 @@ class OperationsLibraryTest(HubCase):
                                     operation_id=created["id"])
         self.assertEqual(edited["id"], created["id"])
         self.assertEqual(len(edited["steps"]), 1)
-        self.assertEqual(len(hub.operation_list()), 7)
+        self.assertEqual(len(hub.operation_list()), 9)
 
         self.assertEqual(hub.operation_delete(created["id"])["deleted"], created["id"])
         with self.assertRaises(AgentError) as caught:
@@ -2001,7 +2046,7 @@ class OperationsLibraryTest(HubCase):
                 with self.assertRaises(AgentError) as caught:
                     hub.operation_save({"name": "bad", "steps": bad})
                 self.assertEqual(caught.exception.status, 400)
-        self.assertEqual(len(hub.operation_list()), 6, "a refused operation was stored")
+        self.assertEqual(len(hub.operation_list()), 8, "a refused operation was stored")
 
     def test_a_builtin_can_be_reset_after_an_edit(self):
         hub, _, _ = self.build()
