@@ -2027,6 +2027,38 @@ class OperationsLibraryTest(HubCase):
         self.assertIn("chat.deepseek.com", DEFAULT_PROVIDERS["deepseek"]["url"],
                       "the profile is what carries the address")
 
+    def test_an_untouched_round26_brain_tool_gains_the_hardened_steps(self):
+        # Round 27, item 7: a database seeded in round 26 carries the first
+        # factory version of the brain's tools. Those rows were never edited,
+        # so a restart hardens them (graceful screenshot, empty-answer and
+        # empty-library guards).
+        from automation.operations import _PREV_FACTORY_STEPS
+        hub, _, _ = self.build()
+        hub.library.store.update_operation(
+            "op-builtin-observe",
+            {"steps": _PREV_FACTORY_STEPS["op-builtin-observe"]}, actor="test")
+        hub.library.ensure_builtins(actor="restart")
+        row = hub.library.get("op-builtin-observe")
+        self.assertIn("rc, shot, err = screenshot('observe')",
+                      row["steps"][0]["code"])
+        self.assertIn("RuntimeError", row["steps"][1]["code"])
+
+    def test_an_edited_brain_tool_is_never_overwritten_by_the_hardening(self):
+        from automation.operations import _PREV_FACTORY_STEPS
+        hub, _, _ = self.build()
+        edited = [dict(step) for step
+                  in _PREV_FACTORY_STEPS["op-builtin-pi-consult"]]
+        edited.append({"id": "pc-x", "type": "python",
+                       "code": "log('یادداشت اپراتور')",
+                       "label": "قدم اپراتور"})
+        hub.library.store.update_operation(
+            "op-builtin-pi-consult", {"steps": edited}, actor="operator")
+        hub.library.ensure_builtins(actor="restart")
+        row = hub.library.get("op-builtin-pi-consult")
+        self.assertEqual([step["id"] for step in row["steps"]],
+                         ["pc-1", "pc-2", "pc-x"],
+                         "an operator edit must survive the hardening")
+
     def test_the_pi_consultations_are_brain_only_operations(self):
         # Round 26: the brain's three own tools are scope='brain' and auto;
         # the shared tools stay scope='general'.

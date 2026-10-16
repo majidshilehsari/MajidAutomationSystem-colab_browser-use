@@ -123,10 +123,10 @@ BUILTINS: List[Dict[str, Any]] = [
         "scope": "brain",
         "steps": [
             {"id": "ob-1", "type": "python",
-             "code": "check(screenshot('observe'))",
-             "label": "اسکرین‌شاتِ چرخهٔ مشاهده"},
+             "code": "rc, shot, err = screenshot('observe')\nif rc != 0:\n    log('اسکرین\u200cشاتِ چرخهٔ مشاهده ناموفق بود: ' + str(err or shot or 'بدون پیام'))",
+             "label": "اسکرین‌شاتِ چرخهٔ مشاهده (ناموفق بودنش چرخه را متوقف نمی‌کند)"},
             {"id": "ob-2", "type": "python",
-             "code": "log(check(capture_text(limit=20000)))",
+             "code": "text = check(capture_text(limit=20000))\nif not str(text).strip():\n    raise RuntimeError('متن صفحه خالی بود؛ مشاهدهٔ معتبری ممکن نشد')\nlog(text)",
              "label": "متن کاملِ صفحهٔ فعلی"},
         ],
     },
@@ -149,7 +149,7 @@ BUILTINS: List[Dict[str, Any]] = [
              "code": "check(open_agent(provider='pi'))",
              "label": "باز کردن پی‌آی در مرورگر ایجنت"},
             {"id": "pc-2", "type": "python",
-             "code": "context = check(capture_text(4000))\nanswer = check(ask_agent('تو مشاور یک سیستم اتوماسیون فارسی‌زبان هستی. متن صفحهٔ فعال را می‌فرستم؛ در حداکثر سه جمله بگو اقدام بعدی چه باشد و چرا.\\nمتن صفحه:\\n' + context, provider='pi'))\nlog(answer)\ncheck(brain_note('مشورت با پی‌آی: ' + str(answer)[:1500]))",
+             "code": "context = check(capture_text(4000))\nanswer = check(ask_agent('تو مشاور یک سیستم اتوماسیون فارسی\u200cزبان هستی. متن صفحهٔ فعال را می\u200cفرستم؛ در حداکثر سه جمله بگو اقدام بعدی چه باشد و چرا.\\nمتن صفحه:\\n' + context, provider='pi'))\nif not str(answer).strip():\n    raise RuntimeError('پی\u200cآی پاسخی برنگرداند؛ مشورت ناموفق بود')\nlog(answer)\ncheck(brain_note('مشورت با پی\u200cآی: ' + str(answer)[:1500]))",
              "label": "پرسیدن و نوشتن پاسخ در تعامل با مغز"},
         ],
     },
@@ -172,11 +172,67 @@ BUILTINS: List[Dict[str, Any]] = [
              "code": "check(open_agent(provider='pi'))",
              "label": "باز کردن پی‌آی در مرورگر ایجنت"},
             {"id": "pn-2", "type": "python",
-             "code": "names = '، '.join(check(operations_list()))\ncontext = check(capture_text(2500))\nanswer = check(ask_agent('عملیات‌های موجود: ' + names + '\\nمتن صفحهٔ فعال: ' + context + '\\nفقط نام یکی از عملیات‌ها را به عنوان اقدام بعدی انتخاب کن و در یک جمله بگو چرا.', provider='pi'))\nlog(answer)\ncheck(brain_suggest(answer, 'مشورت با پی‌آی'))",
+             "code": "names_list = check(operations_list())\nif not names_list:\n    raise RuntimeError('کتابخانهٔ عملیات خالی است؛ انتخابی ممکن نیست')\nnames = '، '.join(str(name) for name in names_list)\ncontext = check(capture_text(2500))\nanswer = check(ask_agent('عملیات\u200cهای موجود: ' + names + '\\nمتن صفحهٔ فعال: ' + context + '\\nفقط نام یکی از عملیات\u200cها را به عنوان اقدام بعدی انتخاب کن و در یک جمله بگو چرا.', provider='pi'))\nif not str(answer).strip():\n    raise RuntimeError('پی\u200cآی پاسخی برنگرداند؛ انتخابی ممکن نشد')\nlog(answer)\npicked = check(brain_suggest(answer, 'مشورت با پی\u200cآی'))\nif not str(picked).strip():\n    log('نامی که پی\u200cآی گفت در کتابخانه پیدا نشد؛ پاسخ در «تعامل با مغز» ثبت شد: ' + str(answer)[:200])",
              "label": "مشورت برای انتخاب و گذاشتن در پیشنهاد جاری"},
         ],
     },
 ]
+
+
+# Round 27, item 7: the round-26 factory version of the brain's three own
+# tools. A stored row that still carries exactly these steps was never
+# edited by the operator, so a restart hardens it; anything that differs
+# is an edit and is kept exactly as it is.
+_PREV_FACTORY_STEPS = {'op-builtin-observe': [{'id': 'ob-1',
+                         'type': 'python',
+                         'code': "check(screenshot('observe'))",
+                         'label': 'اسکرین\u200cشاتِ چرخهٔ مشاهده'},
+                        {'id': 'ob-2',
+                         'type': 'python',
+                         'code': 'log(check(capture_text(limit=20000)))',
+                         'label': 'متن کاملِ صفحهٔ فعلی'}],
+ 'op-builtin-pi-consult': [{'id': 'pc-1',
+                            'type': 'python',
+                            'code': "check(open_agent(provider='pi'))",
+                            'label': 'باز کردن پی\u200cآی در مرورگر ایجنت'},
+                           {'id': 'pc-2',
+                            'type': 'python',
+                            'code': 'context = check(capture_text(4000))\n'
+                                    "answer = check(ask_agent('تو مشاور یک سیستم اتوماسیون "
+                                    'فارسی\u200cزبان هستی. متن صفحهٔ فعال را می\u200cفرستم؛ در '
+                                    'حداکثر سه جمله بگو اقدام بعدی چه باشد و چرا.\\nمتن '
+                                    "صفحه:\\n' + context, provider='pi'))\n"
+                                    'log(answer)\n'
+                                    "check(brain_note('مشورت با پی\u200cآی: ' + "
+                                    'str(answer)[:1500]))',
+                            'label': 'پرسیدن و نوشتن پاسخ در تعامل با مغز'}],
+ 'op-builtin-pi-next': [{'id': 'pn-1',
+                         'type': 'python',
+                         'code': "check(open_agent(provider='pi'))",
+                         'label': 'باز کردن پی\u200cآی در مرورگر ایجنت'},
+                        {'id': 'pn-2',
+                         'type': 'python',
+                         'code': "names = '، '.join(check(operations_list()))\n"
+                                 'context = check(capture_text(2500))\n'
+                                 "answer = check(ask_agent('عملیات\u200cهای موجود: ' + names + "
+                                 "'\\nمتن صفحهٔ فعال: ' + context + '\\nفقط نام یکی از "
+                                 'عملیات\u200cها را به عنوان اقدام بعدی انتخاب کن و در یک جمله '
+                                 "بگو چرا.', provider='pi'))\n"
+                                 'log(answer)\n'
+                                 "check(brain_suggest(answer, 'مشورت با پی\u200cآی'))",
+                         'label': 'مشورت برای انتخاب و گذاشتن در پیشنهاد جاری'}]}
+
+
+def _steps_signature(steps: Any) -> list:
+    """Comparable (id, type, code, label) tuples of a stored step list."""
+    signature = []
+    for step in steps if isinstance(steps, list) else []:
+        if isinstance(step, dict):
+            signature.append((str(step.get("id") or ""),
+                              str(step.get("type") or ""),
+                              str(step.get("code") or ""),
+                              str(step.get("label") or "")))
+    return signature
 
 
 class OperationError(Exception):
@@ -240,6 +296,18 @@ class OperationLibrary:
                      "scope": scope}, actor=actor)
             elif str(row.get("scope") or "general") != scope:
                 self.store.update_operation(definition["id"], {"scope": scope},
+                                            actor=actor)
+            # Round 27, item 7: a row still carrying the exact round-26
+            # factory steps of a brain tool was never edited, so it silently
+            # gains the hardened steps. An operator edit differs and is kept.
+            if not stale and definition["id"] in _PREV_FACTORY_STEPS \
+                    and _steps_signature(row.get("steps")) == \
+                    _steps_signature(_PREV_FACTORY_STEPS[definition["id"]]):
+                steps, errors = self.validate_steps(definition["steps"])
+                if errors:  # a shipped operation must never be invalid
+                    raise OperationError("builtin %s is invalid: %s"
+                                         % (definition["id"], "; ".join(errors)), 500)
+                self.store.update_operation(definition["id"], {"steps": steps},
                                             actor=actor)
         return created
 
