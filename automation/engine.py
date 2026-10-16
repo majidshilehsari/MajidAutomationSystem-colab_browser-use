@@ -323,6 +323,10 @@ class AutomationEngine:
         # Optional Telegram (or other) notifier, told whenever a run stops for a
         # human. Detached by default, so nothing about a plain run changes.
         self._notifier = notifier
+        # Round 27, item 8: called as on_finished(flowName, status, error)
+        # whenever a run reaches its end - the hub routes it to the
+        # conditional jobs and, on error, to the brain's decision.
+        self.on_finished = None
         # Indexes of what this session produced, so the panel can list every
         # screenshot and every extracted text without rescanning the disk.
         self._shots = shots
@@ -1910,6 +1914,13 @@ class AutomationEngine:
                 with open(os.path.join(log_dir, "summary.json"), "w", encoding="utf-8") as handle:
                     json.dump(summary, handle, ensure_ascii=False, indent=2)
             except OSError:
+                pass
+        callback = getattr(self, "on_finished", None)
+        if callback is not None:
+            try:
+                callback(str(summary.get("flow") or ""), str(status),
+                         str(summary.get("error") or ""))
+            except Exception:  # noqa: BLE001 - routing must never break a run
                 pass
 
 

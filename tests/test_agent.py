@@ -390,6 +390,52 @@ class SchedulerTest(TempDirCase):
         self.assertFalse(refreshed["enabled"], "a one-shot job would fire forever")
         self.assertIsNone(refreshed["next_run_at"])
 
+    def test_a_conditional_job_is_armed_only_by_a_correct_finish(self):
+        # Round 27, item 8: an 'after' job never enters the queue by the
+        # clock; a CORRECT finish of the watched run puts its one occurrence
+        # in the queue, a failed finish arms nothing and is reported so the
+        # brain can decide.
+        job = self.store.upsert_job({"name": "بعد از گزارش", "kind": "after",
+                                     "schedule": "گزارش روزانه", "target": "x"})
+        scheduler = self.make()
+        scheduler.ensure_schedules()
+        self.clock.advance(100000)
+        self.assertEqual(scheduler.due_jobs(), [],
+                         "time must never arm a conditional job")
+        self.assertEqual(scheduler.on_flow_finished("گزارش روزانه", False, "boom"),
+                         [])
+        self.assertEqual(scheduler.due_jobs(), [])
+        self.assertEqual(scheduler.on_flow_finished("چیز دیگر", True), [])
+        self.assertEqual(scheduler.due_jobs(), [],
+                         "another run's finish must not arm it")
+        self.assertEqual(scheduler.on_flow_finished("گزارش روزانه", True),
+                         [str(job["id"])])
+        results = scheduler.tick()
+        self.assertEqual(self.fired, ["بعد از گزارش"])
+        self.assertEqual(results[0]["status"], "done")
+        refreshed = self.store.get_job(job["id"])
+        self.assertIsNone(refreshed["next_run_at"],
+                          "after one fire the queue must be empty again")
+        self.assertEqual(scheduler.due_jobs(), [])
+        reports = self.store.list_step_reports("scheduler", 50)
+        self.assertTrue(any(row["phase"] == "شرطی" for row in reports),
+                        "the conditional arming was never reported")
+        self.assertTrue(any(row["phase"] == "شرطی" and not row["ok"]
+                            for row in reports),
+                        "the failed finish must be reported for the brain")
+
+    def test_validate_accepts_the_conditional_kind(self):
+        out = Scheduler.validate({"kind": "after", "schedule": "گزارش"},
+                                 now=self.clock())
+        self.assertIsNone(out["nextRunAt"])
+        self.assertIn("گزارش", out["nextRunText"])
+        with self.assertRaises(ValueError):
+            Scheduler.validate({"kind": "after", "schedule": "  "},
+                               now=self.clock())
+        with self.assertRaises(ValueError):
+            Scheduler.validate({"kind": "nope", "schedule": "x"},
+                               now=self.clock())
+
     def test_a_busy_desktop_defers_the_job_instead_of_failing_it(self):
         self.store.upsert_job({"name": "busy", "kind": "every", "schedule": "60",
                                "target": "x"})
@@ -1385,6 +1431,35 @@ class AgentHubTest(TempDirCase):
                             "target": "Arena", "payload": {"action": "flow"}})
         self.assertTrue(job["next_run_at"], "the first run time was never computed")
 
+    def test_a_conditional_job_waits_for_an_event_not_a_clock(self):
+        hub, _, _ = self.build()
+        job = hub.save_job({"name": "بعد از گزارش", "kind": "after",
+                            "schedule": "Arena", "target": "Arena",
+                            "payload": {"action": "flow"}})
+        self.assertIsNone(job["next_run_at"],
+                          "an after job must never be armed by the clock")
+        with self.assertRaises(AgentError):
+            hub.save_job({"name": "بی‌هدف", "kind": "after", "schedule": " ",
+                          "target": "Arena", "payload": {"action": "flow"}})
+
+    def test_flow_finished_routes_to_the_queue_and_to_the_brain(self):
+        # Round 27, item 8: one completion event for every run - the
+        # scheduler arms the conditional jobs, and only a real error is
+        # handed to the brain for its decision.
+        hub, _, _ = self.build()
+        armed = []
+        decided = []
+        hub.scheduler.on_flow_finished = \
+            lambda name, ok, error="": armed.append((name, ok, error)) or []
+        hub.brain.on_flow_error = lambda name, error: decided.append((name, error))
+        hub.flow_finished("گزارش", "done", "")
+        hub.flow_finished("گزارش", "error", "boom")
+        hub.flow_finished("گزارش", "stopped", "")
+        self.assertEqual(armed, [("گزارش", True, ""), ("گزارش", False, "boom"),
+                                 ("گزارش", False, "")])
+        self.assertEqual(decided, [("گزارش", "boom")],
+                         "only a real error goes to the brain's decision")
+
     def test_a_scheduled_script_must_already_be_approved(self):
         hub, _, _ = self.build()
         script = hub.script_save({"name": "s", "code": "print(1)"})
@@ -1865,6 +1940,9 @@ class ServerWiringTest(TempDirCase):
         self.assertIsNotNone(api.agent)
         self.assertIs(api.engine._notifier, api.agent.notifier,
                       "the engine cannot announce a handoff without this")
+        self.assertEqual(api.engine.on_finished, api.agent.flow_finished,
+                         "conditional jobs and the brain's on-error decision "
+                         "listen through this callback")
         self.assertEqual(api.agent.public_base, PUBLIC_BASE)
         self.assertEqual(api.agent.ai_port, 9223)
         self.assertEqual(api.agent.ai_display, ":2")

@@ -1497,6 +1497,13 @@ class AgentHub:
             if str(script.get("status")) != SCRIPT_APPROVED:
                 raise AgentError("script %s is %s; a scheduled job needs an "
                                  "approved script" % (target, script.get("status")), 409)
+        kind = str(data.get("kind") or "")
+        if kind not in ("at", "every", "cron", "after"):
+            raise AgentError("job kind must be at, every, cron or after")
+        if kind == "after" and not str(data.get("schedule") or "").strip():
+            # Round 27, item 8: a conditional job without a watched run would
+            # wait for nothing and silently never fire.
+            raise AgentError("a conditional job must name the run it waits for")
         try:
             probe = {"kind": data.get("kind"), "schedule": data.get("schedule")}
             moment = next_run(probe, self._clock())
@@ -1505,7 +1512,9 @@ class AgentHub:
         data = dict(data)
         data.setdefault("payload", {})["action"] = action
         job = self.store.upsert_job(data, job_id=job_id, actor=actor)
-        if job.get("next_run_at") is None and job.get("enabled"):
+        if job.get("next_run_at") is None and job.get("enabled") \
+                and moment is not None:
+            # (an 'after' job has no clock moment: an event arms it)
             self.store.set_job_next_run(job["id"], moment)
             # Re-read: the row just changed, and the caller renders this answer.
             job = self.store.get_job(job["id"]) or job
@@ -1554,6 +1563,25 @@ class AgentHub:
             raise AgentError("no automation engine is attached", 409)
         if self.engine.busy():
             raise AgentError("the desktop is busy with another run", 409)
+
+    def flow_finished(self, name: str, status: str, error: str = "") -> None:
+        """Round 27, item 8: the one completion event of every run.
+
+        The engine calls this when a run ends (manual or scheduled). The
+        scheduler arms the conditional jobs that were waiting for a CORRECT
+        finish, and a run that ended in error is handed to the brain, which
+        decides what happens next.
+        """
+        ok = str(status) == "done"
+        try:
+            self.scheduler.on_flow_finished(str(name or ""), ok, str(error or ""))
+        except Exception:  # noqa: BLE001 - routing must never raise into the engine
+            pass
+        if str(status) == "error":
+            try:
+                self.brain.on_flow_error(str(name or ""), str(error or ""))
+            except Exception:  # noqa: BLE001
+                pass
 
     def _run_job_guarded(self, job: Dict[str, Any]) -> Dict[str, Any]:
         try:

@@ -183,6 +183,21 @@ class BuiltinAndSchemaTest(BrainCase):
 
 
 class DecisionCycleTest(BrainCase):
+    def test_a_failed_run_is_recorded_and_wakes_the_brain_up(self):
+        # Round 27, item 8: on error the brain decides - the failure lands
+        # in the reports with its exact timestamp and in the brain
+        # conversation, and the waiting time drops so the very next
+        # thinking cycle looks at the situation.
+        self.brain._next_allowed_at = self.now[0] + 999
+        self.brain.on_flow_error("گزارش روزانه", "timeout")
+        reports = self.hub.store.list_step_reports("brain", 50)
+        decision = [row for row in reports if row["phase"] == "تصمیم در خطا"]
+        self.assertTrue(decision, "the on-error decision was never reported")
+        self.assertFalse(decision[-1]["ok"])
+        self.assertIn("گزارش روزانه", decision[-1]["message"])
+        self.assertIn("timeout", decision[-1]["message"])
+        self.assertEqual(self.brain._next_allowed_at, 0.0,
+                         "the brain must think about the error at once")
     def test_a_disabled_brain_stays_quiet(self):
         self.brain.tick()
         self.assertEqual(self.engine.started, [])

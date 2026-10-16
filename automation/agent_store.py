@@ -224,7 +224,9 @@ CREATE INDEX IF NOT EXISTS idx_sugg_status ON suggestions (status);
 
 # Job schedule kinds. "at" fires once at a unix timestamp, "every" fires on an
 # interval in seconds, "cron" is the familiar five-field expression.
-JOB_KINDS = ("at", "every", "cron")
+# Round 27, item 8: 'after' is the conditional kind - it is armed by the
+# correct finish of the run it watches, never by the clock.
+JOB_KINDS = ("at", "every", "cron", "after")
 
 # A script that has not been approved by a human cannot run. This is the whole
 # point of the gate: the agent proposes, the operator disposes.

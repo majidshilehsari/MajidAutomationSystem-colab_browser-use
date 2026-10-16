@@ -156,6 +156,22 @@ class Brain:
             self._tell(line)
         self._next_allowed_at = self._clock() + float(self.setting("brain.runGapSec"))
 
+    def on_flow_error(self, name: str, error: str) -> None:
+        """Round 27, item 8: a run ended in error - the brain decides next.
+
+        The failure is recorded with its exact timestamp (reports, archive
+        and the brain conversation), and the brain's own waiting time is
+        dropped so the very next thinking cycle looks at the situation and
+        picks the next move from the always-allowed operations.
+        """
+        line = ("اجرای «%s» با خطا تمام شد: %s — تصمیم دربارهٔ اقدام بعدی با "
+                "مغز است؛ چرخهٔ فکر بلافاصله بیدار شد."
+                % (name or "بی‌نام", error or "بدون پیام"))
+        self._say(line)
+        self._speak(line)
+        self._report("تصمیم در خطا", line, ok=False)
+        self._next_allowed_at = 0.0
+
     def _operations(self) -> List[Dict[str, Any]]:
         library = getattr(self._hub, "library", None)
         if library is None:

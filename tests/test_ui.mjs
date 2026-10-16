@@ -980,7 +980,7 @@ test('step list shows no numbering and options are styled dark', async () => {
 /** Tabs by name. The brain comes first (round 25), then chat. */
 // Round 26: the record tab is gone from the panel.
 const TAB_ORDER = ['brain', 'chat', 'library', 'flow', 'pages',
-  'db', 'ops', 'settings', 'agent', 'log'];
+  'db', 'settings', 'agent', 'log'];
 
 function tab(page, name) {
   const node = Array.from(page.doc.querySelectorAll('.mas-tab'))
@@ -2812,36 +2812,60 @@ test('the flow tab has one floating action line above the footer', async () => {
   }
 });
 
-test('the operations tab lists running, queued and finished work', async () => {
+test('the brain tab carries operations, a separate queue and the schedule', async () => {
+  // Round 27, item 8: the brain manages the operations section - it moved
+  // under the brain as sub-tabs, and the queue is separate from the
+  // schedule. Conditional jobs wait for another run to finish correctly.
   const page = await mount();
   try {
     await authenticate(page);
-    clickTab(page, 'ops');
-    const subs = Array.from(page.doc.querySelectorAll('#mas-tab-ops [data-opsub]'))
+    assert.equal(page.doc.querySelector('.mas-tab[data-tab="ops"]'), null,
+      'the old top-level operations tab must be gone');
+    const pane = page.doc.getElementById('mas-tab-brain');
+    const subs = Array.from(pane.querySelectorAll('[data-brainsub]'))
       .map((node) => node.textContent.trim());
-    assert.deepEqual(subs, ['در حال اجرا', 'صف و زمان‌بندی', 'انجام‌شده']);
-    assert.ok(await page.until(() =>
-      page.doc.getElementById('mas-tab-ops').textContent.includes('run-') || true),
-      'the running sub-tab never rendered');
+    assert.deepEqual(subs, ['تعامل با مغز', 'تنظیمات مغز', 'مدیریت عملیات',
+      'صف عملیات', 'زمان‌بندی‌شده']);
+    const clickSub = (name) => pane.querySelector(`[data-brainsub="${name}"]`)
+      .dispatchEvent(new page.window.Event('click'));
 
-    const queue = page.doc.querySelector('#mas-tab-ops [data-opsub="queue"]');
-    queue.dispatchEvent(new page.window.Event('click'));
-    assert.ok(await page.until(() =>
-      page.doc.getElementById('mas-tab-ops').textContent.includes('Google Search')),
-      'the queue never listed the scheduled job');
-    const schedule = page.doc.querySelector('#mas-tab-ops .mas-btn.mas-primary');
-    assert.ok(schedule, 'the schedule button is missing');
+    // the schedule sub-tab manages the jobs, including the conditional kind
+    clickSub('schedule');
+    assert.ok(await page.until(() => pane.textContent.includes('Google Search')),
+      'the schedule form never listed the flows');
+    assert.ok(await page.until(() => pane.textContent.includes('صبح')),
+      'the jobs table never rendered');
+    const selects = Array.from(pane.querySelectorAll('select.mas-input'));
+    const kindSel = selects.find((sel) => Array.from(sel.options)
+      .some((option) => option.value === 'after'));
+    assert.ok(kindSel, 'the conditional kind is missing from the form');
+    const scheduleInput = pane.querySelector('input.mas-input');
+    kindSel.value = 'after';
+    kindSel.dispatchEvent(new page.window.Event('change'));
+    assert.equal(scheduleInput.hidden, true,
+      'the clock field must hide for a conditional job');
+    assert.equal(selects[2].hidden, false, 'the watched-run picker must show');
+    const condHint = Array.from(pane.querySelectorAll('p.mas-hint'))
+      .find((node) => node.textContent.includes('مغز تصمیم می‌گیرد'));
+    assert.ok(condHint && !condHint.hidden,
+      'the on-error brain decision must be spelled out');
 
-    const done = page.doc.querySelector('#mas-tab-ops [data-opsub="done"]');
-    done.dispatchEvent(new page.window.Event('click'));
-    assert.ok(await page.until(() =>
-      page.doc.getElementById('mas-tab-ops').textContent.includes('run-1')),
-      'the finished list never showed the history');
+    // the queue sub-tab is separate and shows the ONE next occurrence
+    clickSub('queue');
+    assert.ok(await page.until(() => pane.textContent.includes('صبح')),
+      'the queue never listed the due job');
+    assert.ok(pane.textContent.includes('cron'),
+      'the queue row must show the job kind');
+
+    // and management (running now + finished runs) is its own sub-tab
+    clickSub('ops');
+    assert.ok(await page.until(() => pane.textContent.includes('run-1')),
+      'the finished runs never showed');
+    assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
   }
 });
-
 test('the report copy leaves one closable line above the footer', async () => {
   const page = await mount({ standalone: true });
   try {

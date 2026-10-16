@@ -167,6 +167,13 @@ class AutomationApi:
         # The coworker agent. Optional: a deployment that does not construct one
         # keeps the original route table and behaves exactly as before.
         self.agent = agent
+        # Round 27, item 8: the engine reports every finished run to the hub,
+        # which routes it to the conditional jobs and - on error - the brain.
+        if agent is not None and engine is not None:
+            try:
+                engine.on_finished = agent.flow_finished
+            except Exception:  # a fake engine in tests may refuse attributes
+                pass
         self.routes: List[Tuple[str, str, Callable[..., Response]]] = [
             ("GET", "/info", self.route_info),
             ("GET", "/status", self.route_status),

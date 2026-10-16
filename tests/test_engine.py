@@ -557,6 +557,21 @@ class MiscStepTest(EngineTestBase):
         history = self.engine.status()["history"]
         self.assertEqual(len(history), 2)
 
+    def test_a_finished_run_is_reported_to_the_completion_callback(self):
+        # Round 27, item 8: the hub listens for every finished run, so the
+        # conditional jobs and the brain's on-error decision see manual runs
+        # exactly like scheduled ones.
+        seen = []
+        self.engine.on_finished = \
+            lambda name, status, error: seen.append((name, status, error))
+        status = self.run_to_completion(build_flow([{"type": "wait", "ms": 1}]))
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(len(seen), 1, "the callback must fire exactly once")
+        name, finished, error = seen[0]
+        self.assertEqual(finished, "done")
+        self.assertEqual(error, "")
+        self.assertTrue(name, "the flow name must ride along")
+
 
 class RecordingBackend(ControlBackend):
     """Keeps the real ControlBackend logic but records the argv it would run."""

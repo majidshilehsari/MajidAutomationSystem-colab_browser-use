@@ -158,6 +158,10 @@ def next_run(job: Dict[str, Any], now: float) -> Optional[float]:
         return now + parse_interval(schedule)
     if kind == "cron":
         return next_cron(schedule, now)
+    if kind == "after":
+        # Round 27, item 8: a conditional job is armed by an event (the
+        # watched run finishing correctly), never by the clock.
+        return None
     raise ValueError("unknown job kind: %r" % kind)
 
 
@@ -239,6 +243,8 @@ class Scheduler:
         for job in self.store.list_jobs(enabled_only=True):
             if job.get("next_run_at"):
                 continue
+            if str(job.get("kind")) == "after":
+                continue  # event-armed, never time-armed
             try:
                 moment = next_run(job, now)
             except ValueError as exc:
@@ -265,6 +271,38 @@ class Scheduler:
                 due.append(job)
         # Oldest first, so a backlog drains in the order it was meant to.
         return sorted(due, key=lambda item: float(item["next_run_at"]))
+
+    def on_flow_finished(self, name: str, ok: bool,
+                         error: str = "") -> List[str]:
+        """Round 27, item 8: the event half of the conditional jobs.
+
+        When a run finishes CORRECTLY, every enabled ``after`` job watching
+        that name is armed: its one next-due occurrence goes into the queue
+        exactly like a time job (the tick then fires it serially). When the
+        run ended in error nothing is armed - deciding what happens next is
+        the brain's job, and the report says so with an exact timestamp.
+        """
+        now = self._clock()
+        armed: List[str] = []
+        for job in self.store.list_jobs(enabled_only=True):
+            if str(job.get("kind")) != "after":
+                continue
+            if str(job.get("schedule") or "") != str(name or ""):
+                continue
+            job_name = job.get("name") or job["id"]
+            if not ok:
+                self._report("شرطی", "وظیفهٔ شرطی «%s» فعال نشد: «%s» با خطا "
+                             "تمام شد (%s) — تصمیم دربارهٔ ادامه با مغز است."
+                             % (job_name, name, error or "بدون پیام"), ok=False)
+                continue
+            if job.get("next_run_at"):
+                continue  # already in the queue; one occurrence only
+            self.store.set_job_next_run(job["id"], now)
+            self._report("شرطی", "«%s» درست تمام شد؛ وظیفهٔ شرطی «%s» با همان "
+                         "قاعدهٔ صف (فقط یک موعد) در صف قرار گرفت."
+                         % (name, job_name))
+            armed.append(str(job["id"]))
+        return armed
 
     def tick(self, now: Optional[float] = None) -> List[Dict[str, Any]]:
         now = self._clock() if now is None else now
@@ -348,10 +386,17 @@ class Scheduler:
         """Check a job definition and report when it would next fire."""
         now = time.time() if now is None else now
         kind = str(data.get("kind") or "")
-        if kind not in ("at", "every", "cron"):
-            raise ValueError("job kind must be at, every or cron")
+        if kind not in ("at", "every", "cron", "after"):
+            raise ValueError("job kind must be at, every, cron or after")
+        if kind == "after" and not str(data.get("schedule") or "").strip():
+            raise ValueError("a conditional job must name the run it waits for")
         probe = {"kind": kind, "schedule": data.get("schedule")}
         moment = next_run(probe, now)
+        if kind == "after":
+            return {"kind": kind, "nextRunAt": None,
+                    "nextRunText": "در صف نیست؛ وقتی «%s» درست تمام شود اجرا "
+                                   "می‌شود (در خطا، تصمیم با مغز است)."
+                                   % str(data.get("schedule"))}
         return {"kind": kind, "nextRunAt": moment,
                 "nextRunText": (datetime.fromtimestamp(moment)
                                 .strftime("%Y-%m-%d %H:%M:%S") if moment else

@@ -17,7 +17,7 @@ import {
 // Round 26: the record tab is gone - steps are written by the agent or
 // pasted in and translated; nothing is captured from raw clicks anymore.
 const TAB_ORDER = ['brain', 'chat', 'library', 'flow', 'pages',
-  'db', 'ops', 'settings', 'agent', 'log'];
+  'db', 'settings', 'agent', 'log'];
 const DEFAULT_TAB = 'brain';
 
 /** The tab the panel opens on: the remembered one, else the first. */
@@ -59,7 +59,6 @@ const state = {
   openStepId: null,
   logOffset: 0,
   lastRenderedIndex: -1,
-  opsSub: 'running',
   brainSub: 'interact',
   brainDraft: '',
   brainMsgCount: 0,
@@ -367,7 +366,6 @@ function buildPanel() {
       el('section', { id: 'mas-tab-flow', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-pages', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-db', class: 'mas-tabpane', hidden: true }),
-      el('section', { id: 'mas-tab-ops', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-brain', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-settings', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-agent', class: 'mas-tabpane', hidden: true }),
@@ -570,7 +568,6 @@ function selectTab(name) {
   if (name === 'pages') renderPages();
   if (name === 'log') renderLog();
   if (name === 'db') renderDatabase();
-  if (name === 'ops') renderOps();
   if (name === 'brain') renderBrain();
   if (name === 'settings') renderSettings();
   if (name === 'agent') renderAgent();
@@ -647,11 +644,11 @@ async function refreshAgentTabs() {
   } catch (error) {
     missing = error.status === 404;
   }
-  for (const name of ['chat', 'library', 'db', 'ops', 'brain']) {
+  for (const name of ['chat', 'library', 'db', 'brain']) {
     const node = document.querySelector(`.mas-tab[data-tab="${name}"]`);
     if (node) node.hidden = missing;
   }
-  if (missing && ['chat', 'library', 'db', 'ops', 'brain'].includes(currentTab())) {
+  if (missing && ['chat', 'library', 'db', 'brain'].includes(currentTab())) {
     selectTab('flow');
   }
   return !missing;
@@ -4169,23 +4166,15 @@ async function renderOperations() {
  * what already finished - one list over engine runs and agent jobs.
  * ------------------------------------------------------------------ */
 
-async function renderOps() {
-  const pane = document.getElementById('mas-tab-ops');
-  if (!pane) return;
-  const subs = ['running', 'queue', 'done'];
-  const active = subs.includes(state.opsSub) ? state.opsSub : 'running';
-  const host = el('div', { class: 'mas-subhost' });
-  replace(pane,
-    el('div', { class: 'mas-tabs mas-subtabs' }, subs.map((name) => el('button', {
-      class: 'mas-tab' + (name === active ? ' is-active' : ''),
-      dataset: { opsub: name }, type: 'button',
-      text: t('opsSub' + name.charAt(0).toUpperCase() + name.slice(1)),
-      onClick: () => { state.opsSub = name; renderOps(); },
-    }))),
-    host);
-  if (active === 'queue') return renderOpsQueue(host);
-  if (active === 'done') return renderOpsDone(host);
-  return renderOpsRunning(host);
+async function renderOpsManage(host) {
+  // Round 27, item 8: «مدیریت عملیات» is a brain sub-tab now - the brain
+  // manages the operations. Running now and the finished runs live here;
+  // the queue and the schedule are their own sub-tabs next door.
+  const runningHost = el('div');
+  const doneHost = el('div');
+  replace(host, runningHost, doneHost);
+  await renderOpsRunning(runningHost);
+  await renderOpsDone(doneHost);
 }
 
 async function renderOpsRunning(host) {
@@ -4202,7 +4191,7 @@ async function renderOpsRunning(host) {
   const last = results.length ? results[results.length - 1] : null;
   const runningJob = agent && agent.scheduler ? agent.scheduler.runningJob : null;
   const cards = [el('div', { class: 'mas-box mas-card' }, [
-    el('div', { class: 'mas-card-head' }, [el('b', { text: '⚙️ ' + t('opsSubRunning') })]),
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '⚙️ ' + t('opsRunningTitle') })]),
     agentTable(
       [t('opsColRun'), t('opsColStatus'), t('opsColStep'), t('opsColMotion'), t('opsColTime')],
       [[
@@ -4229,7 +4218,63 @@ async function renderOpsRunning(host) {
   replace(host, ...cards);
 }
 
+function opsKindLabel(kind) {
+  const key = { at: 'opsKindAt', every: 'opsKindEvery', cron: 'opsKindCron',
+    after: 'opsCondKind' }[String(kind || '')];
+  return key ? t(key) : String(kind || '-');
+}
+
 async function renderOpsQueue(host) {
+  // Round 27, item 8: the queue is its own sub-tab, separated from the
+  // schedule. It shows exactly what the queue rule promises: the job that
+  // is running now, and each job's ONE next due occurrence - nothing else.
+  replace(host, el('p', { class: 'mas-empty', text: '…' }));
+  let jobs = [];
+  let agent = null;
+  try {
+    jobs = (await api('/agent/jobs')).jobs || [];
+  } catch (error) {
+    return replace(host, el('p', { class: 'mas-hint', text: error.message }));
+  }
+  try { agent = await api('/agent'); } catch (error) { agent = null; }
+  const runningJob = agent && agent.scheduler ? agent.scheduler.runningJob : null;
+  const enabled = jobs.filter((job) => job.enabled !== false);
+  const queued = enabled.filter((job) => job.next_run_at)
+    .slice().sort((a, b) => Number(a.next_run_at) - Number(b.next_run_at));
+  const waiting = enabled.filter((job) => !job.next_run_at);
+  const cards = [el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '⏳ ' + t('opsQueueTitle') })]),
+    runningJob
+      ? el('p', { class: 'mas-hint', text: `${t('opsJobRunning')}: ${runningJob}` })
+      : el('p', { class: 'mas-hint', text: t('opsNoJob') }),
+    queued.length
+      ? agentTable(
+          [t('opsColName'), t('opsColSchedule'), t('opsColNext'), t('opsColLast')],
+          queued.map((job) => [
+            job.name || job.id,
+            `${opsKindLabel(job.kind)}: ${job.schedule}`,
+            formatTime(job.next_run_at),
+            job.last_status || '-',
+          ]))
+      : el('p', { class: 'mas-empty', text: t('opsQueueEmpty') }),
+  ])];
+  if (waiting.length) {
+    cards.push(el('div', { class: 'mas-box mas-card' }, [
+      el('div', { class: 'mas-card-head' }, [el('b', { text: '👀 ' + t('opsQueueWaiting') })]),
+      el('ul', { class: 'mas-log' }, waiting.map((job) => el('li', {
+        text: String(job.kind) === 'after'
+          ? `${job.name || job.id} · ${t('opsCondWaiting')}${job.schedule}${t('opsCondWaitingEnd')}`
+          : `${job.name || job.id} · ${t('opsNotQueued')}`,
+      }))),
+    ]));
+  }
+  replace(host, ...cards);
+}
+
+async function renderOpsSchedule(host) {
+  // Round 27, item 8: job management (create, pause, delete, run now) with
+  // the conditional kind - «after another run finishes correctly» - and on
+  // error the brain decides, which the hint spells out.
   replace(host, el('p', { class: 'mas-empty', text: '…' }));
   let jobs = [];
   let flows = [];
@@ -4242,39 +4287,55 @@ async function renderOpsQueue(host) {
   const targetSel = el('select', { class: 'mas-input' },
     flows.map((item) => el('option', { value: item.name, text: item.name })));
   const kindSel = el('select', { class: 'mas-input' }, [
-    el('option', { value: 'at', text: 'at' }),
-    el('option', { value: 'every', text: 'every' }),
-    el('option', { value: 'cron', text: 'cron' }),
+    el('option', { value: 'at', text: t('opsKindAt') }),
+    el('option', { value: 'every', text: t('opsKindEvery') }),
+    el('option', { value: 'cron', text: t('opsKindCron') }),
+    el('option', { value: 'after', text: t('opsCondKind') }),
   ]);
   const scheduleInput = el('input', {
     class: 'mas-input', placeholder: '2026-10-12 07:00 · 90 · 5m · 30 7 * * 6',
   });
+  const watchSel = el('select', { class: 'mas-input', hidden: true },
+    flows.map((item) => el('option', { value: item.name, text: item.name })));
+  const condHint = el('p', { class: 'mas-hint', text: t('opsCondHint'), hidden: true });
+  const syncKind = () => {
+    const cond = kindSel.value === 'after';
+    watchSel.hidden = !cond;
+    condHint.hidden = !cond;
+    scheduleInput.hidden = cond;
+  };
+  kindSel.addEventListener('change', syncKind);
   const form = el('div', { class: 'mas-box mas-card' }, [
     el('div', { class: 'mas-card-head' }, [el('b', { text: '⏰ ' + t('opsScheduleTitle') })]),
     el('p', { class: 'mas-hint', text: t('opsScheduleHint') }),
     el('div', { class: 'mas-row mas-wrap' }, [targetSel, kindSel, scheduleInput,
+      watchSel,
       button('⏰ ' + t('opsSchedule'), async () => {
         const target = targetSel.value;
-        if (!target || !scheduleInput.value.trim()) { toast(t('invalidFlow'), 'warn'); return; }
+        const kind = kindSel.value;
+        const schedule = kind === 'after'
+          ? watchSel.value : scheduleInput.value.trim();
+        if (!target || !schedule) { toast(t('invalidFlow'), 'warn'); return; }
         try {
           await api('/agent/jobs', {
             method: 'POST',
             body: {
-              name: target, kind: kindSel.value, schedule: scheduleInput.value.trim(),
+              name: target, kind, schedule,
               target, payload: { action: 'flow' },
             },
           });
           toast(t('opSaved'), 'ok');
-          renderOps();
+          renderBrain();
         } catch (error) { toast(error.message, 'error'); }
       }, { class: 'mas-btn mas-primary' }),
     ]),
+    condHint,
   ]);
   const table = agentTable(
     [t('opsColName'), t('opsColSchedule'), t('opsColNext'), t('opsColLast'), ''],
     jobs.map((job) => [
       job.name || job.id,
-      `${job.kind}: ${job.schedule}`,
+      `${opsKindLabel(job.kind)}: ${job.schedule}`,
       job.next_run_at ? formatTime(job.next_run_at) : '-',
       job.last_status || '-',
       el('div', { class: 'mas-row' }, [
@@ -4282,21 +4343,22 @@ async function renderOpsQueue(host) {
           try {
             await api('/agent/job-run', { method: 'POST', body: { id: job.id } });
             toast(t('opsStarted'), 'ok');
-            state.opsSub = 'running';
-            renderOps();
+            state.brainSub = 'ops';
+            saveUiPref('brainSub', 'ops');
+            renderBrain();
           } catch (error) { toast(error.message, 'error'); }
         }, { title: t('opsRunNow') }),
         button(job.enabled ? '⏸' : '▶️', async () => {
           try {
             await api(`/agent/jobs/${encodeURIComponent(job.id)}`,
               { method: 'PUT', body: { enabled: !job.enabled } });
-            renderOps();
+            renderBrain();
           } catch (error) { toast(error.message, 'error'); }
         }, { title: t('opsToggle') }),
         button('🗑', async () => {
           try {
             await api(`/agent/jobs/${encodeURIComponent(job.id)}`, { method: 'DELETE' });
-            renderOps();
+            renderBrain();
           } catch (error) { toast(error.message, 'error'); }
         }, { class: 'mas-btn mas-danger', title: t('delete') }),
       ]),
@@ -4320,10 +4382,14 @@ async function renderOpsDone(host) {
     run.finishedAt ? formatTime(run.finishedAt) : '-',
     run.stepCount != null ? String(run.stepCount) : '-',
   ]);
-  replace(host, rows.length
-    ? agentTable([t('opsColRun'), t('opsColStatus'), t('opsColStart'),
-      t('opsColEnd'), t('opsColSteps')], rows)
-    : el('p', { class: 'mas-empty', text: t('opsNoRuns') }));
+  replace(host, el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '🏁 ' + t('opsFinishedTitle') })]),
+    rows.length
+      ? agentTable([t('opsColRun'), t('opsColStatus'), t('opsColStart'),
+        t('opsColEnd'), t('opsColSteps')], rows)
+      : el('p', { class: 'mas-empty', text: t('opsNoRuns') }),
+  ]));
 }
 
 /* ------------------------------------------------------------------ *
@@ -4643,7 +4709,9 @@ if (document.readyState === 'loading') {
 async function renderBrain() {
   const pane = document.getElementById('mas-tab-brain');
   if (!pane) return;
-  const subs = ['interact', 'settings'];
+  // Round 27, item 8: the brain manages the operations section, so it lives
+  // here as sub-tabs; the queue and the schedule are separate sub-tabs.
+  const subs = ['interact', 'settings', 'ops', 'queue', 'schedule'];
   const active = subs.includes(state.brainSub) ? state.brainSub : 'interact';
   const host = el('div', { class: 'mas-subhost' });
   replace(pane,
@@ -4658,6 +4726,14 @@ async function renderBrain() {
       },
     }))),
     host);
+  if (active === 'ops' || active === 'queue' || active === 'schedule') {
+    // these read their own endpoints; the brain payload and its polling are
+    // only needed by the interact and settings sub-tabs
+    stopBrainPolling();
+    if (active === 'queue') return renderOpsQueue(host);
+    if (active === 'schedule') return renderOpsSchedule(host);
+    return renderOpsManage(host);
+  }
   replace(host, el('p', { class: 'mas-empty', text: '…' }));
   let data;
   try {
