@@ -439,11 +439,103 @@ function buildDesktopLauncher() {
       target: '_blank', rel: 'noopener', title: t('openPanel'),
       text: '⧉ ' + t('openPanel'),
     }),
+    // Round 27, item 6: the third panel is one click away from the desktop.
+    el('a', {
+      class: 'mas-launcher-btn', href: 'automation/human.html',
+      target: '_blank', rel: 'noopener', title: t('humanPanelTitle'),
+      text: '🙋 ' + t('humanPanelTitle'),
+    }),
   ]));
   if (!document.getElementById('mas-toast')) {
     document.body.appendChild(
       el('div', { id: 'mas-toast', class: 'mas-toast-box' }));
   }
+}
+
+/* Round 27, item 6: build the dedicated human-action panel - the third
+ * panel beside the desktop view and the big automation panel. Its whole job
+ * is the moments a human is needed: the handoff card (challenge, manual
+ * verification, confirmation, form, secret) rendered by the very same code
+ * as the desktop view, plus the brain's open suggestion, plus the way back
+ * to the other two panels. */
+function buildHumanPanel() {
+  const root = el('div', { id: 'mas-human-root' }, [
+    el('header', { class: 'mas-human-head' }, [
+      el('h1', { text: '🙋 ' + t('humanPanelTitle') }),
+      el('p', { class: 'mas-hint', text: t('humanPanelHint') }),
+      el('div', { class: 'mas-row mas-wrap' }, [
+        el('a', {
+          class: 'mas-launcher-btn', href: 'panel.html',
+          target: '_blank', rel: 'noopener', title: t('openPanel'),
+          text: '⧉ ' + t('openPanel'),
+        }),
+        el('a', {
+          class: 'mas-launcher-btn',
+          href: '../vnc.html?autoconnect=true&resize=scale&path=websockify',
+          target: '_blank', rel: 'noopener', title: t('openDesktop'),
+          text: '🌐 ' + t('openDesktop'),
+        }),
+      ]),
+    ]),
+    el('div', { id: 'mas-tokenbar', class: 'mas-tokenbar', hidden: true }, [
+      el('div', { id: 'mas-tokenbar-text', class: 'mas-tokenbar-text' }),
+      el('div', { class: 'mas-row' }, [
+        el('input', {
+          id: 'mas-token-input', class: 'mas-input', type: 'password',
+          placeholder: 'AUTOMATION_TOKEN',
+          onKeydown: (event) => { if (event.key === 'Enter') setToken(event.target.value); },
+        }),
+        el('button', {
+          class: 'mas-btn mas-primary', type: 'button', text: t('tokenSubmit'),
+          onClick: () => setToken(document.getElementById('mas-token-input').value),
+        }),
+      ]),
+    ]),
+    el('div', { id: 'mas-human-suggestion', class: 'mas-box mas-card', hidden: true }),
+    el('div', { id: 'mas-human-empty', class: 'mas-human-empty' }, [
+      el('p', { text: '✅ ' + t('humanPanelIdle') }),
+    ]),
+  ]);
+  document.body.appendChild(root);
+  if (!document.getElementById('mas-toast')) {
+    document.body.appendChild(el('div', { id: 'mas-toast', class: 'mas-toast-box' }));
+  }
+}
+
+/* The brain's open suggestion is a human choice too, so the dedicated panel
+ * carries the same run/reject buttons as the brain tab. */
+async function refreshHumanSuggestion() {
+  const host = document.getElementById('mas-human-suggestion');
+  if (!host) return;
+  let data = null;
+  try {
+    data = await api('/agent/brain');
+  } catch (error) {
+    host.hidden = true;   // no agent or no token yet: the card simply stays away
+    return;
+  }
+  const suggestion = data.suggestion;
+  if (!suggestion || suggestion.expired) {
+    host.hidden = true;
+    const idleNote = document.getElementById('mas-human-empty');
+    const card = document.getElementById('mas-desktop-handoff');
+    if (idleNote) idleNote.hidden = Boolean(card && !card.hidden);
+    return;
+  }
+  host.hidden = false;
+  const idleNote = document.getElementById('mas-human-empty');
+  if (idleNote) idleNote.hidden = true;
+  replace(host,
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '💡 ' + t('brainSuggestion') })]),
+    el('p', { text: suggestion.name }),
+    el('p', { class: 'mas-hint', text: t('humanPanelSuggestionHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('▶ ' + t('brainRunIt'), () => brainDecide(suggestion.id, 'run'),
+        { class: 'mas-btn mas-primary' }),
+      button('✕ ' + t('brainReject'), () => brainDecide(suggestion.id, 'reject'),
+        { class: 'mas-btn mas-danger' }),
+    ]));
 }
 
 function setPanelOpen(open) {
@@ -492,6 +584,10 @@ function selectTab(name) {
  *  stay: an operator who is about to type one must not watch them vanish.
  */
 async function refreshAgentTabs() {
+  // Round 27, item 6: the dedicated human panel has no tab row and no panes
+  // to rebuild; its theme comes from localStorage at boot. Everything this
+  // function would touch lives on the panel pages only.
+  if (document.body.classList.contains('mas-human')) return true;
   let missing = false;
   try {
     const data = await api('/agent');
@@ -590,6 +686,11 @@ function wireStandaloneHead() {
     class: 'mas-btn mas-desktop-link',
     href: '../vnc.html?autoconnect=true&resize=scale&path=websockify',
     target: '_blank', rel: 'noopener', text: '🌐 ' + t('openDesktop'),
+  }));
+  pageHead.appendChild(el('a', {
+    class: 'mas-btn mas-desktop-link',
+    href: 'human.html',
+    target: '_blank', rel: 'noopener', text: '🙋 ' + t('humanPanelTitle'),
   }));
 }
 
@@ -1489,6 +1590,11 @@ function renderDesktopHandoff() {
   let card = document.getElementById('mas-desktop-handoff');
   if (!waiting) {
     if (card) card.hidden = true;
+    // On the human panel the idle note returns - unless a brain suggestion
+    // is still waiting there (that one manages the note itself).
+    const idleNote = document.getElementById('mas-human-empty');
+    const sug = document.getElementById('mas-human-suggestion');
+    if (idleNote) idleNote.hidden = Boolean(sug && !sug.hidden);
     return;
   }
   const kind = waiting.kind;
@@ -1499,9 +1605,14 @@ function renderDesktopHandoff() {
     waiting.message || '', waiting.publicShot || ''].join('|');
   if (!card) {
     card = el('div', { id: 'mas-desktop-handoff', class: 'mas-desktop-handoff' });
-    document.body.appendChild(card);
+    // On the dedicated human panel the card sits inside the page flow; on
+    // the desktop view it floats over noVNC.
+    const parent = document.getElementById('mas-human-root') || document.body;
+    parent.appendChild(card);
   }
   card.hidden = false;
+  const idleNote = document.getElementById('mas-human-empty');
+  if (idleNote) idleNote.hidden = true;
   const mountedForm = card.querySelector('#mas-desktop-form');
   if (card.dataset.sig === sig && (!formKind || mountedForm)) {
     if (formKind) mountConfirmForm(mountedForm, waiting, kind);
@@ -4454,6 +4565,20 @@ function renderLog() {
  * ------------------------------------------------------------------ */
 
 function start() {
+  if (document.body.classList.contains('mas-human')) {
+    // Round 27, item 6: the third panel - a dedicated page whose whole job
+    // is the moments the automation needs a human. It polls the one shared
+    // run-state, so a handoff acted on here advances the flow exactly like
+    // acting on the desktop view or the big panel.
+    state.clipSyncOn = false;
+    applyTheme(state.theme, { save: false });
+    buildHumanPanel();
+    refreshStatus();
+    setInterval(refreshStatus, 900);
+    refreshHumanSuggestion();
+    setInterval(refreshHumanSuggestion, 2000);
+    return;
+  }
   const standalone = isStandalone();
   state.clipSyncOn = localStorage.getItem(LS.clip) === '1';
   applyTheme(state.theme, { save: false });

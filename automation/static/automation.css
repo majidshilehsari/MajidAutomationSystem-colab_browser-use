@@ -2225,7 +2225,10 @@ body.mas-desktop-dark #noVNC_transition_text {
   background: rgba(17, 26, 46, 0.94) !important;
   color: #e2e8f0 !important;
 }
-.mas-desktop-launcher { position: fixed; top: 12px; right: 12px; z-index: 100000; }
+.mas-desktop-launcher {
+  position: fixed; top: 12px; right: 12px; z-index: 100000;
+  display: flex; flex-direction: column; gap: 8px; align-items: flex-end;
+}
 
 /* Round 27, item 2: the human-action card of the desktop view. Fixed
  * bottom-right, styled outside #mas-root (there is no root panel here), and
@@ -2279,6 +2282,30 @@ body.mas-desktop-dark #noVNC_transition_text {
 .mas-report-t { color: var(--mas-muted, #94a3b8); font-size: 12px; }
 .mas-report-msg { font-size: 13px; margin-top: 2px; word-break: break-word; }
 .mas-chip-bad { color: #f87171; }
+
+/* ------------------------------------------------------------------
+ * Round 27, item 6: the dedicated human-action panel (human.html).
+ * ------------------------------------------------------------------ */
+body.mas-human {
+  background: #0b1220; color: #e2e8f0; min-height: 100vh; margin: 0;
+  font-family: Vazirmatn, Tahoma, sans-serif;
+}
+#mas-human-root { max-width: 640px; margin: 0 auto; padding: 16px; direction: rtl; }
+.mas-human-head { display: flex; flex-direction: column; gap: 10px; margin-bottom: 16px; }
+.mas-human-head h1 { margin: 0; font-size: 20px; color: #fff; }
+#mas-human-root .mas-box.mas-card {
+  background: #111a2e; border: 1px solid #1e293b; border-radius: 10px;
+  padding: 12px 14px; margin-bottom: 16px; color: #e2e8f0;
+}
+#mas-human-root .mas-card-head { margin-bottom: 6px; }
+body.mas-human #mas-desktop-handoff {
+  position: static; width: auto; margin: 0 0 16px;
+}
+.mas-human-empty {
+  text-align: center; color: #94a3b8; padding: 36px 12px; font-size: 14px;
+  border: 1px dashed #1e293b; border-radius: 10px;
+}
+body.mas-human #mas-tokenbar { margin-bottom: 16px; }
 .mas-desktop-launcher .mas-launcher-btn {
   display: inline-flex;
   align-items: center;

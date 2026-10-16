@@ -215,6 +215,19 @@ def prepare_web_root(web_root: str, novnc_dir: str, static_dir: str) -> Dict[str
             report["panelPatched"] = True
         report["panel"] = True
 
+    # Round 27, item 6: the dedicated human-action panel is a plain static
+    # page too, so its asset links are versioned exactly like panel.html's.
+    human = os.path.join(web_root, "automation", "human.html")
+    if os.path.exists(human):
+        with open(human, encoding="utf-8") as handle:
+            html = handle.read()
+        query = cache_query(static_dir)
+        updated = ASSET_REF.sub(lambda m: m.group(1) + query, html)
+        if updated != html:
+            with open(human, "w", encoding="utf-8") as handle:
+                handle.write(updated)
+        report["human"] = True
+
     if os.path.exists(target_vnc):
         with open(target_vnc, encoding="utf-8") as handle:
             html = handle.read()

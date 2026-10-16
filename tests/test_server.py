@@ -528,6 +528,22 @@ class WebRootTest(unittest.TestCase):
         self.assertEqual(report["cacheKey"],
                          html.split("automation.js?v=")[1][:10])
 
+    def test_the_human_action_panel_page_is_published_and_versioned(self):
+        # Round 27, item 6: the third panel ships as its own static page and
+        # gets the same cache-busting treatment as panel.html.
+        real_static = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "automation", "static")
+        report = srv.prepare_web_root(self.web, self.novnc, real_static)
+        self.assertIn("human.html", report["staticCopied"])
+        self.assertTrue(report["human"])
+        with open(os.path.join(self.web, "automation", "human.html"),
+                  encoding="utf-8") as handle:
+            html = handle.read()
+        self.assertIn("mas-human", html)
+        self.assertRegex(html, r"automation\.js\?v=[0-9a-f]{10}")
+        self.assertRegex(html, r"automation\.css\?v=[0-9a-f]{10}")
+
     def test_copies_novnc_static_and_patches_vnc_html_once(self):
         report = srv.prepare_web_root(self.web, self.novnc, self.static)
         self.assertTrue(report["novncCopied"])

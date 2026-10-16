@@ -433,7 +433,7 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
 async function mount({ readyStateComplete = true, standalone = true, flow = null,
                       status: statusPayload = null, noAgent = false,
                       clipText = null, supaEmpty = false, supaOn = false,
-                      uiPrefs = null, token = null } = {}) {
+                      uiPrefs = null, token = null, human = false } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -451,6 +451,9 @@ async function mount({ readyStateComplete = true, standalone = true, flow = null
   // know it is the whole page rather than an overlay inside noVNC. It also
   // ships an empty header the sidebar fills with title, tabs, dot and the
   // desktop-view button (see panel.html).
+  // Round 27, item 6: human.html is its own page whose body carries the
+  // mas-human class; the sidebar reads it and builds the dedicated panel.
+  if (human) window.document.body.classList.add('mas-human');
   if (standalone) {
     window.document.body.classList.add('mas-standalone');
     const head = window.document.createElement('header');
@@ -1553,6 +1556,78 @@ test('round 27: the database section carries the coworker-agent reports', async 
     assert.ok(pane.querySelector('.mas-report.is-bad'),
       'a failed step must be marked');
     assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 27: the dedicated human panel carries handoffs and brain choices', async () => {
+  // Item 6: the third panel. It reads the one shared run-state, so acting
+  // here advances the flow exactly like acting on the other two.
+  const status = {
+    runId: 'r-human', status: 'waiting', index: 0, stepCount: 2, elapsedMs: 10,
+    currentStep: null,
+    awaitingConfirmation: {
+      index: 0, label: 'verify page', type: 'python', kind: 'challenge',
+      message: 'Review the page yourself.', pageOrigin: 'https://example.com',
+      publicShot: 'challenge-2.png',
+    },
+    entries: [], results: [], handoffs: [],
+  };
+  const page = await mount({ human: true, status, token: VALID_TOKEN });
+  try {
+    assert.ok(page.doc.getElementById('mas-human-root'),
+      'the human panel root is missing');
+    assert.equal(page.doc.getElementById('mas-panel'), null,
+      'the human panel must not drag the big panel along');
+    const card = () => page.doc.getElementById('mas-desktop-handoff');
+    assert.ok(await page.until(() => card() && !card().hidden),
+      'the handoff card never appeared on the human panel');
+    assert.equal(card().parentElement.id, 'mas-human-root',
+      'the card must sit inside the page flow of the human panel');
+    assert.ok(page.doc.getElementById('mas-human-empty').hidden,
+      'the idle note must hide while an intervention is needed');
+
+    // the brain's open suggestion is a human choice too
+    assert.ok(await page.until(() => {
+      const sug = page.doc.getElementById('mas-human-suggestion');
+      return sug && !sug.hidden && sug.textContent.includes('my operation');
+    }, 3000), 'the brain suggestion never appeared on the human panel');
+
+    // acting from the third panel advances the one shared flow
+    page.doc.getElementById('mas-desktop-approve')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(20);
+    const posted = page.posts.find((p) => p.url.endsWith('/control'));
+    assert.ok(posted, 'the human panel did not call the control endpoint');
+    assert.deepEqual(JSON.parse(posted.body), { action: 'confirm', approve: true });
+
+    // ... and the brain's suggestion can be run from here as well
+    const runBtn = Array.from(
+      page.doc.querySelectorAll('#mas-human-suggestion button'))
+      .find((b) => b.textContent.includes('\u25b6'));
+    assert.ok(runBtn, 'the run button is missing');
+    runBtn.dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.posts.some((p) => p.url.endsWith('/agent/brain/suggestion')),
+      2000);
+    const decision = page.posts.find((p) => p.url.endsWith('/agent/brain/suggestion'));
+    assert.deepEqual(JSON.parse(decision.body), { id: 'sug1', action: 'run' });
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 27: the human panel shows its idle note when nothing is needed', async () => {
+  const page = await mount({ human: true, token: VALID_TOKEN, noAgent: true });
+  try {
+    const idle = page.doc.getElementById('mas-human-empty');
+    assert.ok(await page.until(() => idle && !idle.hidden),
+      'the idle note never appeared');
+    assert.ok(idle.textContent.includes('\u0627\u0642\u062f\u0627\u0645 \u0627\u0646\u0633\u0627\u0646\u06cc'),
+      'the idle note must promise the card appears when needed');
+    // no suggestion (no agent attached) => the suggestion card stays away
+    assert.ok(page.doc.getElementById('mas-human-suggestion').hidden);
   } finally {
     await page.cleanup();
   }
