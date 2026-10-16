@@ -517,6 +517,9 @@ async function refreshAgentTabs() {
       if (str(prefs['ui.agentSub'])) state.agentSub = prefs['ui.agentSub'];
       if (str(prefs['ui.tgSub'])) state.tgSub = prefs['ui.tgSub'];
       if (str(prefs['ui.dbSub'])) state.dbSub = prefs['ui.dbSub'];
+      if (prefs['ui.reportsKind'] !== undefined && prefs['ui.reportsKind'] !== null) {
+        state.reportsKind = String(prefs['ui.reportsKind']);
+      }
       if (str(prefs['ui.brainSub'])) state.brainSub = prefs['ui.brainSub'];
       let panelPref = null;
       if (prefs['ui.panel'] === '1' || prefs['ui.panel'] === '0') {
@@ -4842,7 +4845,7 @@ async function renderDatabase() {
   // texts all live under the database tab as sub-tabs.
   // Round 27, item 3: 'letters' is the dedicated home of the two-way mail
   // between the operator and the coworker agent.
-  const subs = ['backups', 'letters', 'shots', 'texts'];
+  const subs = ['backups', 'letters', 'reports', 'shots', 'texts'];
   const active = subs.includes(state.dbSub) ? state.dbSub : 'backups';
   const host = el('div', { class: 'mas-subhost' });
   replace(pane,
@@ -4856,7 +4859,63 @@ async function renderDatabase() {
   if (active === 'shots') return renderShots(host);
   if (active === 'texts') return renderTexts(host);
   if (active === 'letters') return renderLetters(host);
+  if (active === 'reports') return renderReports(host);
   return renderBackups(host);
+}
+
+/* Round 27, item 5: «گزارشات ایجنت همکار» - every message the operator sends
+ * the agent produces a precise, timestamped report of what the agent did,
+ * and the brain's and the scheduler's streams are one click away. The
+ * operator reads everything here; nothing about the database is hidden. */
+async function renderReports(host) {
+  const pane = host;
+  replace(pane, el('p', { class: 'mas-empty', text: '…' }));
+  // '' is a real value here: it means "every stream" (the all-filter).
+  const kind = state.reportsKind === undefined || state.reportsKind === null
+    ? 'agent' : String(state.reportsKind);
+  let data;
+  try {
+    data = await api(`/agent/reports?kind=${encodeURIComponent(kind)}&limit=200`);
+  } catch (error) {
+    replace(pane, el('p', { class: 'mas-warn', text: error.message || String(error) }));
+    return;
+  }
+  const reports = data.reports || [];
+  const kinds = [['agent', 'reportsKindAgent'], ['brain', 'reportsKindBrain'],
+    ['scheduler', 'reportsKindScheduler'], ['', 'reportsKindAll']];
+  const filterRow = el('div', { class: 'mas-row mas-wrap' }, kinds.map((pair) =>
+    button(t(pair[1]), () => {
+      state.reportsKind = pair[0];
+      saveUiPref('reportsKind', pair[0]);
+      renderDatabase();
+    }, { class: 'mas-btn' + (pair[0] === kind ? ' mas-primary' : '') })));
+  const listCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [
+      el('b', { text: '📜 ' + t('reportsTitle') }),
+      button('🔄', () => renderDatabase(), { class: 'mas-btn' }),
+    ]),
+    el('p', { class: 'mas-hint', text: t('reportsHint') }),
+    filterRow,
+    reports.length ? el('div', { class: 'mas-reports' }, reports.map((row) => el('div', {
+      class: 'mas-report' + (row.ok ? '' : ' is-bad'),
+    }, [
+      el('div', { class: 'mas-report-head' }, compact([
+        el('span', { class: 'mas-report-t', text: formatDateTime(row.at) }),
+        el('span', {
+          class: 'mas-badge ' + (row.kind === 'agent' ? 'mas-badge-agent'
+            : row.kind === 'brain' ? 'mas-badge-brain' : 'mas-badge-user'),
+          text: row.kind === 'agent' ? '🤖 ' + t('reportsKindAgent')
+            : row.kind === 'brain' ? '🧠 ' + t('reportsKindBrain')
+              : '⏰ ' + t('reportsKindScheduler'),
+        }),
+        row.phase ? el('span', { class: 'mas-chip', text: row.phase }) : null,
+        row.ok ? null
+          : el('span', { class: 'mas-chip mas-chip-bad', text: t('reportsBad') }),
+      ])),
+      el('div', { class: 'mas-report-msg', text: row.message || '' }),
+    ]))) : el('p', { class: 'mas-hint', text: t('reportsEmpty') }),
+  ]);
+  replace(pane, listCard);
 }
 
 /* Round 27, item 3: نامه‌ها - the letter box between the operator and the

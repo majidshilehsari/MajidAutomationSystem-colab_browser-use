@@ -62,6 +62,7 @@ PLAIN_SETTINGS = {
     "ui.agentSub": str,
     "ui.tgSub": str,
     "ui.dbSub": str,
+    "ui.reportsKind": str,
     "ui.brainSub": str,
     "ui.panel": str,
     "ui.chatProvider": str,
@@ -690,7 +691,16 @@ class AgentHub:
 
     def chat(self, prompt: str, actor: str = "operator") -> Dict[str, Any]:
         """Ask, and if the answer contains a flow, validate it for the operator."""
-        reply = self.ask(prompt, actor=actor)
+        # Round 27, item 5: every request to the coworker agent is reported
+        # with its exact timestamp - what was asked and what the agent did.
+        self._report_agent("درخواست دستیار",
+                           "کاربر از دستیار پرسید: «%s»" % str(prompt)[:400])
+        try:
+            reply = self.ask(prompt, actor=actor)
+        except AgentError as exc:
+            self._report_agent("درخواست دستیار",
+                               "دستیار شکست خورد: %s" % exc, ok=False)
+            raise
         out: Dict[str, Any] = {"text": reply.get("text", ""),
                                "provider": reply.get("provider"),
                                "elapsed": reply.get("elapsed"),
@@ -701,7 +711,23 @@ class AgentHub:
             out["flow"] = normalized if not errors else parsed
             out["flowErrors"] = errors
             out["flowValid"] = not errors
+        summary = "دستیار پاسخ داد (provider: %s%s)." % (
+            out.get("provider") or "-",
+            "، %.1f ثانیه" % float(out["elapsed"]) if out.get("elapsed") else "")
+        if out.get("flow"):
+            summary += " جریان اتوماسیون هم پیشنهاد داد (%d مرحله، معتبر: %s)." % (
+                len((out["flow"] or {}).get("steps") or []),
+                "بله" if out.get("flowValid") else "نه")
+        self._report_agent("پاسخ دستیار", summary)
         return out
+
+    def _report_agent(self, phase: str, message: str, ok: bool = True) -> None:
+        """One line of the coworker-agent report stream (round 27, item 5);
+        reporting must never break the turn itself."""
+        try:
+            self.store.add_step_report("agent", phase, message, ok=ok)
+        except Exception:  # noqa: BLE001
+            pass
 
     # -- the chat tab ----------------------------------------------------
     def chat_providers(self) -> List[str]:
@@ -743,6 +769,8 @@ class AgentHub:
             raise AgentError("a message is required")
         name = str(provider or self.llm.chat_provider())
         user = self.store.add_chat("user", str(text), provider=name, actor=actor)
+        self._report_agent("پیام کاربر",
+                           "کاربر به ایجنت همکار پیام داد: «%s»" % str(text)[:400])
         assistant = self.store.add_chat("assistant", "", provider=name,
                                         status="thinking", actor=actor)
         thread = threading.Thread(
@@ -823,10 +851,21 @@ class AgentHub:
                                    status="done", meta=meta)
             self.store.audit(actor, "chat.answer",
                              "%d chars via %s" % (len(body), provider))
+            elapsed = reply.get("elapsed")
+            summary = "به پیام «%s» پاسخ داد: %d کاراکتر (provider: %s%s)." % (
+                str(text)[:120], len(body), provider or "-",
+                "، %.1f ثانیه" % float(elapsed) if elapsed else "")
+            if meta.get("flow"):
+                summary += " جریان اتوماسیون هم پیشنهاد داد (%d مرحله)." % len(
+                    (meta["flow"] or {}).get("steps") or [])
+            self._report_agent("پاسخ", summary)
         except Exception as exc:  # noqa: BLE001 - the pane shows this, not a 500
             self.store.update_chat(assistant_id, status="failed",
                                    error=str(exc)[:500])
             self.store.audit(actor, "chat.failed", str(exc)[:300])
+            self._report_agent(
+                "پاسخ", "پاسخ به پیام «%s» شکست خورد: %s" % (str(text)[:120], exc),
+                ok=False)
 
     def chat_apply_flow(self, message_id: str, actor: str = "operator") -> Dict[str, Any]:
         """Save a flow the model proposed inside a chat answer, under a name

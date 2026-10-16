@@ -363,13 +363,20 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
       return json({ cursor: { enabled: true, size: 44, color: '#ffd400',
                               outline: '#1b1b1b', ripple: true, applied: true } });
     }
-    if (clean.startsWith('/automation/api/agent/reports')
-        || clean.endsWith('/agent/reports')) {
-      return json({ reports: [
-        { id: 9, at: 1760000900, kind: 'brain',
+    if (clean.endsWith('/agent/reports')) {
+      const wanted = (path.split('kind=')[1] || '').split('&')[0];
+      const all = [
+        { id: 3, at: 1760000950, kind: 'agent',
+          phase: '\u067e\u06cc\u0627\u0645 \u06a9\u0627\u0631\u0628\u0631',
+          message: '\u06a9\u0627\u0631\u0628\u0631 \u0628\u0647 \u0627\u06cc\u062c\u0646\u062a \u0647\u0645\u06a9\u0627\u0631 \u067e\u06cc\u0627\u0645 \u062f\u0627\u062f.', ok: 1 },
+        { id: 2, at: 1760000900, kind: 'brain',
           phase: '\u0645\u0634\u0627\u0647\u062f\u0647',
           message: '\u0686\u0631\u062e\u0647\u0654 \u0645\u0634\u0627\u0647\u062f\u0647: \u0645\u06cc\u0632 \u0622\u0632\u0627\u062f \u0627\u0633\u062a.', ok: 1 },
-      ] });
+        { id: 1, at: 1760000800, kind: 'scheduler',
+          phase: '\u0646\u062a\u06cc\u062c\u0647',
+          message: '\u0648\u0638\u06cc\u0641\u0647 \u062a\u0645\u0627\u0645 \u0634\u062f.', ok: 0 },
+      ];
+      return json({ reports: wanted ? all.filter((row) => row.kind === wanted) : all });
     }
     if (clean.endsWith('/agent/letters')) {
       return json({
@@ -1512,6 +1519,45 @@ test('round 27: the brain tab shows the continuous step report', async () => {
   }
 });
 
+test('round 27: the database section carries the coworker-agent reports', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'db');
+    clickDbSub(page, 'reports');
+    const pane = page.doc.getElementById('mas-tab-db');
+    assert.ok(await page.until(() => pane.querySelectorAll('.mas-report').length === 1),
+      'the agent reports never listed: ' + pane.textContent);
+    assert.ok(page.requests.some((u) => u.includes('/agent/reports')
+      && u.includes('kind=agent')),
+      'the default filter must ask for the coworker-agent stream');
+    assert.ok(pane.textContent.includes('\u067e\u06cc\u0627\u0645 \u06a9\u0627\u0631\u0628\u0631'),
+      'the phase chip is missing');
+    assert.match(pane.querySelector('.mas-report-t').textContent,
+      /\d{4}-\d{2}-\d{2} \d{2}:\d{2}/, 'reports must carry exact timestamps');
+
+    // one click reads the brain stream, another the scheduler's
+    const brainBtn = Array.from(pane.querySelectorAll('button'))
+      .find((b) => b.textContent.trim() === '\u0645\u063a\u0632');
+    assert.ok(brainBtn, 'the brain filter button is missing');
+    brainBtn.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.requests.some((u) => u.includes('kind=brain')),
+      2000));
+    assert.ok(await page.until(() => pane.textContent.includes('\u0686\u0631\u062e\u0647\u0654 \u0645\u0634\u0627\u0647\u062f\u0647')),
+      'the brain stream never rendered');
+    const allBtn = Array.from(pane.querySelectorAll('button'))
+      .find((b) => b.textContent.trim() === '\u0647\u0645\u0647');
+    allBtn.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => pane.querySelectorAll('.mas-report').length === 3),
+      'the all-filter must list every stream');
+    assert.ok(pane.querySelector('.mas-report.is-bad'),
+      'a failed step must be marked');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
 test('the click-capture layer is gone with the record tab', async () => {
   const page = await mount();
   try {
@@ -2584,7 +2630,8 @@ test('the database tab groups backups, letters, screenshots and texts', async ()
     const labels = Array.from(page.doc.querySelectorAll('#mas-tab-db [data-dbsub]'))
       .map((node) => node.textContent.trim());
     assert.deepEqual(labels,
-      ['پشتیبان‌گیری', 'نامه‌ها', 'اسکرین‌شات‌ها', 'متون استخراج‌شده']);
+      ['پشتیبان‌گیری', 'نامه‌ها', 'گزارشات ایجنت همکار',
+       'اسکرین‌شات‌ها', 'متون استخراج‌شده']);
     assert.ok(await page.until(() =>
       page.doc.getElementById('mas-tab-db').textContent.includes('mas-backup-test') ||
       page.doc.getElementById('mas-tab-db').textContent.includes('پشتیبان')),

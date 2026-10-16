@@ -1719,14 +1719,16 @@ class AgentApiTest(TempDirCase):
     def test_ui_preferences_round_trip_through_the_database(self):
         from automation.agent import PLAIN_SETTINGS
         for key in ("ui.theme", "ui.lang", "ui.tab", "ui.agentSub", "ui.tgSub",
-                    "ui.dbSub", "ui.panel", "ui.chatProvider", "ui.chatContext"):
+                    "ui.dbSub", "ui.panel", "ui.chatProvider", "ui.chatContext",
+                    "ui.reportsKind"):
             self.assertIn(key, PLAIN_SETTINGS,
                           "%s must be storable or prefs die silently" % key)
         status, _payload = self.call("POST", "/agent/settings", {
             "ui.theme": "dark", "ui.lang": "en", "ui.tab": "db",
             "ui.agentSub": "telegram", "ui.tgSub": "targets",
             "ui.dbSub": "shots", "ui.panel": "1",
-            "ui.chatProvider": "deepseek", "ui.chatContext": "0"})
+            "ui.chatProvider": "deepseek", "ui.chatContext": "0",
+            "ui.reportsKind": "brain"})
         self.assertEqual(status, 200)
         status, index = self.call("GET", "/agent")
         self.assertEqual(status, 200)
@@ -2375,6 +2377,65 @@ class ChatTabTest(HubCase):
         result = hub.chat_clear()
         self.assertGreaterEqual(result["cleared"], 2)
         self.assertEqual(hub.chat_messages(), [])
+
+
+    def test_every_user_message_produces_timestamped_agent_reports(self):
+        # Round 27, item 5: every message the operator sends the coworker
+        # agent must leave a precise, timestamped report of what it did.
+        hub, _, _ = self.build(llm=FakeLlm("جواب ایجنت"))
+        hub.chat_send("سلام ایجنت همکار")
+        self.join_chat(hub)
+        reports = hub.store.list_step_reports("agent")
+        phases = [row["phase"] for row in reports]
+        self.assertIn("پیام کاربر", phases)
+        self.assertIn("پاسخ", phases)
+        message = [row for row in reports if row["phase"] == "پیام کاربر"][0]
+        self.assertIn("سلام ایجنت همکار", message["message"])
+        answer = [row for row in reports if row["phase"] == "پاسخ"][0]
+        self.assertTrue(answer["ok"])
+        self.assertIn("پاسخ داد", answer["message"])
+        self.assertTrue(all(row["at"] > 0 for row in reports),
+                        "every report carries an exact timestamp")
+
+    def test_a_failed_turn_is_reported_as_not_ok(self):
+        class Broken(FakeLlm):
+            def complete(self, *args, **kwargs):
+                raise RuntimeError("model is down")
+
+        hub, _, _ = self.build(llm=Broken("x"))
+        hub.chat_send("سلام")
+        self.join_chat(hub)
+        bad = [row for row in hub.store.list_step_reports("agent")
+               if not row["ok"]]
+        self.assertTrue(bad, "a failed turn must be reported with ok=0")
+        self.assertIn("شکست خورد", bad[0]["message"])
+
+    def test_the_assistant_path_reports_too(self):
+        hub, _, _ = self.build(llm=FakeLlm("پاسخ دستیار"))
+        out = hub.chat("یک سؤال مهم")
+        self.assertEqual(out["text"], "پاسخ دستیار")
+        phases = [row["phase"] for row in hub.store.list_step_reports("agent")]
+        self.assertIn("درخواست دستیار", phases)
+        self.assertIn("پاسخ دستیار", phases)
+
+    def test_reports_route_filters_by_kind(self):
+        hub, backend, flows = self.build(llm=FakeLlm("باشه"))
+        hub.chat_send("سلام")
+        self.join_chat(hub)
+        hub.brain._report("مشاهده", "خطی از مغز")
+        hub.store.add_step_report("scheduler", "صف", "خطی از زمان‌بند")
+        api = self.api_for(hub, backend, flows)
+        status, payload = self.call(api, "GET", "/agent/reports",
+                                    query={"kind": ["agent"]})
+        self.assertEqual(status, 200)
+        self.assertTrue(payload["reports"])
+        self.assertEqual({row["kind"] for row in payload["reports"]}, {"agent"})
+        status, payload = self.call(api, "GET", "/agent/reports",
+                                    query={"kind": ["brain"]})
+        self.assertEqual({row["kind"] for row in payload["reports"]}, {"brain"})
+        status, payload = self.call(api, "GET", "/agent/reports")
+        self.assertEqual({row["kind"] for row in payload["reports"]},
+                         {"agent", "brain", "scheduler"})
 
 
 class LettersTest(HubCase):

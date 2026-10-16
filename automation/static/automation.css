@@ -2267,6 +2267,18 @@ body.mas-desktop-dark #noVNC_transition_text {
 }
 .mas-badge-user { background: rgba(61, 139, 253, 0.18); }
 .mas-badge-agent { background: rgba(126, 87, 194, 0.22); }
+
+/* Round 27, item 5: the coworker-agent reports stream. */
+.mas-reports { display: flex; flex-direction: column; gap: 6px; }
+.mas-report {
+  border: 1px solid var(--mas-border, rgba(128, 128, 128, 0.3));
+  border-radius: 8px; padding: 6px 10px;
+}
+.mas-report.is-bad { border-color: #f87171; }
+.mas-report-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.mas-report-t { color: var(--mas-muted, #94a3b8); font-size: 12px; }
+.mas-report-msg { font-size: 13px; margin-top: 2px; word-break: break-word; }
+.mas-chip-bad { color: #f87171; }
 .mas-desktop-launcher .mas-launcher-btn {
   display: inline-flex;
   align-items: center;
