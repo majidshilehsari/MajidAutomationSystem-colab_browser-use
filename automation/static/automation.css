@@ -400,12 +400,12 @@ html[data-theme='dark'] {
 
 #mas-root .mas-step-label:hover { color: var(--mas-accent); }
 
-#mas-root .mas-type {
+/* Round 26: the step number reads before the enable checkbox: «مرحلهٔ ۱». */
+#mas-root .mas-step-no {
   color: var(--mas-dim);
-  font-size: 10.5px;
-  background: var(--bg-solid);
-  border-radius: 3px;
-  padding: 1px 4px;
+  font-size: 11px;
+  white-space: nowrap;
+  padding: 0 2px;
 }
 
 #mas-root .mas-editor {
@@ -440,19 +440,6 @@ html[data-theme='dark'] {
 #mas-root .mas-status-error { color: var(--mas-bad); }
 #mas-root .mas-status-waiting { color: var(--mas-warn); }
 #mas-root .mas-status-stopped, #mas-root .mas-status-paused { color: var(--mas-warn); }
-
-/* ----------------------------------------------------------- record layer */
-
-#mas-root .mas-record-layer {
-  position: fixed;
-  z-index: 99999;
-  cursor: crosshair;
-  background: rgba(15, 118, 110, 0.05);
-  outline: 2px dashed rgba(61, 139, 253, 0.75);
-  outline-offset: -2px;
-}
-
-#mas-root .mas-record-layer:focus { outline-color: var(--mas-accent); }
 
 /* ------------------------------------------------------------ confirm box */
 
@@ -1328,6 +1315,14 @@ body.mas-standalone #mas-root .mas-chat-list { max-height: calc(100vh - 360px); 
 }
 
 #mas-root .mas-op-steprow input { direction: ltr; font-family: ui-monospace, monospace; }
+/* Round 26: operation steps are python programs with a Persian description. */
+#mas-root .mas-op-steprow-code { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
+#mas-root .mas-op-steprow-code .mas-step-no { flex: 0 0 auto; }
+#mas-root .mas-op-steprow-code input.mas-input { flex: 1 1 160px; direction: rtl; font-family: inherit; }
+#mas-root .mas-op-steprow-code textarea {
+  flex: 1 0 100%; direction: ltr; font-family: ui-monospace, monospace;
+}
+#mas-root .mas-badge-brain { border-color: var(--mas-accent); color: var(--mas-accent); }
 
 /* ------------------------------------------------------------------ *
  * Agent key, endpoints, and the pointer

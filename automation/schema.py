@@ -157,10 +157,16 @@ STEP_DOCS: Dict[str, Dict[str, str]] = {
         "en": "Deliberate pause for a human (CAPTCHA, MFA, consent). Not solved."},
     "shell": {"fa": "اجرای یک دستور shell روی دسکتاپ (با احتیاط: بدون sandbox).",
               "en": "Run a shell command on the desktop (no sandbox)."},
-    "python": {"fa": "اجرای کد پایتون با دسترسی کامل به میز: کلیک، تایپ، اسکرین‌شات، "
-                     "متن صفحه، حلقه و شرط؛ متغیرها بین گام‌های پایتون یک اجرا می‌مانند.",
-               "en": "Run Python code with full desk access: click, type, screenshot, "
-                     "page text, loops and ifs; vars survive across python steps of a run."},
+    "python": {"fa": "اجرای کد پایتون با دسترسی کامل به میز: check(click(...))، تایپ، "
+                     "اسکرین‌شات، capture_text، wait_for_text، human_verify، ask_agent، "
+                     "run_operation و log؛ حلقه و شرط آزاد است و متغیرها بین مرحله‌های "
+                     "پایتونِ یک اجرا می‌مانند. ابزارهای مغز: operations_list، "
+                     "brain_note و brain_suggest.",
+               "en": "Run Python code with full desk access: check(click(...)), typing, "
+                     "screenshots, capture_text, wait_for_text, human_verify, ask_agent, "
+                     "run_operation and log; loops and ifs are free and vars survive "
+                     "across the python steps of a run. Brain tools: operations_list, "
+                     "brain_note and brain_suggest."},
     "run_operation": {"fa": "اجرای یک عملیات از کتابخانه در دل این جریان (تودرتو).",
                       "en": "Run a library operation nested inside this flow."},
     "agent_open": {"fa": "باز کردن سایت چت در مرورگر اختصاصی ایجنت (نمایش :2).",

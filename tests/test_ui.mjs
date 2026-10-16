@@ -94,6 +94,13 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
       return { ok: false, status: 404,
                text: async () => '{"error":"no agent is attached to this deployment"}' };
     }
+    if (clean.endsWith('/convert')) {
+      // The real server translates the old vocabulary; the fixtures already
+      // speak python, so an honest pass-through is the same answer.
+      let body = {};
+      try { body = JSON.parse(options.body || '{}'); } catch (_) { /* keep {} */ }
+      return json({ ok: true, flow: body.flow || body });
+    }
     if (clean.endsWith('/agent')) {
       return json({
         settings: Object.assign({ 'ui.theme': 'dark' }, uiPrefs),
@@ -261,8 +268,10 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
           status: 'done', error: '', meta: {}, created_at: 1760000000 },
         { id: 'm2', role: 'assistant', provider: 'deepseek', status: 'done', error: '',
           body: '\u0633\u0644\u0627\u0645! \u0686\u0647 \u06a9\u0627\u0631\u06cc \u0627\u0646\u062c\u0627\u0645 \u0628\u062f\u0647\u0645\u061f\n```json\n'
-            + '{"name":"proposal","steps":[{"type":"click","x":10,"y":20}]}\n```',
-          meta: { flow: { name: 'proposal', steps: [{ type: 'click', x: 10, y: 20 }] },
+            + '{"name":"proposal","steps":[{"type":"python","code":"check(click(10, 20))"}]}\n```',
+          meta: { flow: { name: 'proposal', steps: [
+            { type: 'python', code: 'check(click(10, 20))',
+              label: '\u06a9\u0644\u06cc\u06a9 \u062f\u0631 (10\u060c 20)' }] },
                   elapsed: 4200 },
           created_at: 1760000010 },
         { id: 'm3', role: 'assistant', body: '', provider: 'deepseek',
@@ -273,29 +282,30 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
     if (clean.endsWith('/agent/chat/clear')) return json({ cleared: 3 });
     if (clean.endsWith('/agent/chat/apply-flow')) {
       return json({ flow: { name: 'proposal',
-        steps: [{ id: 'a', type: 'click', x: 10, y: 20, label: 'click 10,20' }] } });
+        steps: [{ id: 'a', type: 'python', code: 'check(click(10, 20))',
+                  label: '\u06a9\u0644\u06cc\u06a9 \u062f\u0631 (10\u060c 20)' }] } });
     }
     if (clean.endsWith('/agent/operations')) {
       return json({ operations: [
-        { id: 'op-builtin-lmarena', name: '\u0627\u062a\u0635\u0627\u0644 \u0628\u0647 \u0627\u06cc\u062c\u0646\u062a lmarena',
-          description: '\u0633\u0627\u06cc\u062a \u0631\u0627 \u0628\u0627\u0632 \u0645\u06cc\u200c\u06a9\u0646\u062f', kind: 'browser',
-          builtin: true, builtinKey: 'lmarena', permission: 'ask',
+        { id: 'op-builtin-lmarena', name: '\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 lmarena',
+          description: '\u0633\u0627\u06cc\u062a \u0631\u0627 \u0628\u0627\u0632 \u0645\u06cc\u200c\u06a9\u0646\u062f', kind: 'steps',
+          builtin: true, builtinKey: 'lmarena', permission: 'ask', scope: 'general',
           tags: ['chat'], steps: [
-            { type: 'agent_open', provider: 'lmarena', url: 'https://lmarena.ai/' },
-            { type: 'wait', ms: 1500 }],
+            { id: 'lm-1', type: 'python',
+              code: "check(goto('https://lmarena.ai/'))",
+              label: '\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 lmarena.ai' },
+            { id: 'lm-2', type: 'python', code: 'wait(3.5)',
+              label: '\u0635\u0628\u0631 \u0628\u0631\u0627\u06cc \u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc' }],
           created_at: 1760000000, updated_at: 1760000000, last_run_at: 1760000900,
           last_status: 'done', run_count: 3 },
-        { id: 'op-1', name: 'my operation', description: '', kind: 'custom',
-          builtin: false, builtinKey: '', permission: 'auto', tags: [],
-          steps: [{ type: 'click', x: 5, y: 6 }],
+        { id: 'op-1', name: 'my operation', description: '', kind: 'steps',
+          builtin: false, builtinKey: '', permission: 'auto', scope: 'brain',
+          tags: [], steps: [{ id: 'x1', type: 'python', code: 'check(click(5, 6))' }],
           created_at: 1760000000, updated_at: 1760000000, last_run_at: 0,
           last_status: '', run_count: 0 },
       ], stepTypes: {
-        click: { required: ['x', 'y'], optional: ['button'], common: ['waitAfterMs'],
-                 fa: '\u06a9\u0644\u06cc\u06a9', en: 'Click a point' },
-        wait: { required: [], optional: ['ms'], common: [], fa: '\u0635\u0628\u0631', en: 'Wait' },
-        agent_open: { required: [], optional: ['provider', 'url'], common: [],
-                      fa: '\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 \u0686\u062a', en: 'Open a chat' },
+        python: { required: ['code'], optional: ['timeout'], common: [],
+                  fa: '\u06a9\u062f \u067e\u0627\u06cc\u062a\u0648\u0646', en: 'Python code' },
       } });
     }
     if (clean.endsWith('/agent/brain')) {
@@ -321,7 +331,8 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
     }
     if (clean.endsWith('/agent/operation-run')) {
       return json({ started: true, id: 'op-1', status: 'running',
-                    flow: { name: 'my operation', steps: [{ type: 'click', x: 5, y: 6 }] } });
+                    flow: { name: 'my operation',
+                            steps: [{ type: 'python', code: 'check(click(5, 6))' }] } });
     }
     if (clean.endsWith('/agent/key')) {
       return json({ set: true, enabled: true, createdAt: 1759900000,
@@ -510,13 +521,47 @@ test('a valid flow renders the step list (the appendChild(null) crash)', async (
     assert.ok(pane, 'flow tab missing');
     assert.ok(pane.querySelector('.mas-steps'), 'step list was not rendered');
     assert.ok(pane.querySelector('.mas-empty'), 'the empty-state hint is missing');
-    assert.ok(page.byText('button', 'افزودن گام'), 'the add-step button is missing');
+    // Round 26: the add-step button is gone - the agent writes the steps
+    assert.ok(!page.byText('button', '\u0627\u0641\u0632\u0648\u062f\u0646 \u06af\u0627\u0645'));
+    assert.ok(!page.byText('button', '\u0627\u0641\u0632\u0648\u062f\u0646 \u0645\u0631\u062d\u0644\u0647'),
+      'the stages have no add button anymore; steps arrive from the agent');
   } finally {
     await page.cleanup();
   }
 });
 
-test('typing mode settings, per-step overrides and human-verification steps edit cleanly', async () => {
+test('the stages number every step before its checkbox', async () => {
+  const flow = {
+    name: '\u0634\u0645\u0627\u0631\u0647',
+    steps: [
+      { id: 'p1', type: 'python', code: 'wait(1)', label: '\u06cc\u06a9', enabled: true },
+      { id: 'p2', type: 'python', code: 'wait(2)', label: '\u062f\u0648', enabled: true },
+    ],
+    settings: { defaultDelayAfterMs: 0 },
+  };
+  const page = await mount({ flow });
+  try {
+    clickTab(page, 'flow');
+    await page.wait(10);
+    const rows = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-step'));
+    assert.equal(rows.length, 2);
+    const numbers = rows.map((row) => row.querySelector('.mas-step-no').textContent);
+    assert.deepEqual(numbers,
+      ['\u0645\u0631\u062d\u0644\u0647\u0654 1', '\u0645\u0631\u062d\u0644\u0647\u0654 2']);
+    // the number reads BEFORE the enable checkbox
+    const kinds = Array.from(rows[0].children).map((node) => {
+      if (node.classList.contains('mas-step-no')) return 'no';
+      if (node.type === 'checkbox') return 'check';
+      return 'other';
+    });
+    assert.ok(kinds.indexOf('no') < kinds.indexOf('check'),
+      'the step number must come before the checkbox: ' + kinds.join(','));
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('typing mode settings and python steps edit cleanly', async () => {
   const flow = {
     name: 'verification',
     viewport: { width: 1366, height: 768 },
@@ -524,15 +569,15 @@ test('typing mode settings, per-step overrides and human-verification steps edit
       screenshotAfterEachStep: false, stopOnError: true, allowShellSteps: false,
       stepTimeoutMs: 60000 },
     steps: [
-      { id: 't1', type: 'type', text: 'hello', label: 'type "hello"', enabled: true },
-      { id: 'h1', type: 'pause_for_human_verification',
-        prompt: 'لطفاً این مرحله را خودت بررسی کن.', label: 'pause for human verification', enabled: true },
+      { id: 't1', type: 'python', code: "check(type_text('hello', mode='fast'))",
+        label: '\u062a\u0627\u06cc\u067e \u00abhello\u00bb', enabled: true },
+      { id: 'h1', type: 'python',
+        code: "check(human_verify('\u0644\u0637\u0641\u0627\u064b \u0627\u06cc\u0646 \u0645\u0631\u062d\u0644\u0647 \u0631\u0627 \u062e\u0648\u062f\u062a \u0628\u0631\u0631\u0633\u06cc \u06a9\u0646.'))",
+        label: '\u0628\u0631\u0631\u0633\u06cc \u0627\u0646\u0633\u0627\u0646\u06cc', enabled: true },
     ],
   };
   const page = await mount({ flow });
   try {
-    // The panel opens on the chat tab now, so the stages are drawn on
-    // demand like every other pane.
     clickTab(page, 'flow');
     await page.wait(10);
     // Round 25: the flow settings open from the gear button as a modal.
@@ -550,24 +595,25 @@ test('typing mode settings, per-step overrides and human-verification steps edit
     const savedSettings = JSON.parse(page.window.localStorage.getItem('mas.flow'));
     assert.equal(savedSettings.settings.errorOperation, 'op-builtin-captcha');
 
+    // Round 26: the step editor is the python program - one tall textarea
     const typeLabel = Array.from(page.doc.querySelectorAll('.mas-step-label'))
       .find((button) => button.textContent.includes('hello'));
     typeLabel.dispatchEvent(new page.window.Event('click'));
-    const stepMode = page.doc.querySelector('.mas-editor select');
-    assert.ok(stepMode, 'per-step typing-mode selector is missing');
-    assert.equal(stepMode.value, 'inherit');
-    stepMode.value = 'fast';
-    stepMode.dispatchEvent(new page.window.Event('change'));
+    const codeArea = page.doc.querySelector('.mas-editor textarea');
+    assert.ok(codeArea, 'the python code editor is missing');
+    assert.equal(codeArea.value, "check(type_text('hello', mode='fast'))");
+    codeArea.value = "check(type_text('hello', mode='low'))";
+    codeArea.dispatchEvent(new page.window.Event('input'));
     page.doc.querySelector('.mas-editor button').dispatchEvent(new page.window.Event('click'));
     const saved = JSON.parse(page.window.localStorage.getItem('mas.flow'));
-    assert.equal(saved.steps[0].typingMode, 'fast');
+    assert.equal(saved.steps[0].code, "check(type_text('hello', mode='low'))");
 
     const pauseLabel = Array.from(page.doc.querySelectorAll('.mas-step-label'))
-      .find((button) => button.textContent.includes('pause for human'));
+      .find((button) => button.textContent.includes('\u0628\u0631\u0631\u0633\u06cc \u0627\u0646\u0633\u0627\u0646\u06cc'));
     pauseLabel.dispatchEvent(new page.window.Event('click'));
     const prompt = page.doc.querySelector('.mas-editor textarea');
-    assert.ok(prompt, 'human verification prompt editor is missing');
-    assert.equal(prompt.value, 'لطفاً این مرحله را خودت بررسی کن.');
+    assert.ok(prompt, 'the human-verification step edits as code too');
+    assert.ok(prompt.value.includes('human_verify('));
     assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
@@ -680,22 +726,20 @@ test('tabs swap panes and only one is visible', async () => {
   }
 });
 
-test('adding a step through the UI creates a row', async () => {
+test('the stages have no add-step button: the agent writes the steps', async () => {
   const page = await mount();
   try {
-    // The panel opens on the chat tab now, so the stages are drawn on
-    // demand like every other pane.
     clickTab(page, 'flow');
     await page.wait(10);
     const pane = page.doc.getElementById('mas-tab-flow');
-    const select = pane.querySelector('select');
-    select.value = 'click';
-    page.byText('button', 'افزودن گام').dispatchEvent(new page.window.Event('click'));
-
-    const rows = pane.querySelectorAll('.mas-step');
-    assert.equal(rows.length, 1, 'no step row appeared');
-    assert.ok(rows[0].textContent.includes('click 0,0'), `unexpected row: ${rows[0].textContent}`);
-    assert.equal(pane.querySelector('.mas-empty'), null, 'the empty hint should be gone');
+    // Round 26: no type picker and no add button remain in the stages
+    assert.equal(pane.querySelector('select'), null,
+      'no step-type picker may remain in the stages');
+    const addButtons = Array.from(pane.querySelectorAll('button'))
+      .filter((node) => /\u0627\u0641\u0632\u0648\u062f\u0646/.test(node.textContent));
+    assert.deepEqual(addButtons, []);
+    // and the record tab is gone with it
+    assert.equal(page.doc.getElementById('mas-tab-record'), null);
   } finally {
     await page.cleanup();
   }
@@ -805,7 +849,8 @@ test('step list shows no numbering and options are styled dark', async () => {
 });
 
 /** Tabs by name. The brain comes first (round 25), then chat. */
-const TAB_ORDER = ['brain', 'chat', 'library', 'flow', 'record', 'pages',
+// Round 26: the record tab is gone from the panel.
+const TAB_ORDER = ['brain', 'chat', 'library', 'flow', 'pages',
   'db', 'ops', 'settings', 'agent', 'log'];
 
 function tab(page, name) {
@@ -829,63 +874,69 @@ function clickBrainSub(page, name) {
 
 
 
-test('editing a step refreshes its label instead of keeping paste ""', async () => {
-  const page = await mount();
+test('editing a step refreshes its label instead of keeping the fallback', async () => {
+  // Round 26, the same honesty in python: a step with empty code reads as
+  // «پایتون»; once real code is typed, the row shows the program's first line.
+  const flow = {
+    name: 'labels',
+    steps: [{ id: 'p1', type: 'python', code: '', enabled: true }],
+    settings: { defaultDelayAfterMs: 0 },
+  };
+  const page = await mount({ flow });
   try {
-    // The panel opens on the chat tab now, so the stages are drawn on
-    // demand like every other pane.
     clickTab(page, 'flow');
     await page.wait(10);
     const pane = page.doc.getElementById('mas-tab-flow');
-    const select = pane.querySelector('select');
-    select.value = 'paste';
-    page.byText('button', 'افزودن گام').dispatchEvent(new page.window.Event('click'));
-
     const row = pane.querySelector('.mas-step');
-    assert.ok(row.textContent.includes('paste ""'), 'expected an empty label first');
+    assert.ok(row.textContent.includes('\u067e\u0627\u06cc\u062a\u0648\u0646'),
+      'expected the fallback label first: ' + row.textContent);
 
-    // Open the editor and type the text the user actually wants pasted.
     row.querySelector('.mas-step-label').dispatchEvent(new page.window.Event('click'));
     const field = (name) => Array.from(pane.querySelectorAll('.mas-editor label'))
       .find((l) => l.querySelector('span') && l.querySelector('span').textContent === name)
       .querySelector('input, textarea, select');
-    const text = field('text');
-    assert.ok(text, 'the text field is missing');
-    text.value = 'سلام دنیا';
-    text.dispatchEvent(new page.window.Event('input'));
+    const code = field('code');
+    assert.ok(code, 'the code field is missing');
+    code.value = "check(paste('\u0633\u0644\u0627\u0645 \u062f\u0646\u06cc\u0627'))";
+    code.dispatchEvent(new page.window.Event('input'));
     page.byText('button', 'OK').dispatchEvent(new page.window.Event('click'));
 
     const label = pane.querySelector('.mas-step .mas-step-label').textContent;
-    assert.ok(label.includes('سلام دنیا'), 'the label stayed stale: ' + label);
+    assert.ok(label.includes('\u0633\u0644\u0627\u0645 \u062f\u0646\u06cc\u0627'),
+      'the label stayed stale: ' + label);
   } finally {
     await page.cleanup();
   }
 });
 
 test('a hand written label survives editing the step', async () => {
-  const page = await mount();
+  const flow = {
+    name: 'labels',
+    steps: [{ id: 'p1', type: 'python', code: 'wait(1)',
+              label: '\u0646\u0648\u0634\u062a\u0646 \u062f\u0631 \u06af\u0648\u06af\u0644', enabled: true }],
+    settings: { defaultDelayAfterMs: 0 },
+  };
+  const page = await mount({ flow });
   try {
-    // The panel opens on the chat tab now, so the stages are drawn on
-    // demand like every other pane.
     clickTab(page, 'flow');
     await page.wait(10);
     const pane = page.doc.getElementById('mas-tab-flow');
-    pane.querySelector('select').value = 'paste';
-    page.byText('button', 'افزودن گام').dispatchEvent(new page.window.Event('click'));
     pane.querySelector('.mas-step .mas-step-label').dispatchEvent(new page.window.Event('click'));
-
     const field = (name) => Array.from(pane.querySelectorAll('.mas-editor label'))
       .find((l) => l.querySelector('span') && l.querySelector('span').textContent === name)
       .querySelector('input, textarea, select');
     const label = field('label');
-    label.value = 'نوشتن در گوگل';
+    assert.equal(label.value, '\u0646\u0648\u0634\u062a\u0646 \u062f\u0631 \u06af\u0648\u06af\u0644');
+    // touch the label so the editor knows it is hand written, then edit code
+    label.value = '\u0646\u0648\u0634\u062a\u0646 \u062f\u0631 \u06af\u0648\u06af\u0644';
     label.dispatchEvent(new page.window.Event('input'));
-    const text = field('text');
-    text.value = 'hello';
-    text.dispatchEvent(new page.window.Event('input'));
+    const code = field('code');
+    code.value = "check(type_text('hello'))";
+    code.dispatchEvent(new page.window.Event('input'));
     page.byText('button', 'OK').dispatchEvent(new page.window.Event('click'));
 
-    assert.equal(pane.querySelector('.mas-step .mas-step-label').textContent, 'نوشتن در گوگل');
+    assert.equal(pane.querySelector('.mas-step .mas-step-label').textContent,
+      '\u0646\u0648\u0634\u062a\u0646 \u062f\u0631 \u06af\u0648\u06af\u0644');
   } finally {
     await page.cleanup();
   }
@@ -927,7 +978,7 @@ test('the agent assistant sends the user request and an absolute origin', async 
   }
 });
 
-test('the standalone panel opens full page and explains recording', async () => {
+test('the standalone panel opens full page and has no record tab', async () => {
   const page = await mount({ standalone: true });
   try {
     // No collapse tab, and the panel is on screen without anyone clicking.
@@ -937,19 +988,14 @@ test('the standalone panel opens full page and explains recording', async () => 
     // A way back to the live desktop view, opening in a new tab.
     const link = page.doc.querySelector('.mas-desktop-link');
     assert.ok(link, 'no link to the desktop view');
-    assert.ok(link.textContent.includes('نمای دسکتاپ'), link.textContent);
+    assert.ok(link.textContent.includes('\u0646\u0645\u0627\u06cc \u062f\u0633\u06a9\u062a\u0627\u067e'), link.textContent);
     assert.equal(link.getAttribute('href'),
       '../vnc.html?autoconnect=true&resize=scale&path=websockify');
     assert.equal(link.getAttribute('target'), '_blank');
 
-    // Recording is the one thing that cannot work away from the browser view.
-    clickTab(page, 'record');
-    const pane = page.doc.getElementById('mas-tab-record');
-    assert.equal(pane.querySelectorAll('button').length, 1,
-      'only Clear should remain: ' + pane.textContent);
-    assert.ok(pane.querySelector('a[href^="../vnc.html?autoconnect"]'),
-      'no link to record from');
-    assert.ok(pane.textContent.length > 40, 'the explanation is missing');
+    // Round 26: recording is gone from the panel entirely.
+    assert.equal(page.doc.getElementById('mas-tab-record'), null);
+    assert.ok(!page.byText('button', '\u0636\u0628\u0637'));
   } finally {
     await page.cleanup();
   }
@@ -1267,10 +1313,11 @@ test('the texts tab lists saved text and can save a new note', async () => {
   }
 });
 
-test('record layer stays hidden until recording starts', async () => {
+test('the click-capture layer is gone with the record tab', async () => {
   const page = await mount();
   try {
-    assert.equal(page.display('#mas-record-layer'), 'none');
+    // Round 26: nothing captures raw clicks anymore
+    assert.equal(page.doc.getElementById('mas-record-layer'), null);
   } finally {
     await page.cleanup();
   }
@@ -1561,25 +1608,31 @@ test('sending a chat message posts the text and the provider', async () => {
   }
 });
 
-test('a flow the model proposed can be applied to the stages', async () => {
+test('the flow the model proposed goes straight into the stages', async () => {
   const page = await mount();
   try {
     await authenticate(page);
     clickTab(page, 'chat');
-    const applied = await page.until(() => Array.from(
-      page.doc.querySelectorAll('#mas-chat-list button'))
-      .some((node) => node.textContent.includes('⤓')));
-    assert.ok(applied, 'no apply button on the answer');
-    Array.from(page.doc.querySelectorAll('#mas-chat-list button'))
-      .find((node) => node.textContent.includes('⤓'))
-      .dispatchEvent(new page.window.Event('click'));
-    await page.wait(40);
-
+    // Round 26: the answer carrying a flow lands in the stages by itself,
+    // so the operator verifies the steps one by one without hunting buttons.
+    const moved = await page.until(() =>
+      page.doc.querySelector('.mas-tab.is-active').dataset.tab === 'flow');
+    assert.ok(moved, 'the agent flow did not go straight to the stages');
     assert.ok(page.posts.some((item) => item.url.endsWith('/agent/chat/apply-flow')),
       'apply-flow was never called');
-    assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'flow',
-      'applying a flow should take you to the stages');
     assert.equal(page.doc.querySelectorAll('#mas-tab-flow .mas-step').length, 1);
+    assert.ok(page.doc.querySelector('#mas-tab-flow').textContent
+      .includes('\u06a9\u0644\u06cc\u06a9 \u062f\u0631 (10\u060c 20)'),
+      'the Persian step label did not come across');
+    // going back to the chat, the manual apply button is still on the bubble
+    clickTab(page, 'chat');
+    const button = await page.until(() => Array.from(
+      page.doc.querySelectorAll('#mas-chat-list button'))
+      .some((node) => node.textContent.includes('\u2913')));
+    assert.ok(button, 'the bubble lost its manual apply button');
+    // and it does not yank the operator away a second time on its own
+    await page.wait(30);
+    assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'chat');
   } finally {
     await page.cleanup();
   }
@@ -1601,10 +1654,40 @@ test('the library lists operations, built-ins marked, before the stages tab', as
     assert.ok(listed, 'the operations never rendered');
     const cards = Array.from(page.doc.querySelectorAll('#mas-tab-library .mas-op'));
     assert.ok(cards[0].classList.contains('is-builtin'), 'the built-in is not marked');
-    assert.ok(cards[0].textContent.includes('اتصال به ایجنت lmarena'));
+    assert.ok(cards[0].textContent.includes('\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 lmarena'),
+      'the uniform builtin name is missing: ' + cards[0].textContent);
+    // round 26: every card reads its scope
+    assert.ok(cards[0].textContent.includes('\u0639\u0645\u0648\u0645\u06cc'),
+      'the general scope badge is missing');
+    assert.ok(cards[1].textContent.includes('\u0627\u062e\u062a\u0635\u0627\u0635\u06cc \u0645\u063a\u0632'),
+      'the brain-only scope badge is missing');
     assert.ok(cards[0].textContent.includes('آخرین اجرا'),
       'a built-in that ran should say when');
     assert.ok(cards[1].textContent.includes('هنوز اجرا نشده'));
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('the library flips an operation between general and brain-only', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'library');
+    // op-1 arrives from the fake with scope 'brain', so its card shows the
+    // brain button; one click must PUT the whole operation with 'general'.
+    const ready = await page.until(
+      () => page.byText('button',
+        '\ud83e\udde0 \u0627\u062e\u062a\u0635\u0627\u0635\u06cc \u0645\u063a\u0632') !== undefined);
+    assert.ok(ready, 'no scope toggle in the library');
+    page.byText('button', '\ud83e\udde0 \u0627\u062e\u062a\u0635\u0627\u0635\u06cc \u0645\u063a\u0632')
+      .dispatchEvent(new page.window.Event('click'));
+    await page.wait(40);
+    const sent = page.posts.find((item) => item.url.endsWith('/agent/operations/op-1'));
+    assert.ok(sent, 'the scope change was never sent');
+    const body = JSON.parse(sent.body);
+    assert.equal(body.scope, 'general');
+    assert.equal(body.name, 'my operation', 'the PUT must carry the whole operation');
   } finally {
     await page.cleanup();
   }
@@ -1617,20 +1700,27 @@ test('opening an operation puts its steps into the stages', async () => {
     clickTab(page, 'library');
     const ready = await page.until(() => Array.from(
       page.doc.querySelectorAll('#mas-tab-library button'))
-      .some((node) => node.textContent.includes('باز کردن در مراحل')));
+      .some((node) => node.textContent.includes('\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 \u062f\u0631 \u0645\u0631\u0627\u062d\u0644')));
     assert.ok(ready, 'no open button');
     Array.from(page.doc.querySelectorAll('#mas-tab-library button'))
-      .find((node) => node.textContent.includes('باز کردن در مراحل'))
+      .find((node) => node.textContent.includes('\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 \u062f\u0631 \u0645\u0631\u0627\u062d\u0644'))
       .dispatchEvent(new page.window.Event('click'));
     await page.wait(40);
 
     assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'flow');
-    const types = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-step .mas-type'))
+    // Round 26: the rows read by their Persian labels, numbered
+    const labels = Array.from(page.doc.querySelectorAll('#mas-tab-flow .mas-step-label'))
       .map((node) => node.textContent);
-    assert.deepEqual(types, ['agent_open', 'wait'], 'the steps did not come across');
+    assert.deepEqual(labels, [
+      '\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 lmarena.ai',
+      '\u0635\u0628\u0631 \u0628\u0631\u0627\u06cc \u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc',
+    ], 'the steps did not come across');
+    assert.equal(page.doc.querySelectorAll('#mas-tab-flow .mas-step-no').length, 2,
+      'every step row must carry its number');
     // The name field is the first input of the stages pane.
     assert.equal(page.doc.querySelector('#mas-tab-flow input').value,
-      'اتصال به ایجنت lmarena', 'the operation name should become the flow name');
+      '\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 lmarena',
+      'the operation name should become the flow name');
   } finally {
     await page.cleanup();
   }
@@ -1786,17 +1876,19 @@ test('step rows carry the pencil and the report, and the report writes notes', a
 });
 
 test('a python step edits as real code', async () => {
-  const page = await mount();
+  const flow = {
+    name: 'code',
+    steps: [{ id: 'p1', type: 'python', code: 'wait(1)', enabled: true }],
+    settings: { defaultDelayAfterMs: 0 },
+  };
+  const page = await mount({ flow });
   try {
     await authenticate(page);
     clickTab(page, 'flow');
-    await page.until(() => page.doc.querySelector('#mas-tab-flow select') !== null);
-    const select = page.doc.querySelector('#mas-tab-flow select');
-    select.value = 'python';
-    page.byText('button', '\u0627\u0641\u0632\u0648\u062f\u0646 \u06af\u0627\u0645')
-      .dispatchEvent(new page.window.Event('click'));
-    // open the fresh step with its pencil, then edit the code
     await page.until(() => page.doc.querySelector('.mas-step .mas-icon') !== null);
+    // round 26: no type picker remains in the stages
+    assert.equal(page.doc.querySelector('#mas-tab-flow select'), null);
+    // open the step with its pencil, then edit the code
     const pencil = Array.from(page.doc.querySelectorAll('.mas-step button'))
       .find((node) => node.textContent.includes('\u270e'));
     pencil.dispatchEvent(new page.window.Event('click'));
@@ -1810,16 +1902,11 @@ test('a python step edits as real code', async () => {
       .dispatchEvent(new page.window.Event('click'));
     await page.wait(20);
     const saved = JSON.parse(page.window.localStorage.getItem('mas.flow'));
-    const step = saved.steps[saved.steps.length - 1];
-    assert.equal(step.type, 'python');
-    assert.ok(step.code.includes("click(10, 20)"), 'the code was not saved');
-    // the row shows the honest label
-    assert.ok(page.doc.querySelector('#mas-tab-flow').textContent.includes('python (3 lines)'),
+    assert.equal(saved.steps[0].type, 'python');
+    assert.ok(saved.steps[0].code.includes('click(10, 20)'), 'the code was not saved');
+    // the row label reads the first line of the program
+    assert.ok(page.doc.querySelector('#mas-tab-flow').textContent.includes('for i in range(3):'),
       'the python label is wrong');
-    // run_operation is in the catalog too
-    assert.ok(Array.from(page.doc.querySelectorAll('#mas-tab-flow select option'))
-      .some((option) => option.value === 'run_operation'),
-      'run_operation is missing from the add-step list');
   } finally {
     await page.cleanup();
   }
@@ -2119,7 +2206,7 @@ test('without an agent the chat and library tabs disappear', async () => {
     assert.deepEqual(Array.from(
       page.doc.querySelectorAll('.mas-tabs:not(.mas-subtabs) .mas-tab'))
       .filter((node) => !node.hidden).map((node) => node.dataset.tab),
-    ['flow', 'record', 'pages', 'settings', 'agent', 'log']);
+    ['flow', 'pages', 'settings', 'agent', 'log']);
   } finally {
     await page.cleanup();
   }
@@ -2332,7 +2419,8 @@ test('the flow tab has one floating action line above the footer', async () => {
   const page = await mount({
     standalone: true,
     clipText: JSON.stringify({ name: '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
-      steps: [{ type: 'move', x: 5, y: 5 }] }),
+      steps: [{ type: 'python', code: 'check(move(5, 5))',
+                label: '\u062d\u0631\u06a9\u062a \u0628\u0647 (5\u060c 5)' }] }),
   });
   try {
     await authenticate(page);
@@ -2363,8 +2451,11 @@ test('the flow tab has one floating action line above the footer', async () => {
     clipBtn.dispatchEvent(new page.window.Event('click'));
     const flowPane = page.doc.getElementById('mas-tab-flow');
     // the imported step shows up in the list and the name lands in the input
-    assert.ok(await page.until(() => flowPane.textContent.includes('move 5,5')),
+    assert.ok(await page.until(() => flowPane.textContent
+      .includes('\u062d\u0631\u06a9\u062a \u0628\u0647 (5\u060c 5)')),
       'the clipboard flow never arrived: ' + flowPane.textContent.slice(0, 200));
+    assert.ok(page.posts.some((item) => item.url.endsWith('/convert')),
+      'the clipboard import must go through the server converter');
     assert.equal(flowPane.querySelector('input.mas-input').value,
       '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
       'the imported flow kept the wrong name');
@@ -2380,10 +2471,12 @@ test('the flow tab has one floating action line above the footer', async () => {
       'a denied browser clipboard must open the paste dialog');
     const area = page.doc.getElementById('mas-paste-area');
     area.value = JSON.stringify({ name: '\u062c\u0631\u06cc\u0627\u0646 \u0686\u0633\u0628\u0627\u0646',
-      steps: [{ type: 'move', x: 7, y: 7 }] });
+      steps: [{ type: 'python', code: 'check(move(7, 7))',
+                label: '\u062d\u0631\u06a9\u062a \u0628\u0647 (7\u060c 7)' }] });
     page.byText('button', '\u0648\u0627\u0631\u062f \u06a9\u0631\u062f\u0646')
       .dispatchEvent(new page.window.Event('click'));
-    assert.ok(await page.until(() => flowPane.textContent.includes('move 7,7')),
+    assert.ok(await page.until(() => flowPane.textContent
+      .includes('\u062d\u0631\u06a9\u062a \u0628\u0647 (7\u060c 7)')),
       'the pasted flow never arrived');
     assert.equal(page.doc.getElementById('mas-paste'), null,
       'the dialog must close after importing');

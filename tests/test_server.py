@@ -222,8 +222,10 @@ class ServerIntegrationTest(unittest.TestCase):
     def test_guide_is_served(self):
         status, body = http_request(self.url("/automation/api/guide"))
         self.assertEqual(status, 200)
-        self.assertIn("نوع گام‌ها".encode("utf-8"), body)
-        self.assertIn(b"pause_for_human_verification", body)
+        # round 26: the guide teaches the one language - python steps
+        self.assertIn("زبان مرحله‌ها".encode("utf-8"), body)
+        self.assertIn(b"human_verify", body)
+        self.assertIn("type\": \"python".encode("utf-8"), body)
         self.assertIn(b"CAPTCHA", body)
 
     def test_a_flow_name_with_a_space_can_be_saved(self):

@@ -7,14 +7,16 @@
  */
 
 import {
-  API_PREFIX, STEP_DEFS, createStep, labelFor, validateFlow, emptyFlow,
-  mapToDesktop, keysFromText, keysToText, moveStep, extractJson,
+  API_PREFIX, createStep, labelFor, validateFlow, emptyFlow,
+  moveStep, extractJson,
   normaliseImportedFlow, promptSteps, translate, formatElapsed, formatTime,
   stepDef, truncate, structuredCloneSafe, compact, formatDateTime,
 } from './core.mjs';
 
 /** Tab order, and the tab the panel opens on. */
-const TAB_ORDER = ['brain', 'chat', 'library', 'flow', 'record', 'pages',
+// Round 26: the record tab is gone - steps are written by the agent or
+// pasted in and translated; nothing is captured from raw clicks anymore.
+const TAB_ORDER = ['brain', 'chat', 'library', 'flow', 'pages',
   'db', 'ops', 'settings', 'agent', 'log'];
 const DEFAULT_TAB = 'brain';
 
@@ -29,7 +31,7 @@ const LS = {
   clip: 'mas.clipSync',
   request: 'mas.userRequest', reply: 'mas.aiReply',
   provider: 'mas.chatProvider', context: 'mas.chatContext', tab: 'mas.tab',
-  theme: 'mas.theme',
+  theme: 'mas.theme', appliedChat: 'mas.appliedChat',
 };
 
 /* One helper owns every interface preference: localStorage for the instant
@@ -54,12 +56,7 @@ const state = {
   status: { status: 'idle', entries: [] },
   pages: [],
   activePage: null,
-  recording: false,
-  captureKeys: true,
   openStepId: null,
-  dragFrom: null,
-  lastClick: null,
-  keyBuffer: { step: null, timer: null },
   logOffset: 0,
   lastRenderedIndex: -1,
   opsSub: 'running',
@@ -210,9 +207,9 @@ async function loadFlowFromClipboard(source) {
     let parsed;
     try { parsed = JSON.parse(text); } catch (err) { throw new Error(t('flowClipBad')); }
     const data = parsed && parsed.flow ? parsed.flow : parsed;
-    // the shared importer fills in defaults, keeps only known step types and
-    // validates - the same path the old JSON import used
-    const result = normaliseImportedFlow(data);
+    // Round 26: the server converts whatever arrived in the old step
+    // language first, then the shared importer validates the python flow
+    const result = normaliseImportedFlow(await convertFlowServer(data));
     if (!result || !result.flow) throw new Error(t('flowClipBad'));
     state.flow = result.flow;
     persistFlow();
@@ -368,7 +365,6 @@ function buildPanel() {
       el('section', { id: 'mas-tab-chat', class: 'mas-tabpane' }),
       el('section', { id: 'mas-tab-library', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-flow', class: 'mas-tabpane', hidden: true }),
-      el('section', { id: 'mas-tab-record', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-pages', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-db', class: 'mas-tabpane', hidden: true }),
       el('section', { id: 'mas-tab-ops', class: 'mas-tabpane', hidden: true }),
@@ -423,14 +419,7 @@ function buildPanel() {
     ]),
   ]);
 
-  const layer = el('div', { id: 'mas-record-layer', class: 'mas-record-layer', hidden: true });
-  layer.tabIndex = 0;
-  layer.addEventListener('pointerdown', onRecordPointerDown);
-  layer.addEventListener('pointerup', onRecordPointerUp);
-  layer.addEventListener('contextmenu', (event) => event.preventDefault());
-  layer.addEventListener('keydown', onRecordKeyDown);
-
-  root.append(toggle, panel, confirm, layer, el('div', { id: 'mas-toast', class: 'mas-toast-box' }));
+  root.append(toggle, panel, confirm, el('div', { id: 'mas-toast', class: 'mas-toast-box' }));
   document.body.appendChild(root);
 
   return root;
@@ -494,7 +483,6 @@ function selectTab(name) {
   if (name === 'settings') renderSettings();
   if (name === 'agent') renderAgent();
   if (name === 'flow') renderFlow();
-  if (name === 'record') renderRecord();
 }
 
 /** Hide the two tabs that need the coworker agent, when there is none.
@@ -705,6 +693,32 @@ function tickTimers() {
   if (now) now.textContent = formatSeconds(currentStepSeconds());
 }
 
+// Round 26: whatever arrives written in the old JSON step language goes
+// through the server converter first, so the panel only ever edits python.
+async function convertFlowServer(data) {
+  try {
+    const converted = await api('/convert', { method: 'POST', body: data });
+    if (converted && converted.flow) return converted.flow;
+  } catch (_) { /* fall through: the importer reports honestly */ }
+  return data;
+}
+
+/* Put a flow into the stages editor and show it, ready for the step-by-step
+ * check the operator asked for. Returns false when nothing usable arrived. */
+function applyFlowToStages(saved) {
+  const { flow, errors } = normaliseImportedFlow(saved || {}, state.flow.viewport);
+  if (!flow || !(flow.steps || []).length) {
+    if (errors && errors.length) toast(errors.join(' | '), 'error');
+    return false;
+  }
+  state.flow = flow;
+  persistFlow();
+  renderFlow();
+  selectTab('flow');
+  if (errors && errors.length) toast(errors[0], 'warn');
+  return true;
+}
+
 function renderFlow() {
   const pane = document.getElementById('mas-tab-flow');
   const errors = validateFlow(state.flow);
@@ -717,16 +731,9 @@ function renderFlow() {
     }),
   ]);
 
-  const addSelect = el('select', { class: 'mas-input' },
-    STEP_DEFS.map((def) => el('option', { value: def.type }, def.type)));
-  const addRow = el('div', { class: 'mas-row' }, [
-    addSelect,
-    button(t('addStep'), () => {
-      state.flow.steps.push(createStep(addSelect.value));
-      persistFlow();
-      renderFlow();
-    }, { class: 'mas-btn mas-primary' }),
-  ]);
+  // Round 26: no add-step button in the stages. The agent writes the steps
+  // (chat output lands here directly) or a pasted flow is translated by the
+  // server; the operator reviews, edits and reorders what arrived.
 
   const list = el('ol', { class: 'mas-steps' });
   if (!state.flow.steps.length) {
@@ -762,7 +769,7 @@ function renderFlow() {
   // start right under the header. When it sat last, sticky anchored it to its
   // natural place - the bottom of the pane - which is exactly where the user
   // kept finding it (round 14).
-  replace(pane, ioRow, nameRow, addRow, errorBox, list, settingsRow);
+  replace(pane, ioRow, nameRow, errorBox, list, settingsRow);
 }
 
 /* Round 25: the flow settings live in a gear modal, so the steps own the
@@ -1069,10 +1076,8 @@ function clearAllSteps() {
   if (!window.confirm(message)) return;
   state.flow.steps = [];
   state.openStepId = null;
-  state.keyBuffer = { step: null, timer: null };
   persistFlow();
   renderFlow();
-  renderRecord();
   toast(t('clearedAll'), 'ok');
 }
 
@@ -1098,6 +1103,9 @@ function stepRow(step, index, outcomes = stepOutcomes()) {
 
   row.append(
     el('span', { class: 'mas-grip', text: '⠿' }),
+    // Round 26: the step number reads before the enable checkbox, so the
+    // stages read top-to-bottom as «مرحلهٔ ۱، مرحلهٔ ۲، …».
+    el('span', { class: 'mas-step-no', text: `${t('stepNo')} ${index + 1}` }),
     el('input', {
       type: 'checkbox', checked: step.enabled !== false, title: 'enabled',
       onChange: (event) => { step.enabled = event.target.checked; persistFlow(); },
@@ -1111,7 +1119,6 @@ function stepRow(step, index, outcomes = stepOutcomes()) {
         renderFlow();
       },
     }),
-    el('span', { class: 'mas-type', text: step.type }),
     el('span', { class: 'mas-spacer' }),
     el('button', {
       class: 'mas-icon', type: 'button', text: '✎', title: t('opEdit'),
@@ -1177,11 +1184,6 @@ function stepEditor(step) {
   const fields = [];
 
   for (const field of (def ? def.fields : [])) {
-    if (field.virtual) {
-      fields.push(textField(field.key === 'keysText' ? 'keys' : field.key,
-        keysToText(step.keys), (value) => { step.keys = keysFromText(value); }, 'ctrl+l, Return'));
-      continue;
-    }
     if (field.kind === 'area') {
       fields.push(el('label', { class: 'mas-field mas-wide' }, [
         el('span', { text: field.key }),
@@ -1787,199 +1789,10 @@ async function loadFlowDialog() {
 }
 
 /* ------------------------------------------------------------------ *
- * Record tab
+ * Stages helper
  * ------------------------------------------------------------------ */
 
-function renderRecord() {
-  const pane = document.getElementById('mas-tab-record');
-  if (isStandalone()) {
-    // Capturing clicks needs the browser view to click on, which only the
-    // noVNC page has. Everything else in this panel works the same.
-    replace(pane,
-      el('p', { class: 'mas-hint', text: t('recordStandalone') }),
-      el('div', { class: 'mas-row' }, [
-        el('a', {
-          class: 'mas-btn mas-primary',
-          href: '../vnc.html?autoconnect=true&resize=scale&path=websockify',
-          target: '_blank', rel: 'noopener', text: '🖥 ' + t('openDesktop'),
-        }),
-        button(t('clear'), () => {
-          state.flow.steps = []; persistFlow(); renderFlow(); renderRecord();
-        }),
-      ]),
-      el('p', { class: 'mas-hint', text: `${state.flow.steps.length} · ${state.flow.name}` }),
-    );
-    return;
-  }
-  replace(pane,
-    el('div', { class: 'mas-row' }, [
-      el('button', {
-        class: 'mas-btn ' + (state.recording ? 'mas-danger' : 'mas-primary'), type: 'button',
-        text: (state.recording ? '⏺ ' + t('recordOn') : '○ ' + t('recordOff')),
-        onClick: toggleRecording,
-      }),
-      el('label', { class: 'mas-check' }, [
-        el('input', {
-          type: 'checkbox', checked: state.captureKeys,
-          onChange: (event) => { state.captureKeys = event.target.checked; },
-        }),
-        el('span', { text: t('keyboardHint') }),
-      ]),
-      button(t('clear'), () => { state.flow.steps = []; persistFlow(); renderFlow(); renderRecord(); }),
-    ]),
-    el('p', { class: 'mas-hint', text: t('recordHint') }),
-    el('p', { class: 'mas-hint', text: `${state.flow.steps.length} · ${state.flow.name}` }),
-  );
-}
-
-function toggleRecording() {
-  state.recording = !state.recording;
-  const layer = document.getElementById('mas-record-layer');
-  layer.hidden = !state.recording;
-  if (state.recording) {
-    positionRecordLayer();
-    layer.focus();
-    selectTab('record');
-  } else {
-    flushKeyBuffer();
-  }
-  renderRecord();
-}
-
-/** Keep the capture layer exactly over the noVNC canvas. */
-function positionRecordLayer() {
-  const canvas = document.getElementById('noVNC_canvas')
-    || document.querySelector('#noVNC_screen canvas')
-    || document.querySelector('#noVNC_container canvas');
-  const layer = document.getElementById('mas-record-layer');
-  if (!canvas || !layer) return null;
-  const rect = canvas.getBoundingClientRect();
-  Object.assign(layer.style, {
-    left: `${rect.left}px`, top: `${rect.top}px`,
-    width: `${rect.width}px`, height: `${rect.height}px`,
-  });
-  return rect;
-}
-
-function onRecordPointerDown(event) {
-  event.preventDefault();
-  event.stopPropagation();
-  const rect = positionRecordLayer();
-  if (!rect) return;
-  const point = mapToDesktop(event.clientX, event.clientY, rect, state.flow.viewport);
-  if (!point) return;
-  state.dragFrom = { ...point, button: event.button === 2 ? 'right' : 'left', at: Date.now() };
-  document.getElementById('mas-record-layer').focus();
-}
-
-function onRecordPointerUp(event) {
-  event.preventDefault();
-  event.stopPropagation();
-  if (!state.dragFrom) return;
-  const rect = positionRecordLayer();
-  if (!rect) { state.dragFrom = null; return; }
-  const point = mapToDesktop(event.clientX, event.clientY, rect, state.flow.viewport);
-  const from = state.dragFrom;
-  state.dragFrom = null;
-  if (!point) return;
-
-  const distance = Math.hypot(point.x - from.x, point.y - from.y);
-  if (distance > 15) {
-    addStep(createStep('drag', { x1: from.x, y1: from.y, x2: point.x, y2: point.y, button: from.button }));
-    return;
-  }
-
-  const previous = state.lastClick;
-  const now = Date.now();
-  const sameSpot = previous && Math.hypot(previous.x - point.x, previous.y - point.y) < 12
-    && now - previous.at < 450;
-  if (sameSpot) {
-    const last = state.flow.steps[state.flow.steps.length - 1];
-    if (last && last.type === 'click') {
-      state.flow.steps[state.flow.steps.length - 1] =
-        createStep('double_click', { x: point.x, y: point.y, label: '' });
-      state.lastClick = null;
-      persistFlow();
-      renderFlow();
-      return;
-    }
-  }
-  state.lastClick = { ...point, at: now };
-  addStep(createStep('click', { x: point.x, y: point.y, button: from.button }));
-}
-
-function onRecordKeyDown(event) {
-  if (!state.recording || !state.captureKeys) return;
-  event.preventDefault();
-  event.stopPropagation();
-
-  const modifiers = [];
-  if (event.ctrlKey) modifiers.push('ctrl');
-  if (event.altKey) modifiers.push('alt');
-  if (event.shiftKey) modifiers.push('shift');
-  if (event.metaKey) modifiers.push('super');
-
-  const printable = event.key.length === 1 && !modifiers.length;
-  if (printable) {
-    appendToKeyBuffer(event.key);
-    return;
-  }
-  flushKeyBuffer();
-  const name = keyName(event.key);
-  addStep(createStep('key', { keys: [...modifiers, name] }));
-}
-
-function keyName(key) {
-  const map = {
-    ' ': 'space', Enter: 'Return', Escape: 'Escape', Backspace: 'BackSpace',
-    Delete: 'Delete', Tab: 'Tab', ArrowUp: 'Up', ArrowDown: 'Down',
-    ArrowLeft: 'Left', ArrowRight: 'Right', Home: 'Home', End: 'End',
-    PageUp: 'Prior', PageDown: 'Next',
-  };
-  if (map[key]) return map[key];
-  if (/^F\d{1,2}$/.test(key)) return key;
-  return key;
-}
-
-function isAscii(text) {
-  return /^[\x00-\x7F]*$/.test(text);
-}
-
-function appendToKeyBuffer(char) {
-  const buffer = state.keyBuffer;
-  if (buffer.timer) clearTimeout(buffer.timer);
-  if (!buffer.step) {
-    buffer.step = createStep(isAscii(char) ? 'type' : 'paste', { text: '' });
-    state.flow.steps.push(buffer.step);
-  }
-  buffer.step.text += char;
-  // xdotool type cannot produce non-ASCII glyphs, so Persian and the like must
-  // go through the clipboard paste path or they arrive as keyboard garbage.
-  if (!isAscii(buffer.step.text)) buffer.step.type = 'paste';
-  buffer.step.label = labelFor(buffer.step);
-  buffer.timer = setTimeout(flushKeyBuffer, 1500);
-  persistFlow();
-  renderFlow();
-}
-
-function flushKeyBuffer() {
-  if (state.keyBuffer.timer) clearTimeout(state.keyBuffer.timer);
-  const step = state.keyBuffer.step;
-  // A buffer that never received a real character must not survive as a
-  // "text must not be empty" error waiting to happen.
-  if (step && !(step.text || '').trim()) {
-    const index = state.flow.steps.indexOf(step);
-    if (index >= 0) {
-      state.flow.steps.splice(index, 1);
-      persistFlow();
-      renderFlow();
-    }
-  }
-  state.keyBuffer = { step: null, timer: null };
-}
-
 function addStep(step) {
-  flushKeyBuffer();
   state.flow.steps.push(step);
   persistFlow();
   renderFlow();
@@ -2119,7 +1932,10 @@ function renderPageDetail(container, page) {
       el('button', {
         class: 'mas-btn mas-mini', type: 'button', text: t('useAsClick'),
         onClick: () => {
-          addStep(createStep('click', { x: item.desktop.x, y: item.desktop.y }));
+          addStep(createStep('python', {
+            code: `check(click(${item.desktop.x}, ${item.desktop.y}))`,
+            label: `کلیک در (${item.desktop.x}، ${item.desktop.y})`,
+          }));
           toast(labelFor(state.flow.steps[state.flow.steps.length - 1]), 'ok');
         },
       }),
@@ -2193,7 +2009,7 @@ async function openPage(id) {
 
 const ROLE_FA = { detect: 'شناسایی', run: 'اجرا', manual: 'دستی',
   challenge: 'بررسی CAPTCHA', handoff: 'تحویل به انسان',
-  before: 'قبل گام', after: 'بعد گام', error: 'لحظه خطا' };
+  before: 'قبل مرحله', after: 'بعد مرحله', error: 'لحظه خطا' };
 
 function shotLink(name) {
   return `${API_PREFIX}/public/shot/${encodeURIComponent(name)}`;
@@ -2366,7 +2182,8 @@ function renderAgentAssistant(host) {
         state.aiNotes = aiNotesFrom(raw);
         const parsed = extractJson(raw);
         if (!parsed) { renderAgentAssistant(); toast('JSON?', 'error'); return; }
-        const { flow, errors } = normaliseImportedFlow(parsed, state.flow.viewport);
+        const { flow, errors } = normaliseImportedFlow(
+          await convertFlowServer(parsed), state.flow.viewport);
         if (!flow || !flow.steps.length) {
           renderAgentAssistant();
           toast(errors.join(' | '), 'error');
@@ -3629,11 +3446,17 @@ async function askAgentDirectly() {
     state.aiReply = reply.text || '';
     try { localStorage.setItem(LS.reply, state.aiReply); } catch (_) { /* quota */ }
     state.aiNotes = aiNotesFrom(state.aiReply);
+    let applied = false;
     if (reply.flow && reply.flowValid && (reply.flow.steps || []).length) {
       state.agentFlowProposal = reply.flow;
+      // Round 26: the agent's output goes straight into the stages so the
+      // steps can be checked one by one, without an extra button.
+      applied = applyFlowToStages(await convertFlowServer(reply.flow));
     }
     renderAgentAssistant();
-    if (state.agentFlowProposal) {
+    if (applied) {
+      toast(t('chatFlowApplied'), 'ok');
+    } else if (state.agentFlowProposal) {
       toast(`${reply.flow.steps.length} steps`, 'ok');
     } else if (reply.flowErrors && reply.flowErrors.length) {
       toast(reply.flowErrors[0], 'warn');
@@ -3751,6 +3574,18 @@ async function refreshChatList() {
     replace(list, el('p', { class: 'mas-empty', text: t('chatNoHistory') }));
   } else {
     replace(list, messages.map(chatBubble));
+    // Round 26: the newest agent answer that carries a flow lands in the
+    // stages by itself - once per message - so the operator verifies the
+    // steps one by one without hunting for a button.
+    const carriers = messages.filter((message) => message.role !== 'user'
+      && (((message.meta || {}).flow || {}).steps || []).length);
+    const latest = carriers.length ? carriers[carriers.length - 1] : null;
+    let appliedId = '';
+    try { appliedId = localStorage.getItem(LS.appliedChat) || ''; } catch (_) { /* private */ }
+    if (latest && latest.id && String(latest.id) !== appliedId) {
+      try { localStorage.setItem(LS.appliedChat, String(latest.id)); } catch (_) { /* quota */ }
+      applyChatFlow(latest, true);
+    }
   }
   if ((data.pending || []).length) startChatPolling();
   else stopChatPolling();
@@ -3788,20 +3623,17 @@ async function clearChat() {
   refreshChatList();
 }
 
-async function applyChatFlow(message) {
+async function applyChatFlow(message, auto = false) {
   try {
     const data = await api('/agent/chat/apply-flow', { method: 'POST', body: { id: message.id } });
-    const saved = data.flow || {};
-    const { flow, errors } = normaliseImportedFlow(saved, state.flow.viewport);
-    if (!flow || !(flow.steps || []).length) {
-      toast((errors || []).join(' | ') || t('chatNoFlow'), 'error');
-      return;
+    const saved = await convertFlowServer(data.flow || {});
+    if (!applyFlowToStages(saved)) {
+      toast(t('chatNoFlow'), 'error');
+    } else if (auto) {
+      toast(t('chatFlowApplied'), 'ok');
+    } else {
+      toast(`${state.flow.steps.length} ${t('steps')}`, 'ok');
     }
-    state.flow = flow;
-    persistFlow();
-    renderFlow();
-    selectTab('flow');
-    toast(`${flow.steps.length} ${t('steps')}`, errors && errors.length ? 'warn' : 'ok');
   } catch (error) { toast(error.message, 'error'); }
 }
 
@@ -3873,12 +3705,14 @@ function renderChat() {
  * ------------------------------------------------------------------ */
 
 function operationSummary(op) {
-  return (op.steps || []).map((step, index) => `${index + 1}. ${labelFor(step)}`).join('\n');
+  return (op.steps || []).map((step, index) =>
+    `${index + 1}. ${step.label || labelFor(step)}`).join('\n');
 }
 
-function openOperationInStages(op) {
+async function openOperationInStages(op) {
   const { flow, errors } = normaliseImportedFlow(
-    { name: op.name, steps: op.steps || [] }, state.flow.viewport);
+    await convertFlowServer({ name: op.name, steps: op.steps || [] }),
+    state.flow.viewport);
   if (!flow || !(flow.steps || []).length) {
     toast((errors || []).join(' | ') || t('opEmpty'), 'error');
     return;
@@ -3927,6 +3761,11 @@ function operationCard(op) {
     el('div', { class: 'mas-op-head' }, [
       el('b', { text: op.name }),
       op.builtin ? el('span', { class: 'mas-badge', text: t('opBuiltin') }) : null,
+      el('span', {
+        class: 'mas-badge' + (op.scope === 'brain' ? ' mas-badge-brain' : ''),
+        text: op.scope === 'brain' ? '🧠 ' + t('scopeBrain') : '🌐 ' + t('scopeGeneral'),
+        title: t('opScopeHint'),
+      }),
       el('span', { class: 'mas-hint', text: `${steps.length} ${t('steps')}` }),
     ]),
     op.description ? el('p', { class: 'mas-op-desc', text: op.description }) : null,
@@ -3941,15 +3780,26 @@ function operationCard(op) {
       button(op.permission === 'auto' ? '🔓 ' + t('opPermAuto') : '🔒 ' + t('opPermAsk'),
         () => setOperationPermission(op, op.permission === 'auto' ? 'ask' : 'auto'),
         { class: 'mas-btn', title: t('opPermHint') }),
+      button(op.scope === 'brain' ? '🧠 ' + t('scopeBrain') : '🌐 ' + t('scopeGeneral'),
+        () => setOperationScope(op, op.scope === 'brain' ? 'general' : 'brain'),
+        { class: 'mas-btn', title: t('opScopeHint') }),
       button('📂 ' + t('opOpen'), () => openOperationInStages(op)),
-      button('✎ ' + t('opEdit'), () => {
+      button('✎ ' + t('opEdit'), async () => {
+        let editSteps = steps;
+        if (steps.some((step) => step.type !== 'python')) {
+          // Round 26: an operation from before the one language is
+          // translated by the server before the editor shows it.
+          const converted = await convertFlowServer({ name: op.name, steps });
+          editSteps = (converted && converted.steps) || steps;
+        }
         state.editingOperation = {
           id: op.id, name: op.name, description: op.description || '',
           tags: tags.join('، '), builtin: !!op.builtin,
-          steps: steps.map((step) => ({
-            type: step.type,
-            fields: JSON.stringify(Object.fromEntries(Object.entries(step)
-              .filter(([key]) => key !== 'type' && key !== 'id')), null, 0),
+          scope: op.scope === 'brain' ? 'brain' : 'general',
+          steps: editSteps.map((step) => ({
+            type: 'python',
+            code: String(step.code || ''),
+            label: String(step.label || ''),
           })),
         };
         renderOperations();
@@ -3967,25 +3817,21 @@ function operationCard(op) {
 }
 
 function operationEditor(draft) {
-  const types = Object.keys(state.stepTypes || {});
-  const stepRows = (draft.steps || []).map((row, index) => {
-    const spec = (state.stepTypes || {})[row.type] || {};
-    const fields = el('input', {
-      class: 'mas-input', value: row.fields || '{}', spellcheck: 'false',
-      placeholder: JSON.stringify(Object.fromEntries(
-        (spec.required || []).map((name) => [name, '']))),
-      onInput: (event) => { row.fields = event.target.value; },
-    });
-    return el('div', { class: 'mas-op-steprow' }, [
-      el('span', { class: 'mas-hint', text: String(index + 1) }),
-      agentSelect(types.length ? types : [row.type], row.type, (event) => {
-        row.type = event.target.value;
-        renderOperations();
-      }),
-      fields,
-      button('🗑', () => { draft.steps.splice(index, 1); renderOperations(); }),
-    ]);
-  });
+  // Round 26: every step of an operation is a python program with a Persian
+  // description; no type picker and no JSON fields remain.
+  const stepRows = (draft.steps || []).map((row, index) => el('div', { class: 'mas-op-steprow mas-op-steprow-code' }, [
+    el('span', { class: 'mas-step-no', text: `${t('stepNo')} ${index + 1}` }),
+    el('input', {
+      class: 'mas-input', value: row.label || '', placeholder: t('opStepLabel'),
+      onInput: (event) => { row.label = event.target.value; },
+    }),
+    el('textarea', {
+      class: 'mas-input mas-area', rows: '4', value: row.code || '',
+      spellcheck: 'false', placeholder: 'check(click(512, 300))',
+      onInput: (event) => { row.code = event.target.value; },
+    }),
+    button('🗑', () => { draft.steps.splice(index, 1); renderOperations(); }),
+  ]));
 
   return el('div', { class: 'mas-box mas-op-editor' }, [
     el('b', { text: draft.id ? t('opEdit') : t('opNew') }),
@@ -4001,12 +3847,23 @@ function operationEditor(draft) {
       class: 'mas-input', value: draft.tags || '', placeholder: t('opTagsHint'),
       onInput: (event) => { draft.tags = event.target.value; },
     })),
+    agentField(t('opScope'), el('select', {
+      class: 'mas-input',
+      onChange: (event) => { draft.scope = event.target.value; },
+    }, [
+      el('option', {
+        value: 'general', selected: (draft.scope || 'general') !== 'brain',
+      }, '🌐 ' + t('scopeGeneral')),
+      el('option', {
+        value: 'brain', selected: draft.scope === 'brain',
+      }, '🧠 ' + t('scopeBrain')),
+    ])),
+    el('p', { class: 'mas-hint', text: t('opScopeHint') }),
     el('div', { class: 'mas-row mas-wrap' }, [
       el('b', { text: `${t('opSteps')} (${stepRows.length})` }),
-      agentSelect(types, types[0] || 'click', (event) => { draft.pendingType = event.target.value; }),
       button('＋ ' + t('opAddStep'), () => {
         draft.steps = draft.steps || [];
-        draft.steps.push({ type: draft.pendingType || types[0] || 'click', fields: '{}' });
+        draft.steps.push({ type: 'python', code: '', label: '' });
         renderOperations();
       }),
     ]),
@@ -4024,20 +3881,20 @@ async function saveOperation(draft) {
   if (!name) { toast(t('opNeedName'), 'warn'); return; }
   const steps = [];
   for (const row of (draft.steps || [])) {
-    let fields;
-    try {
-      fields = JSON.parse(row.fields || '{}');
-    } catch (_) {
-      toast(`${t('opBadJson')} (${row.type})`, 'error');
-      return;
-    }
-    steps.push(Object.assign({ type: row.type }, fields));
+    const code = String(row.code || '').trim();
+    if (!code) { toast(t('opEmptyCode'), 'error'); return; }
+    const step = { type: 'python', code };
+    const label = String(row.label || '').trim();
+    if (label) step.label = label;
+    steps.push(step);
   }
+  if (!steps.length) { toast(t('opEmpty'), 'warn'); return; }
   const body = {
     name,
     description: String(draft.description || ''),
     tags: String(draft.tags || '').split(/[،,]/).map((item) => item.trim()).filter(Boolean),
     steps,
+    scope: draft.scope === 'brain' ? 'brain' : 'general',
   };
   try {
     if (draft.id) {
@@ -4048,6 +3905,24 @@ async function saveOperation(draft) {
     }
     state.editingOperation = null;
     toast(t('opSaved'), 'ok');
+    renderOperations();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function setOperationScope(op, scope) {
+  // The same honest PUT the permission toggle uses; the server converts any
+  // old steps it still carries, so a scope flip also finishes the migration.
+  try {
+    await api(`/agent/operations/${encodeURIComponent(op.id)}`, {
+      method: 'PUT',
+      body: {
+        name: op.name, description: op.description || '', tags: op.tags || [],
+        steps: op.steps || [],
+        permission: op.permission === 'auto' ? 'auto' : 'ask',
+        scope,
+      },
+    });
+    toast(t('saved'), 'ok');
     renderOperations();
   } catch (error) { toast(error.message, 'error'); }
 }
@@ -4069,7 +3944,9 @@ async function renderOperations() {
 
   const head = el('div', { class: 'mas-row mas-wrap' }, [
     button('＋ ' + t('opNew'), () => {
-      state.editingOperation = { id: '', name: '', description: '', tags: '', steps: [] };
+      state.editingOperation = {
+        id: '', name: '', description: '', tags: '', steps: [], scope: 'general',
+      };
       renderOperations();
     }, { class: 'mas-btn mas-primary' }),
     button('↻ ' + t('refresh'), renderOperations),
@@ -4518,9 +4395,6 @@ function start() {
   setInterval(refreshStatus, 900);
   // Counters tick on their own so the numbers move smoothly between polls.
   setInterval(tickTimers, 1000);
-  window.addEventListener('resize', () => { if (state.recording) positionRecordLayer(); });
-  window.addEventListener('scroll', () => { if (state.recording) positionRecordLayer(); }, true);
-  setInterval(() => { if (state.recording) positionRecordLayer(); }, 1000);
 }
 
 /* The sidebar is a guest in noVNC's page. If it throws, noVNC shows its own
@@ -4821,6 +4695,7 @@ async function setOperationPermission(op, permission) {
       body: {
         name: op.name, description: op.description || '', tags: op.tags || [],
         steps: op.steps || [], permission,
+        scope: op.scope === 'brain' ? 'brain' : 'general',
       },
     });
     toast(t('saved'), 'ok');

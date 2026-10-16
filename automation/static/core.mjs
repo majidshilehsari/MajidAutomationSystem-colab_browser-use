@@ -42,125 +42,18 @@ const TEXT = 'text';
 const AREA = 'area';
 const SELECT = 'select';
 
+// Round 26: ONE step language. The panel edits python steps only; whatever
+// arrives written in the old JSON vocabulary is translated by the server
+// (PUT /flows, PUT /agent/operations and POST /convert all run the same
+// converter the engine uses), so the old field schemas are gone from here.
 export const STEP_DEFS = [
-  { type: 'click', group: 'mouse', fields: [
-    { key: 'x', kind: INT }, { key: 'y', kind: INT },
-    { key: 'button', kind: SELECT, options: ['left', 'middle', 'right'], optional: true },
-    { key: 'clicks', kind: INT, optional: true }] },
-  { type: 'double_click', group: 'mouse', fields: [{ key: 'x', kind: INT }, { key: 'y', kind: INT }] },
-  { type: 'drag', group: 'mouse', fields: [
-    { key: 'x1', kind: INT }, { key: 'y1', kind: INT },
-    { key: 'x2', kind: INT }, { key: 'y2', kind: INT }] },
-  { type: 'move', group: 'mouse', fields: [{ key: 'x', kind: INT }, { key: 'y', kind: INT }] },
-  { type: 'scroll', group: 'mouse', fields: [
-    { key: 'amount', kind: INT }, { key: 'x', kind: INT, optional: true },
-    { key: 'y', kind: INT, optional: true }] },
-  { type: 'type', group: 'keyboard', fields: [
-    { key: 'text', kind: TEXT },
-    { key: 'typingMode', kind: SELECT, options: ['inherit', 'low', 'normal', 'fast'], optional: true },
-  ] },
-  { type: 'paste', group: 'keyboard', fields: [{ key: 'text', kind: AREA }] },
-  { type: 'key', group: 'keyboard', fields: [{ key: 'keysText', kind: TEXT, virtual: true }] },
-  { type: 'wait', group: 'flow', fields: [{ key: 'ms', kind: INT }] },
-  { type: 'wait_for_text', group: 'flow', fields: [
-    { key: 'text', kind: TEXT }, { key: 'timeoutMs', kind: INT, optional: true },
-    { key: 'absent', kind: 'bool', optional: true }] },
-  { type: 'goto_url', group: 'flow', fields: [{ key: 'url', kind: TEXT }] },
-  { type: 'focus_window', group: 'flow', fields: [{ key: 'title', kind: TEXT }] },
-  { type: 'screenshot', group: 'flow', fields: [{ key: 'name', kind: TEXT, optional: true }] },
-  // Read what the page says right now and put it in the run report, so the
-  // model can see the page instead of guessing.
-  { type: 'capture_text', group: 'flow', fields: [{ key: 'limit', kind: INT, optional: true }] },
-  { type: 'pause_for_human_verification', group: 'safety', fields: [
-    { key: 'prompt', kind: AREA },
-  ] },
-  // The coworker agent's own steps. They belong in the same editor as everything
-  // else: an operation from the library is opened into the stages, and a step
-  // the editor does not know is a step the normaliser silently drops.
-  { type: 'agent_open', group: 'agent', fields: [
-    { key: 'provider', kind: TEXT, optional: true },
-    { key: 'url', kind: TEXT, optional: true }] },
-  { type: 'agent_ask', group: 'agent', fields: [
-    { key: 'prompt', kind: AREA },
-    { key: 'provider', kind: TEXT, optional: true },
-    { key: 'timeout', kind: INT, optional: true },
-    { key: 'freshChat', kind: 'bool', optional: true },
-    { key: 'saveAs', kind: TEXT, optional: true }] },
-  { type: 'captcha_solve', group: 'agent', fields: [
-    { key: 'label', kind: TEXT, optional: true },
-    { key: 'autoClick', kind: 'bool', optional: true },
-    { key: 'notify', kind: 'bool', optional: true },
-    { key: 'shot', kind: TEXT, optional: true }] },
-  // Round 13 - human input family: a non-blocking notice, a blocking form and
-  // the two secret-aware steps. Field schemas are validated loosely on purpose;
-  // the panel renders whatever the schema carries.
-  { type: 'progress_notice', group: 'human', fields: [
-    { key: 'title', kind: TEXT },
-    { key: 'message', kind: AREA, optional: true },
-    { key: 'level', kind: SELECT, options: ['info', 'success', 'warning', 'error'], optional: true },
-    { key: 'durationMs', kind: INT, optional: true },
-    { key: 'dismissible', kind: 'bool', optional: true }] },
-  { type: 'interactive_form', group: 'human', fields: [
-    { key: 'title', kind: TEXT },
-    { key: 'message', kind: AREA, optional: true },
-    { key: 'fields', kind: AREA },
-    { key: 'submitLabel', kind: TEXT, optional: true },
-    { key: 'cancelLabel', kind: TEXT, optional: true },
-    { key: 'timeoutMs', kind: INT, optional: true },
-    { key: 'output', kind: TEXT, optional: true }] },
-  { type: 'secure_input', group: 'secret', fields: [
-    { key: 'title', kind: TEXT },
-    { key: 'message', kind: AREA, optional: true },
-    { key: 'fields', kind: AREA },
-    { key: 'policy', kind: AREA },
-    { key: 'output', kind: TEXT, optional: true }] },
-  { type: 'secure_http_request', group: 'secret', fields: [
-    { key: 'secretRef', kind: TEXT, optional: true },
-    { key: 'handle', kind: TEXT, optional: true },
-    { key: 'method', kind: SELECT, options: ['GET', 'POST'], optional: true },
-    { key: 'url', kind: TEXT },
-    { key: 'json', kind: AREA, optional: true },
-    { key: 'saveAs', kind: TEXT, optional: true },
-    { key: 'timeout', kind: INT, optional: true }] },
-  // Round 25: the coworker agent's own language. A python step is a whole
-  // program - ifs, loops, variables - with the desk as its API; run_operation
-  // nests a library operation inside the flow.
   { type: 'python', group: 'code', fields: [
     { key: 'code', kind: AREA, rows: 10 },
     { key: 'timeout', kind: INT, optional: true }] },
-  { type: 'run_operation', group: 'code', fields: [
-    { key: 'operation', kind: TEXT }] },
 ];
 
 export const STEP_DEFAULTS = {
   python: { code: '' },
-  run_operation: { operation: '' },
-  click: { x: 0, y: 0 },
-  double_click: { x: 0, y: 0 },
-  drag: { x1: 0, y1: 0, x2: 100, y2: 100 },
-  move: { x: 0, y: 0 },
-  scroll: { amount: 3 },
-  type: { text: '' },
-  paste: { text: '' },
-  key: { keys: ['Return'] },
-  wait: { ms: 1000 },
-  wait_for_text: { text: '', timeoutMs: 15000 },
-  goto_url: { url: 'https://' },
-  focus_window: { title: 'Google Chrome' },
-  screenshot: {},
-  capture_text: {},
-  pause_for_human_verification: {
-    prompt: 'وقتی بررسی یا کار انسانی تمام شد و صفحه امن و آماده‌ی ادامه بود، این‌جا ادامه را بزن.',
-  },
-  // Empty on purpose: the server falls back to the configured chat profile, so
-  // a hardcoded provider here would outlive the setting it came from.
-  agent_open: {},
-  agent_ask: { prompt: '' },
-  captcha_solve: {},
-  progress_notice: { title: '' },
-  interactive_form: { title: '', fields: [] },
-  secure_input: { title: '', fields: [], policy: { allowedHosts: [], allowedPaths: ['/'] } },
-  secure_http_request: { secretRef: '', method: 'GET', url: '' },
 };
 
 export function stepDef(type) {
@@ -184,37 +77,12 @@ export function structuredCloneSafe(value) {
 
 /** Human readable one-liner shown in the step list. */
 export function labelFor(step) {
-  switch (step.type) {
-    case 'click': return `click ${step.x},${step.y}${step.button && step.button !== 'left' ? ' ' + step.button : ''}`;
-    case 'double_click': return `double click ${step.x},${step.y}`;
-    case 'drag': return `drag ${step.x1},${step.y1} → ${step.x2},${step.y2}`;
-    case 'move': return `move ${step.x},${step.y}`;
-    case 'scroll': return `scroll ${step.amount}`;
-    case 'type': return `type ${quote(step.text)}`;
-    case 'paste': return `paste ${quote(step.text)}`;
-    case 'key': return `key ${(step.keys || []).join('+')}`;
-    case 'wait': return `wait ${step.ms}ms`;
-    case 'wait_for_text': return `wait for ${quote(step.text)}${step.absent ? ' (absent)' : ''}`;
-    case 'goto_url': return `open ${truncate(step.url, 40)}`;
-    case 'focus_window': return `focus ${truncate(step.title, 30)}`;
-    case 'screenshot': return step.name ? `screenshot ${step.name}` : 'screenshot';
-    case 'capture_text': return step.limit ? `capture text (max ${step.limit})` : 'capture text';
-    case 'pause_for_human_verification': return 'pause for human verification';
-    case 'agent_open': return `open agent chat${step.provider ? ' ' + step.provider : ''}`
-      + `${step.url ? ' ' + truncate(step.url, 40) : ''}`;
-    case 'agent_ask': return `ask agent ${quote(step.prompt)}`;
-    case 'captcha_solve': return `solve captcha${step.label ? ' ' + truncate(step.label, 20) : ''}`;
-    case 'progress_notice': return `notice ${quote(step.title)}`;
-    case 'interactive_form': return `form ${quote(step.title)}`;
-    case 'secure_input': return `secret input ${quote(step.title)}`;
-    case 'secure_http_request': return `secure ${step.method || 'GET'} ${truncate(step.url, 40)}`;
-    case 'python': {
-      const lines = String(step.code || '').split('\n').filter((l) => l.trim()).length;
-      return `python (${lines} line${lines === 1 ? '' : 's'})`;
-    }
-    case 'run_operation': return `run operation ${quote(step.operation)}`;
-    default: return step.type;
+  if (step && step.type === 'python') {
+    const line = String(step.code || '').split('\n')
+      .map((l) => l.trim()).filter((l) => l && !l.startsWith('#'))[0];
+    return line ? truncate(line, 44) : 'پایتون';
   }
+  return String((step && step.type) || '');
 }
 
 export function quote(text) {
@@ -279,50 +147,11 @@ export function validateFlow(flow, viewport = DEFAULT_VIEWPORT) {
       && !['low', 'normal', 'fast'].includes(flow.settings.typingMode)) {
     errors.push('settings: typingMode must be low, normal, or fast');
   }
-  const w = (flow.viewport && flow.viewport.width) || viewport.width;
-  const h = (flow.viewport && flow.viewport.height) || viewport.height;
   (flow.steps || []).forEach((step, index) => {
-    const where = `steps[${index}] (${step.type})`;
-    if (!stepDef(step.type)) { errors.push(`${where}: unknown step type`); return; }
-    for (const key of ['x', 'y']) {
-      if (step[key] !== undefined && (step[key] < 0 || step[key] >= (key === 'x' ? w : h))) {
-        errors.push(`${where}: ${key}=${step[key]} is outside the ${w}x${h} desktop`);
-      }
-    }
-    if (step.type === 'key' && !(Array.isArray(step.keys) && step.keys.length)) {
-      errors.push(`${where}: keys must not be empty`);
-    }
-    if (step.type === 'goto_url' && !/^[a-zA-Z][\w+.-]*:\/\//.test(step.url || '')) {
-      errors.push(`${where}: url needs a scheme such as https://`);
-    }
-    if (step.type === 'python' && !String(step.code || '').trim()) {
+    const where = `steps[${index}] (${(step && step.type) || '?'})`;
+    if (!stepDef(step && step.type)) { errors.push(`${where}: unknown step type`); return; }
+    if (!String(step.code || '').trim()) {
       errors.push(`${where}: code must not be empty`);
-    }
-    if (step.type === 'run_operation' && !String(step.operation || '').trim()) {
-      errors.push(`${where}: operation must not be empty`);
-    }
-    if ((step.type === 'type' || step.type === 'paste') && !step.text) {
-      errors.push(`${where}: text must not be empty`);
-    }
-    if (step.type === 'type' && step.typingMode !== undefined
-        && !['low', 'normal', 'fast'].includes(step.typingMode)) {
-      errors.push(`${where}: typingMode must be low, normal, or fast`);
-    }
-    if (step.type === 'pause_for_human_verification') {
-      if (!(typeof step.prompt === 'string' && step.prompt.trim())) {
-        errors.push(`${where}: prompt must not be empty`);
-      } else if (step.prompt.length > 1000) {
-        errors.push(`${where}: prompt must be at most 1000 characters`);
-      }
-    }
-    // The server requires a prompt for agent_ask; saying so here means the
-    // operator hears it before a run does, in the same words.
-    if (step.type === 'agent_ask'
-        && !(typeof step.prompt === 'string' && step.prompt.trim())) {
-      errors.push(`${where}: prompt must not be empty`);
-    }
-    if (step.type === 'wait' && !(Number(step.ms) > 0)) {
-      errors.push(`${where}: ms must be positive`);
     }
   });
   return errors;
@@ -478,7 +307,7 @@ export const STRINGS = {
     agentSubKeys: 'کلیدها',
     tabChat: 'چت',
     tabLibrary: 'کتابخانه',
-    steps: 'گام',
+    steps: 'مرحله',
     chatHint: 'پاسخ‌ها از مرورگر خودِ ایجنت می‌آید (به‌طور پیش‌فرض chat.deepseek.com روی نمایش :2)، نه از کلید API پولی. یک پرسش ممکن است یک دقیقه طول بکشد؛ پنل را نبند، جواب خودش می‌آید.',
     chatProvider: 'مدل / پروفایل',
     chatContext: 'زمینهٔ اتوماسیون',
@@ -493,22 +322,27 @@ export const STRINGS = {
     chatCleared: 'گفت‌وگو پاک شد',
     chatClear: 'پاک کردن گفت‌وگو',
     chatApplyFlow: 'اعمال به‌عنوان جریان',
+    chatFlowApplied: 'جریان ایجنت مستقیم به مراحل آمد — مرحله‌ها را یک‌به‌یک بررسی کن.',
     chatNoFlow: 'این پیام جریان قابل استفاده‌ای ندارد',
     chatTools: 'ابزارهای دستیار (کپی پرامپت / وارد کردن JSON)',
     chatToolsHint: 'همان گردش کار «دستیار»: پرامپت کامل را کپی کن، یا بگذار ایجنت مستقیم جواب بدهد و JSON پیشنهادی‌اش را وارد مراحل کن.',
-    opHint: 'عملیات = چند گام با یک نام؛ یک‌بار می‌سازی و بعد اجرا یا «باز» می‌کنی. «باز کردن در مراحل» گام‌ها را داخل تب مراحل می‌ریزد تا ویرایش و اجراشان کنی.',
+    opHint: 'عملیات = چند مرحله با یک نام؛ یک‌بار می‌سازی و بعد اجرا یا «باز» می‌کنی. «باز کردن در مراحل» مرحله‌ها را داخل تب مراحل می‌ریزد تا ویرایش و اجراشان کنی. دامنهٔ «عمومی» یعنی ایجنت همکار و مغز هر دو استفاده می‌کنند؛ «اختصاصی مغز» فقط ابزار خود مغز است.',
     opNew: 'عملیات تازه',
     opCount: 'عملیات',
     opNone: 'عملیاتی نیست؛ یکی بساز.',
     opNeedsAgent: 'کتابخانه به ایجنت همکار نیاز دارد (در این استقرار ساخته نشده).',
     opName: 'نام عملیات',
-    opNameHint: 'مثلاً: اتصال به ایجنت lmarena',
+    opNameHint: 'مثلاً: باز کردن lmarena',
     opDescription: 'توضیح',
     opTags: 'برچسب‌ها',
     opTagsHint: 'با «،» جدا کن',
-    opSteps: 'گام‌ها',
-    opAddStep: 'افزودن گام',
-    opFieldsHint: 'مقدارهای هر گام را به‌صورت JSON بنویس، مثلاً {"x": 512, "y": 300}. فیلدهای لازم هر نوع گام داخل placeholder همان کادر آمده است.',
+    opSteps: 'مرحله‌ها',
+    opAddStep: 'افزودن مرحله',
+    opFieldsHint: 'هر مرحله یک برنامهٔ پایتون است؛ مثال: check(click(512, 300)). پوشش‌های میز (click، goto، type_text، ask_agent، run_operation و…) در راهنمای مرحله‌ها توضیح آمده‌اند.',
+    opScope: 'دامنهٔ عملیات', scopeGeneral: 'عمومی', scopeBrain: 'اختصاصی مغز',
+    opScopeHint: '«عمومی» یعنی ایجنت همکار و مغز هر دو می‌توانند استفاده کنند؛ «اختصاصی مغز» فقط ابزار خود مغز است و داخل جریان‌های معمولی اجرا نمی‌شود.',
+    opStepLabel: 'توضیح مرحله (فارسی)', opEmptyCode: 'کد یک مرحله خالی است',
+    stepNo: 'مرحلهٔ',
     opSave: 'ذخیرهٔ عملیات',
     opCancel: 'انصراف',
     opEdit: 'ویرایش',
@@ -525,8 +359,7 @@ export const STRINGS = {
     opLastRun: 'آخرین اجرا',
     opNeverRun: 'هنوز اجرا نشده',
     opNeedName: 'نام عملیات خالی است',
-    opBadJson: 'JSON گام درست نیست',
-    opEmpty: 'این عملیات گامی ندارد',
+    opEmpty: 'این عملیات مرحله‌ای ندارد',
     opSaved: 'عملیات ذخیره شد',
     agentSubAgentkey: 'کلید ایجنت',
     agentSubCursor: 'نشانگر',
@@ -574,8 +407,8 @@ export const STRINGS = {
     cursorMoved: 'نشانگر حرکت کرد',
     cursorMoveHint: 'موج را با یک «کلیک واقعی» از تب صفحه‌ها ببین؛ همان‌جا باز می‌شود.',
     clickNow: 'کلیک واقعی',
-    clickNowHint: 'همین حالا نشانگر را روی این مختصات می‌برد و کلیک می‌کند، بدون ساخت گام. اگر اجرایی مالک ماوس باشد، رد می‌شود (۴۰۹).',
-    elementsClickHint: '«کلیک واقعی» همان لحظه روی دسکتاپ کلیک می‌کند؛ «کلیک» یک گام به مراحل اضافه می‌کند.',
+    clickNowHint: 'همین حالا نشانگر را روی این مختصات می‌برد و کلیک می‌کند، بدون ساخت مرحله. اگر اجرایی مالک ماوس باشد، رد می‌شود (۴۰۹).',
+    elementsClickHint: '«کلیک واقعی» همان لحظه روی دسکتاپ کلیک می‌کند؛ «کلیک» یک مرحلهٔ پایتون به مراحل اضافه می‌کند.',
     copyShotLink: 'کپی لینک تصویر',
     noShotForPage: 'برای این صفحه تصویری ثبت نشده',
     refreshShot: 'اسکرین‌شات تازه',
@@ -662,14 +495,12 @@ export const STRINGS = {
     noteHint: 'متنی را که می‌خواهی نگه داری اینجا بنویس و «ذخیره یادداشت» را بزن',
     noteEmpty: 'متنی ننوشتی', saveNote: 'ذخیره یادداشت', saved: 'ذخیره شد',
     deleteTextConfirm: 'این متن پاک شود؟', refresh: 'تازه‌سازی', copy: 'کپی',
-    flowName: 'نام عملیات', addStep: 'افزودن گام', stepsEmpty: 'هنوز گامی ندارید.',
-    run: 'اجرا', pause: 'توقف موقت', resume: 'ادامه', stop: 'قطع', stepOver: 'یک گام',
+    flowName: 'نام عملیات', stepsEmpty: 'هنوز مرحله‌ای ندارید.',
+    run: 'اجرا', pause: 'توقف موقت', resume: 'ادامه', stop: 'قطع', stepOver: 'یک مرحله',
     save: 'ذخیره', load: 'بارگذاری', delete: 'حذف', duplicate: 'تکرار',
     settings: 'تنظیمات', defaultDelay: 'مکث پیش‌فرض (میلی‌ثانیه)', repeat: 'تعداد دفعات',
-    screenshotEach: 'عکس بعد از هر گام', stopOnError: 'توقف در خطا',
-    recordOn: 'ضبط روشن است', recordOff: 'ضبط خاموش',
-    recordHint: 'روی صفحه کلیک کنید تا به‌عنوان گام ثبت شود. کلیک‌ها به مرورگر نمی‌رسند.',
-    keyboardHint: 'کلیدها هم ضبط شوند', clear: 'پاک کردن',
+    screenshotEach: 'عکس بعد از هر مرحله', stopOnError: 'توقف در خطا',
+    clear: 'پاک کردن',
     detect: 'شناسایی صفحه', detecting: 'در حال شناسایی…',
     copyDetected: 'کپی موارد شناسایی', shotLink: 'لینک عمومی عکس',
     aiRequest: 'درخواست شما از هوش مصنوعی',
@@ -678,8 +509,8 @@ export const STRINGS = {
     openVnc: 'نمای مرورگر', openPanel: 'پنل بزرگ',
     copyReport: 'کپی گزارش اجرا', nowRunning: 'در حال اجرا:',
     library: 'کتابخانه‌ی جریان‌ها', libraryEmpty: 'هنوز جریانی ذخیره نشده',
-    stepsWord: 'گام', deleteSavedConfirm: 'جریان «{n}» از کتابخانه پاک شود؟',
-    screenshotBefore: 'عکس قبل از هر گام',
+    stepsWord: 'مرحله', deleteSavedConfirm: 'جریان «{n}» از کتابخانه پاک شود؟',
+    screenshotBefore: 'عکس قبل از هر مرحله',
     screenshotOnError: 'عکس هنگام خطا',
     aiNotes: 'گفته‌های هوش مصنوعی (خلاصه و سؤال‌ها)',
     clearAll: 'پاک کردن همه', clearedAll: 'همه‌ی مراحل پاک شد',
@@ -688,9 +519,6 @@ export const STRINGS = {
     stateRunning: 'در حال اجرا', statePending: 'هنوز اجرا نشده',
     stateOk: 'موفق', stateError: 'ناموفق', stateSkipped: 'رد شده',
     stateIgnored: 'خطا نادیده گرفته شد',
-    recordStandalone: 'ضبطِ کلیک به نمای مرورگر نیاز دارد، چون باید روی خودِ صفحه کلیک کنی. '
-      + 'برای ضبط، نمای مرورگر را باز کن؛ بقیه‌ی بخش‌ها (ساخت، ویرایش، اجرا، ذخیره، '
-      + 'شناسایی صفحه و هوش مصنوعی) همین‌جا کامل کار می‌کنند و همان مرورگر را کنترل می‌کنند.',
     pagesEmpty: 'هنوز صفحه‌ای شناسایی نشده.',
     elements: 'المان‌ها', text: 'متن صفحه', screenshot: 'عکس',
     copyGuide: 'کپی راهنمای عمومی', copyPrompt: 'کپی پرامپت کامل', importBtn: 'وارد کردن خروجی AI',
@@ -887,7 +715,7 @@ export const STRINGS = {
     flowPasteImport: 'وارد کردن',
     flowClipDesktopEmpty: 'کلیپ‌بورد دسکتاپ خالی است',
     flowSettingsGear: 'تنظیمات جریان', flowErrorOp: 'عملیات پروتکل خطا (نام یا شناسه)',
-    flowRetryAfterProtocol: 'بعد از پروتکل موفق، گام یک بار دوباره امتحان شود',
+    flowRetryAfterProtocol: 'بعد از پروتکل موفق، مرحله یک بار دوباره امتحان شود',
     stepNoteTitle: 'توضیح مرحله', stepNoteHint: 'همان چیزی است که وقتی نشانگر روی مرحله می‌رود هم دیده می‌شود.',
     stepDocWrite: '✨ با ایجنت بنویس', stepDocWorking: 'ایجنت دارد می‌نویسد…',
     stepDocSaved: 'توضیح مرحله نوشته و ذخیره شد',
@@ -922,10 +750,10 @@ export const STRINGS = {
     opPermAuto: 'همیشه مجاز', opPermAsk: 'با پرسش',
     opPermHint: 'مغز این عملیات را خودش اجرا کند یا اول از شما بپرسد؟',
     opsSubRunning: 'در حال اجرا', opsSubQueue: 'صف و زمان‌بندی', opsSubDone: 'انجام‌شده',
-    opsColRun: 'اجرا', opsColStatus: 'وضعیت', opsColStep: 'گام', opsColMotion: 'حرکت',
+    opsColRun: 'اجرا', opsColStatus: 'وضعیت', opsColStep: 'مرحله', opsColMotion: 'حرکت',
     opsColTime: 'زمان', opsColName: 'نام', opsColSchedule: 'زمان‌بندی',
     opsColNext: 'اجرای بعدی', opsColLast: 'آخرین وضعیت', opsColStart: 'شروع',
-    opsColEnd: 'پایان', opsColSteps: 'گام‌ها',
+    opsColEnd: 'پایان', opsColSteps: 'مرحله‌ها',
     opsJobRunning: 'job زمان‌بند در حال اجرا', opsNoJob: 'هیچ job زمان‌بندی‌شده‌ای در حال اجرا نیست',
     opsLastEvents: 'آخرین رویدادها', opsScheduleTitle: 'زمان‌بندی عملیات جدید',
     opsScheduleHint: 'یک جریان از کتابخانه برگزین و زمان را بنویس: لحظهٔ دقیق (at)، بازه (every مثل 5m) یا cron پنج خانه‌ای.',
@@ -999,6 +827,7 @@ export const STRINGS = {
     chatCleared: 'Chat cleared',
     chatClear: 'Clear the chat',
     chatApplyFlow: 'Apply as a flow',
+    chatFlowApplied: 'the agent\'s flow went straight into the stages - check the steps one by one',
     chatNoFlow: 'That message holds no usable flow',
     chatTools: 'Assistant tools (copy prompt / import JSON)',
     chatToolsHint: 'The old assistant workflow: copy the full prompt, or let the agent answer directly and import the JSON it proposes.',
@@ -1014,7 +843,11 @@ export const STRINGS = {
     opTagsHint: 'separate with commas',
     opSteps: 'Steps',
     opAddStep: 'Add a step',
-    opFieldsHint: 'Write each step\'s values as JSON, e.g. {"x": 512, "y": 300}. The fields a step type needs are in that box\'s placeholder.',
+    opFieldsHint: 'Each step is a small python program, e.g. check(click(512, 300)). The desk helpers (click, goto, type_text, ask_agent, run_operation, ...) are documented in the step guide.',
+    opScope: 'Scope', scopeGeneral: 'General', scopeBrain: 'Brain only',
+    opScopeHint: 'General operations serve the coworker agent and the brain alike; brain-only operations are the brain\'s own tools and never run inside ordinary flows.',
+    opStepLabel: 'Step description', opEmptyCode: 'A step has empty code',
+    stepNo: 'Step',
     opSave: 'Save the operation',
     opCancel: 'Cancel',
     opEdit: 'Edit',
@@ -1031,7 +864,6 @@ export const STRINGS = {
     opLastRun: 'Last run',
     opNeverRun: 'Never run yet',
     opNeedName: 'The operation needs a name',
-    opBadJson: 'That step\'s JSON is not valid',
     opEmpty: 'That operation has no steps',
     opSaved: 'Operation saved',
     agentSubAgentkey: 'Agent key',
@@ -1168,14 +1000,12 @@ export const STRINGS = {
     noteHint: 'Write text you want to keep, then press Save note',
     noteEmpty: 'You did not write anything', saveNote: 'Save note', saved: 'Saved',
     deleteTextConfirm: 'Delete this text?', refresh: 'Refresh', copy: 'Copy',
-    flowName: 'Operation name', addStep: 'Add step', stepsEmpty: 'No steps yet.',
+    flowName: 'Operation name', stepsEmpty: 'No steps yet.',
     run: 'Run', pause: 'Pause', resume: 'Resume', stop: 'Stop', stepOver: 'Step',
     save: 'Save', load: 'Load', delete: 'Delete', duplicate: 'Duplicate',
     settings: 'Settings', defaultDelay: 'Default delay (ms)', repeat: 'Repeat',
     screenshotEach: 'Screenshot after each step', stopOnError: 'Stop on error',
-    recordOn: 'Recording', recordOff: 'Record',
-    recordHint: 'Click on the page to capture a step. Clicks do not reach the browser.',
-    keyboardHint: 'Also capture keys', clear: 'Clear',
+    clear: 'Clear',
     detect: 'Detect page', detecting: 'Detecting…',
     copyDetected: 'Copy detected info', shotLink: 'Public screenshot link',
     aiRequest: 'Your request for the AI',
@@ -1194,9 +1024,6 @@ export const STRINGS = {
     stateRunning: 'running', statePending: 'not run yet',
     stateOk: 'ok', stateError: 'failed', stateSkipped: 'skipped',
     stateIgnored: 'error ignored',
-    recordStandalone: 'Recording clicks needs the browser view, because you have to click '
-      + 'on the page itself. Open the browser view to record; everything else here '
-      + '(build, edit, run, save, detect, AI) works and drives the same browser.',
     pagesEmpty: 'No page detected yet.',
     elements: 'Elements', text: 'Page text', screenshot: 'Screenshot',
     copyGuide: 'Copy general guide', copyPrompt: 'Copy full prompt', importBtn: 'Import AI output',
