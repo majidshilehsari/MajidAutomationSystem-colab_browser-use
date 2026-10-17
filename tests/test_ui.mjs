@@ -606,7 +606,7 @@ test('the stages number every step before its checkbox', async () => {
   }
 });
 
-test('typing mode settings and python steps edit cleanly', async () => {
+test('the settings gear is gone and python steps edit cleanly', async () => {
   const flow = {
     name: 'verification',
     viewport: { width: 1366, height: 768 },
@@ -625,20 +625,11 @@ test('typing mode settings and python steps edit cleanly', async () => {
   try {
     clickTab(page, 'flow');
     await page.wait(10);
-    // Round 25: the flow settings open from the gear button as a modal.
-    const gear = page.byText('button', '\u2699 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u062c\u0631\u06cc\u0627\u0646');
-    assert.ok(gear, 'the gear button is missing');
-    gear.dispatchEvent(new page.window.Event('click'));
-    const globalMode = page.doc.getElementById('mas-flow-typing-mode');
-    assert.ok(globalMode, 'flow-level typing mode selector is missing');
-    assert.equal(globalMode.value, 'low');
-    // the error protocol sits in the same modal and saves on change
-    const errOp = page.doc.querySelector('.mas-modal input[placeholder="op-builtin-observe"]');
-    assert.ok(errOp, 'the error-protocol input is missing from the modal');
-    errOp.value = 'op-builtin-captcha';
-    errOp.dispatchEvent(new page.window.Event('input'));
-    const savedSettings = JSON.parse(page.window.localStorage.getItem('mas.flow'));
-    assert.equal(savedSettings.settings.errorOperation, 'op-builtin-captcha');
+    // Round 28, item 7: the flow-settings gear is gone - python cells own
+    // everything, so the stages pane must not offer the old modal any more.
+    assert.equal(page.byText('button', '\u2699 \u062a\u0646\u0638\u06cc\u0645\u0627\u062a \u062c\u0631\u06cc\u0627\u0646'),
+      undefined, 'the settings gear must be gone');
+    assert.equal(page.doc.getElementById('mas-flow-typing-mode'), null);
 
     // Round 26: the step editor is the python program - one tall textarea
     const typeLabel = Array.from(page.doc.querySelectorAll('.mas-step-label'))
@@ -702,7 +693,7 @@ test('CAPTCHA handoff notice is non-blocking and offers a human-only continuatio
     assert.ok(confirm.textContent.includes('کد یا پاسخ را برای هوش مصنوعی نفرست'));
     assert.equal(page.doc.getElementById('mas-confirm-approve').textContent,
       'ادامه پس از بررسی انسانی');
-    assert.equal(page.doc.getElementById('mas-confirm-refuse').textContent, 'توقف جریان');
+    assert.equal(page.doc.getElementById('mas-confirm-refuse').textContent, 'توقف عملیات');
     assert.equal(page.doc.getElementById('mas-confirm-shot').getAttribute('href'),
       '/automation/api/public/shot/challenge-1.png');
 
@@ -769,7 +760,7 @@ test('round 27: the desktop view shows the human-action card too', async () => {
     assert.equal(page.doc.getElementById('mas-desktop-approve').textContent,
       '\u0627\u062f\u0627\u0645\u0647 \u067e\u0633 \u0627\u0632 \u0628\u0631\u0631\u0633\u06cc \u0627\u0646\u0633\u0627\u0646\u06cc');
     assert.equal(page.doc.getElementById('mas-desktop-refuse').textContent,
-      '\u062a\u0648\u0642\u0641 \u062c\u0631\u06cc\u0627\u0646');
+      '\u062a\u0648\u0642\u0641 \u0639\u0645\u0644\u06cc\u0627\u062a');
     assert.equal(
       page.doc.querySelector('#mas-desktop-handoff a.mas-confirm-shot').getAttribute('href'),
       '/automation/api/public/shot/challenge-1.png');

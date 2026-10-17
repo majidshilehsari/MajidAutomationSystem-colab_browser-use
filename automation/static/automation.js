@@ -842,11 +842,6 @@ function renderFlow() {
   }
   state.flow.steps.forEach((step, index) => list.appendChild(stepRow(step, index)));
 
-  const settings = state.flow.settings;
-  const settingsRow = el('div', { class: 'mas-row' }, [
-    button('⚙ ' + t('flowSettingsGear'), openFlowSettingsModal),
-  ]);
-
   // One line of actions that floats right above the footer while - and only
   // while - the flow tab is the open one (it lives inside the pane, so hiding
   // the section hides the bar with it; nothing to unmount on tab changes).
@@ -870,89 +865,7 @@ function renderFlow() {
   // start right under the header. When it sat last, sticky anchored it to its
   // natural place - the bottom of the pane - which is exactly where the user
   // kept finding it (round 14).
-  replace(pane, ioRow, nameRow, errorBox, list, settingsRow);
-}
-
-/* Round 25: the flow settings live in a gear modal, so the steps own the
- * whole width of the pane. Everything saves on change, modal or not. */
-function openFlowSettingsModal() {
-  const settings = state.flow.settings;
-  // `let` + wrapper on purpose: the close button below is built inside the
-  // modalCard() arguments, before the function modalCard returns exists.
-  let close = () => {};
-  close = modalCard([
-    el('div', { class: 'mas-card-head' },
-      [el('b', { text: '⚙ ' + t('flowSettingsGear') })]),
-    el('label', { class: 'mas-field' }, [
-      el('span', { text: t('defaultDelay') }),
-      el('input', {
-        class: 'mas-input', type: 'number', min: '0', value: settings.defaultDelayAfterMs,
-        onInput: (e) => { settings.defaultDelayAfterMs = Number(e.target.value) || 0; persistFlow(); },
-      }),
-    ]),
-    el('label', { class: 'mas-field' }, [
-      el('span', { text: t('typingMode') }),
-      el('select', {
-        id: 'mas-flow-typing-mode', class: 'mas-input',
-        onChange: (e) => { settings.typingMode = e.target.value; persistFlow(); },
-      }, ['low', 'normal', 'fast'].map((mode) => el('option', {
-        value: mode, selected: (settings.typingMode || 'normal') === mode,
-      }, t('typing' + mode[0].toUpperCase() + mode.slice(1))))),
-    ]),
-    el('p', { class: 'mas-hint', text: t('typingModeHelp') }),
-    el('label', { class: 'mas-field' }, [
-      el('span', { text: t('repeat') }),
-      el('input', {
-        class: 'mas-input', type: 'number', min: '1', value: settings.repeat,
-        onInput: (e) => { settings.repeat = Math.max(1, Number(e.target.value) || 1); persistFlow(); },
-      }),
-    ]),
-    el('label', { class: 'mas-check' }, [
-      el('input', {
-        type: 'checkbox', checked: settings.screenshotAfterEachStep,
-        onChange: (e) => { settings.screenshotAfterEachStep = e.target.checked; persistFlow(); },
-      }),
-      el('span', { text: t('screenshotEach') }),
-    ]),
-    el('label', { class: 'mas-check' }, [
-      el('input', {
-        type: 'checkbox', checked: settings.screenshotBeforeEachStep,
-        onChange: (e) => { settings.screenshotBeforeEachStep = e.target.checked; persistFlow(); },
-      }),
-      el('span', { text: t('screenshotBefore') }),
-    ]),
-    el('label', { class: 'mas-check' }, [
-      el('input', {
-        type: 'checkbox', checked: settings.screenshotOnError !== false,
-        onChange: (e) => { settings.screenshotOnError = e.target.checked; persistFlow(); },
-      }),
-      el('span', { text: t('screenshotOnError') }),
-    ]),
-    el('label', { class: 'mas-check' }, [
-      el('input', {
-        type: 'checkbox', checked: settings.stopOnError,
-        onChange: (e) => { settings.stopOnError = e.target.checked; persistFlow(); },
-      }),
-      el('span', { text: t('stopOnError') }),
-    ]),
-    el('label', { class: 'mas-field' }, [
-      el('span', { text: t('flowErrorOp') }),
-      el('input', {
-        class: 'mas-input', value: settings.errorOperation || '',
-        placeholder: 'op-builtin-observe',
-        onInput: (e) => { settings.errorOperation = e.target.value; persistFlow(); },
-      }),
-    ]),
-    el('p', { class: 'mas-hint', text: t('brainPolicy') }),
-    el('label', { class: 'mas-check' }, [
-      el('input', {
-        type: 'checkbox', checked: Boolean(settings.retryAfterProtocol),
-        onChange: (e) => { settings.retryAfterProtocol = e.target.checked; persistFlow(); },
-      }),
-      el('span', { text: t('flowRetryAfterProtocol') }),
-    ]),
-    el('div', { class: 'mas-row' }, [button(t('close'), () => close())]),
-  ]);
+  replace(pane, ioRow, nameRow, errorBox, list);
 }
 
 /* ------------------------------------------------------------------ *
