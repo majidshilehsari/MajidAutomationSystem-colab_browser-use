@@ -359,6 +359,7 @@ class AutomationEngine:
         # Round 28, item 1: the concrete outputs a python cell recorded with
         # set_output(); the step result row carries them to the panel.
         self._current_cell_outputs: Optional[Dict[str, Any]] = None
+        self._current_cell_watch = False
         self._wakeup = threading.Event()
         self._state: Optional[RunState] = None
         self._thread: Optional[threading.Thread] = None
@@ -835,7 +836,8 @@ class AutomationEngine:
                 image: Optional[Dict[str, int]] = None,
                 typing_mode: Optional[str] = None,
                 key_delay_ms: Optional[int] = None,
-                outputs: Optional[Dict[str, Any]] = None) -> None:
+                outputs: Optional[Dict[str, Any]] = None,
+                watch: bool = False) -> None:
         """Append one machine-readable row about a step's outcome."""
         with self._lock:
             assert self._state is not None
@@ -861,6 +863,7 @@ class AutomationEngine:
                 "typingMode": typing_mode,
                 "keyDelayMs": key_delay_ms,
                 "outputs": outputs or None,
+                "watch": True if watch else None,
             })
             if len(self._state.results) > 2000:
                 self._state.results = self._state.results[-1500:]
@@ -1295,7 +1298,8 @@ class AutomationEngine:
                      typing_mode=typing_mode, key_delay_ms=key_delay_ms,
                      outputs=(self._current_cell_outputs
                               if kind == "python" and self._current_cell_outputs
-                              else None))
+                              else None),
+                     watch=(kind == "python" and bool(self._current_cell_watch)))
 
         if self._shots is not None:
             for role, name in shots.items():
@@ -1735,6 +1739,7 @@ class AutomationEngine:
                     params[str(item["key"])] = item.get("value")
         cell_outputs: Dict[str, Any] = {}
         self._current_cell_outputs = cell_outputs
+        self._current_cell_watch = False
 
         def set_output(key: Any, value: Any = "") -> None:
             if value is None or isinstance(value, (str, int, float, bool)):
@@ -1752,6 +1757,9 @@ class AutomationEngine:
                     return 0.0
 
         def pause_all(reason: Any = "") -> Tuple[int, str, str]:
+            # a watchdog cell keeps wearing yellow in the panel even after
+            # the human resolves the moment and the next cell runs
+            self._current_cell_watch = True
             return namespace["human_verify"](
                 "\u23f8 \u0633\u0644\u0648\u0644 \u067e\u0627\u06cc\u0634\u06af\u0631: %s \u2014 \u062a\u0627 \u062d\u0644 \u0646\u0634\u0648\u062f\u060c \u0647\u0645\u0647\u0654 \u0639\u0645\u0644\u06cc\u0627\u062a \u0645\u062a\u0648\u0642\u0641 \u0627\u0633\u062a."
                 % (str(reason) or "\u0645\u0648\u0631\u062f\u06cc \u0631\u0648\u06cc \u0635\u0641\u062d\u0647 \u062f\u06cc\u062f\u0647 \u0634\u062f"))

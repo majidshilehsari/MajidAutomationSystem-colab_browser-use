@@ -119,6 +119,7 @@ COMMON_STEP_FIELDS = [
     # concrete outputs the cell recorded on its last run.
     "settings",
     "outputs",
+    "lastReport",
 ]
 
 _INT_COORD_FIELDS = ("x", "y", "x1", "y1", "x2", "y2")

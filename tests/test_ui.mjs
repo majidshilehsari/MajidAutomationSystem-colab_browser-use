@@ -632,9 +632,13 @@ test('the settings gear is gone and python steps edit cleanly', async () => {
     assert.equal(page.doc.getElementById('mas-flow-typing-mode'), null);
 
     // Round 26: the step editor is the python program - one tall textarea
-    const typeLabel = Array.from(page.doc.querySelectorAll('.mas-step-label'))
-      .find((button) => button.textContent.includes('hello'));
-    typeLabel.dispatchEvent(new page.window.Event('click'));
+    // round 28: the pencil opens the inline editor (the cell itself opens
+    // the modal workspace now)
+    const typeRow = Array.from(page.doc.querySelectorAll('.mas-step'))
+      .find((row) => row.textContent.includes('hello'));
+    Array.from(typeRow.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('\u270e'))
+      .dispatchEvent(new page.window.Event('click'));
     const codeArea = page.doc.querySelector('.mas-editor textarea');
     assert.ok(codeArea, 'the python code editor is missing');
     assert.equal(codeArea.value, "check(type_text('hello', mode='fast'))");
@@ -644,9 +648,11 @@ test('the settings gear is gone and python steps edit cleanly', async () => {
     const saved = JSON.parse(page.window.localStorage.getItem('mas.flow'));
     assert.equal(saved.steps[0].code, "check(type_text('hello', mode='low'))");
 
-    const pauseLabel = Array.from(page.doc.querySelectorAll('.mas-step-label'))
-      .find((button) => button.textContent.includes('\u0628\u0631\u0631\u0633\u06cc \u0627\u0646\u0633\u0627\u0646\u06cc'));
-    pauseLabel.dispatchEvent(new page.window.Event('click'));
+    const pauseRow = Array.from(page.doc.querySelectorAll('.mas-step'))
+      .find((row) => row.textContent.includes('\u0628\u0631\u0631\u0633\u06cc \u0627\u0646\u0633\u0627\u0646\u06cc'));
+    Array.from(pauseRow.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('\u270e'))
+      .dispatchEvent(new page.window.Event('click'));
     const prompt = page.doc.querySelector('.mas-editor textarea');
     assert.ok(prompt, 'the human-verification step edits as code too');
     assert.ok(prompt.value.includes('human_verify('));
@@ -1016,7 +1022,11 @@ test('editing a step refreshes its label instead of keeping the fallback', async
     assert.ok(row.textContent.includes('\u067e\u0627\u06cc\u062a\u0648\u0646'),
       'expected the fallback label first: ' + row.textContent);
 
-    row.querySelector('.mas-step-label').dispatchEvent(new page.window.Event('click'));
+    // Round 28: clicking the cell itself opens its modal workspace; the
+    // pencil is what opens the inline editor now.
+    Array.from(row.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('\u270e'))
+      .dispatchEvent(new page.window.Event('click'));
     const field = (name) => Array.from(pane.querySelectorAll('.mas-editor label'))
       .find((l) => l.querySelector('span') && l.querySelector('span').textContent === name)
       .querySelector('input, textarea, select');
@@ -1046,7 +1056,9 @@ test('a hand written label survives editing the step', async () => {
     clickTab(page, 'flow');
     await page.wait(10);
     const pane = page.doc.getElementById('mas-tab-flow');
-    pane.querySelector('.mas-step .mas-step-label').dispatchEvent(new page.window.Event('click'));
+    Array.from(pane.querySelectorAll('.mas-step button'))
+      .find((b) => b.textContent.includes('\u270e'))
+      .dispatchEvent(new page.window.Event('click'));
     const field = (name) => Array.from(pane.querySelectorAll('.mas-editor label'))
       .find((l) => l.querySelector('span') && l.querySelector('span').textContent === name)
       .querySelector('input, textarea, select');
@@ -1062,6 +1074,127 @@ test('a hand written label survives editing the step', async () => {
 
     assert.equal(pane.querySelector('.mas-step .mas-step-label').textContent,
       '\u0646\u0648\u0634\u062a\u0646 \u062f\u0631 \u06af\u0648\u06af\u0644');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 28: a cell opens its five-tab workspace and runs on its own', async () => {
+  const flow = {
+    name: '\u0639\u0645\u0644\u06cc\u0627\u062a \u0633\u0644\u0648\u0644\u06cc',
+    viewport: { width: 1366, height: 768 },
+    steps: [{ id: 'c1', type: 'python', code: "set_output('age', 31)",
+              label: '\u0633\u0646 \u0631\u0627 \u0628\u06af\u06cc\u0631',
+              settings: [{ key: 'wait', kind: 'number', value: 2,
+                           label: '\u0645\u06a9\u062b' }],
+              outputs: { pixel: 'x=5' }, enabled: true }],
+  };
+  const page = await mount({ flow });
+  try {
+    await authenticate(page);
+    clickTab(page, 'flow');
+    await page.wait(10);
+    const pane = page.doc.getElementById('mas-tab-flow');
+    const row = pane.querySelector('.mas-step');
+    // the cell shows its title, and never the code up front
+    assert.ok(row.textContent.includes('\u0633\u0646 \u0631\u0627 \u0628\u06af\u06cc\u0631'));
+    assert.ok(!row.textContent.includes('set_output'),
+      'the code must stay hidden until the modal opens');
+
+    // clicking the cell opens the modal titled with the operation name
+    row.querySelector('.mas-step-label').dispatchEvent(new page.window.Event('click'));
+    const opened = await page.until(() => page.doc.querySelector('.mas-modal .mas-card-head'));
+    assert.ok(opened, 'the cell modal never opened');
+    const head = page.doc.querySelector('.mas-modal .mas-card-head');
+    assert.ok(head.textContent.includes('\u0639\u0645\u0644\u06cc\u0627\u062a \u0633\u0644\u0648\u0644\u06cc'));
+    assert.ok(head.textContent.includes('\u0633\u0646 \u0631\u0627 \u0628\u06af\u06cc\u0631'));
+    const tabs = Array.from(page.doc.querySelectorAll('#mas-cell-tabs [data-celltab]'))
+      .map((node) => node.dataset.celltab);
+    assert.deepEqual(tabs, ['settings', 'report', 'desc', 'outputs', 'script']);
+
+    // settings: the user tunes the seconds and it persists
+    const num = page.doc.querySelector('#mas-cell-body input[type="number"]');
+    assert.ok(num, 'the seconds field is missing');
+    assert.equal(num.value, '2');
+    num.value = '5';
+    num.dispatchEvent(new page.window.Event('input'));
+    let saved = JSON.parse(page.window.localStorage.getItem('mas.flow'));
+    assert.equal(saved.steps[0].settings[0].value, 5);
+
+    // outputs: the concrete values are there, with a copy button
+    page.doc.querySelector('#mas-cell-tabs [data-celltab="outputs"]')
+      .dispatchEvent(new page.window.Event('click'));
+    const outBody = page.doc.getElementById('mas-cell-body');
+    assert.ok(outBody.textContent.includes('pixel'));
+    assert.ok(outBody.textContent.includes('x=5'));
+    assert.ok(Array.from(outBody.querySelectorAll('button'))
+      .some((b) => b.textContent.includes('\ud83d\udccb')), 'the copy button is missing');
+
+    // script: the cell's python, shown and editable
+    page.doc.querySelector('#mas-cell-tabs [data-celltab="script"]')
+      .dispatchEvent(new page.window.Event('click'));
+    const script = page.doc.querySelector('.mas-cell-script');
+    assert.equal(script.value, "set_output('age', 31)");
+
+    // close, then the per-cell play button runs exactly this cell
+    page.byText('button', '\u0628\u0633\u062a\u0646').dispatchEvent(new page.window.Event('click'));
+    await page.until(() => page.doc.querySelector('.mas-modal') === null);
+    Array.from(row.querySelectorAll('button'))
+      .find((b) => b.textContent === '\u25b6')
+      .dispatchEvent(new page.window.Event('click'));
+    const ran = await page.until(() => page.posts.some((p) => p.url.endsWith('/run')));
+    assert.ok(ran, 'the single-cell run never hit /run');
+    const sent = page.posts.filter((p) => p.url.endsWith('/run')).pop();
+    const body = JSON.parse(sent.body);
+    assert.equal(body.flow.steps.length, 1, 'the cell must run alone');
+    assert.equal(body.flow.steps[0].id, 'c1');
+    assert.equal(body.flow.steps[0].settings[0].value, 5,
+      'the tuned setting must travel with the cell');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 28: cells wear green/yellow/red and keep their outputs and report', async () => {
+  const flow = {
+    name: 'colors', viewport: { width: 1366, height: 768 },
+    steps: [
+      { id: 'c1', type: 'python', code: 'log(1)', label: 'one', enabled: true },
+      { id: 'c2', type: 'python', code: 'log(2)', label: 'watch', enabled: true },
+      { id: 'c3', type: 'python', code: 'log(3)', label: 'bad', enabled: true },
+    ],
+  };
+  const status = {
+    runId: 'r9', status: 'error', index: 2, passIndex: 1, stepCount: 3,
+    elapsedMs: 100, entries: [],
+    results: [
+      { index: 0, passIndex: 1, stepId: 'c1', status: 'ok', durationMs: 5,
+        outputs: { age: 31 } },
+      { index: 1, passIndex: 1, stepId: 'c2', status: 'ok', durationMs: 5,
+        watch: true },
+      { index: 2, passIndex: 1, stepId: 'c3', status: 'error', durationMs: 5,
+        error: 'boom' },
+    ],
+  };
+  const page = await mount({ flow, status });
+  try {
+    await authenticate(page);
+    clickTab(page, 'flow');
+    const ready = await page.until(
+      () => page.doc.querySelectorAll('.mas-step').length === 3);
+    assert.ok(ready, 'the cells never rendered');
+    const rows = Array.from(page.doc.querySelectorAll('.mas-step'));
+    assert.ok(rows[0].classList.contains('mas-cell-ok'), 'a done cell must be green');
+    assert.ok(rows[1].classList.contains('mas-cell-watch'),
+      'a watchdog cell stays yellow after the run moved on');
+    assert.ok(rows[2].classList.contains('mas-cell-err'), 'a failed cell must be red');
+    // the cells kept their concrete outputs and their Persian text report
+    const saved = JSON.parse(page.window.localStorage.getItem('mas.flow'));
+    assert.equal(saved.steps[0].outputs.age, 31);
+    assert.equal(saved.steps[2].lastReport.ok, false);
+    assert.ok(String(saved.steps[2].lastReport.text).includes('boom'));
+    assert.equal(saved.steps[1].lastReport.ok, true,
+      'a watchdog cell that was resolved counts as done');
   } finally {
     await page.cleanup();
   }

@@ -1016,8 +1016,18 @@ function clearAllSteps() {
 }
 
 function stepRow(step, index, outcomes = stepOutcomes()) {
+  // Round 28, item 1: Colab-style cell colours. Green when the cell is done,
+  // yellow while it runs - and a watchdog cell keeps its yellow (row.watch)
+  // even after the run moved on to the next cell - red when it errored.
+  const outcome = outcomes.get(index);
+  const running = state.status.index === index && isRunning();
+  const cellClass = running ? ' mas-cell-run'
+    : !outcome ? ''
+    : outcome.watch ? ' mas-cell-watch'
+    : outcome.status === 'ok' ? ' mas-cell-ok'
+    : outcome.status === 'error' ? ' mas-cell-err' : '';
   const row = el('li', {
-    class: 'mas-step' + (state.status.index === index && isRunning() ? ' is-current' : ''),
+    class: 'mas-step' + cellClass + (running ? ' is-current' : ''),
     draggable: 'true', dataset: { id: step.id },
   });
   row.addEventListener('dragstart', (event) => {
@@ -1048,12 +1058,23 @@ function stepRow(step, index, outcomes = stepOutcomes()) {
     el('button', {
       class: 'mas-step-label', type: 'button', text: step.label || labelFor(step),
       title: step.note || '',
-      onClick: () => {
-        state.openStepId = state.openStepId === step.id ? null : step.id;
-        renderFlow();
-      },
+      onClick: () => openCellModal(step, index),
     }),
     el('span', { class: 'mas-spacer' }),
+    el('span', { class: 'mas-cell-controls' }, [
+      el('button', {
+        class: 'mas-icon', type: 'button', text: '▶', title: t('cellPlay'),
+        onClick: () => runSingleCell(step),
+      }),
+      el('button', {
+        class: 'mas-icon', type: 'button', text: '⏸', title: t('cellPause'),
+        onClick: () => cellControl('pause'),
+      }),
+      el('button', {
+        class: 'mas-icon', type: 'button', text: '⏹', title: t('cellStop'),
+        onClick: () => cellControl('stop'),
+      }),
+    ]),
     el('button', {
       class: 'mas-icon', type: 'button', text: '✎', title: t('opEdit'),
       onClick: () => {
@@ -1110,6 +1131,218 @@ function openStepNoteModal(step) {
     })]),
     area,
     el('div', { class: 'mas-row mas-wrap' }, [writeBtn]),
+  ]);
+}
+
+
+/* ------------------------------------------------------------------ *
+ * Round 28, item 1: the Colab-style cell system
+ *
+ * Every stage is a cell: one python code as its single main input, a
+ * title that is all you see up front, and a workspace modal with five
+ * tabs (settings, the Persian text report, the long explanation, the
+ * concrete outputs and the script). Each cell runs, pauses and stops
+ * on its own, and wears green/yellow/red from the run results - a
+ * watchdog cell keeps its yellow even after the run moves on.
+ * ------------------------------------------------------------------ */
+
+async function runSingleCell(step) {
+  try {
+    await api('/run', { method: 'POST', body: { flow: {
+      name: `${state.flow.name || t('title')} — ${step.label || labelFor(step)}`,
+      viewport: state.flow.viewport,
+      steps: [step],
+    } } });
+    toast(t('cellStarted'), 'ok');
+    state.lastResultsSig = '';   // merge this cell's fresh results right away
+    refreshStatus();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+async function cellControl(action) {
+  try {
+    await api('/control', { method: 'POST', body: { action } });
+    refreshStatus();
+  } catch (error) { toast(error.message, 'error'); }
+}
+
+/** Fold the run results into the cells: every cell keeps its own Persian
+ *  report and its concrete outputs, long after the run is over. */
+function mergeCellResults(status) {
+  const rows = (status && status.results) || [];
+  if (!rows.length) return;
+  let changed = false;
+  rows.forEach((row) => {
+    if (!row || !row.stepId) return;
+    const step = (state.flow.steps || []).find((s) => s && s.id === row.stepId);
+    if (!step) return;
+    const when = row.startedAt
+      ? new Date(Math.round(row.startedAt * 1000)).toLocaleString('fa-IR') : '';
+    step.lastReport = {
+      ok: row.status === 'ok' || row.status === 'ignored',
+      when,
+      text: row.error || row.text
+        || (row.status === 'ok' ? t('cellDone') : String(row.status || '')),
+    };
+    if (row.outputs && typeof row.outputs === 'object'
+        && Object.keys(row.outputs).length) {
+      step.outputs = Object.assign({}, step.outputs, row.outputs);
+    }
+    changed = true;
+  });
+  if (changed) persistFlow();
+}
+
+function openCellModal(step, index) {
+  const tabs = ['settings', 'report', 'desc', 'outputs', 'script'];
+  let active = 'settings';
+  const tabBar = el('div', { class: 'mas-tabs mas-subtabs', id: 'mas-cell-tabs' });
+  const body = el('div', { id: 'mas-cell-body' });
+  const draw = () => {
+    replace(tabBar, ...tabs.map((name) => el('button', {
+      class: 'mas-tab' + (active === name ? ' is-active' : ''), type: 'button',
+      dataset: { celltab: name },
+      text: t('cellTab' + name.charAt(0).toUpperCase() + name.slice(1)),
+      onClick: () => { active = name; draw(); },
+    })));
+    replace(body, cellTabPane(step, index, active, draw));
+  };
+  const close = modalCard([
+    el('div', { class: 'mas-card-head' }, [el('b', {
+      text: '🧩 ' + (state.flow.name || '') + ' — ' + (step.label || labelFor(step)),
+    })]),
+    tabBar,
+    body,
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button(t('closeBtn'), () => close()),
+    ]),
+  ]);
+  draw();
+}
+
+function cellTabPane(step, index, active, redraw) {
+  if (active === 'settings') {
+    if (!Array.isArray(step.settings)) step.settings = [];
+    const fields = step.settings.map((item, pos) => {
+      const label = (item.label || item.key)
+        + (item.kind === 'number' ? ' (' + t('cellSeconds') + ')' : '');
+      let input;
+      if (item.kind === 'bool') {
+        input = el('input', {
+          type: 'checkbox', checked: Boolean(item.value),
+          onChange: (event) => { item.value = event.target.checked; persistFlow(); },
+        });
+      } else if (item.kind === 'select') {
+        input = el('select', {
+          class: 'mas-input',
+          onChange: (event) => { item.value = event.target.value; persistFlow(); },
+        }, (item.options || []).map((option) => el('option', {
+          value: option, selected: String(item.value || '') === String(option),
+        }, String(option))));
+      } else {
+        input = el('input', {
+          class: 'mas-input', type: item.kind === 'number' ? 'number' : 'text',
+          value: (item.value === undefined || item.value === null) ? '' : String(item.value),
+          onInput: (event) => {
+            item.value = item.kind === 'number'
+              ? (event.target.value === '' ? '' : Number(event.target.value))
+              : event.target.value;
+            persistFlow();
+          },
+        });
+      }
+      return el('label', { class: 'mas-field' }, [
+        el('span', { text: label }), input,
+        el('button', {
+          class: 'mas-icon', type: 'button', text: '✕', title: t('delete'),
+          onClick: () => { step.settings.splice(pos, 1); persistFlow(); redraw(); },
+        }),
+      ]);
+    });
+    const keyBox = el('input', { class: 'mas-input', placeholder: t('cellParamKey') });
+    const kindBox = el('select', { class: 'mas-input' }, ['number', 'text', 'select', 'bool']
+      .map((kind) => el('option', { value: kind }, kind)));
+    return el('div', {}, [
+      fields.length ? null : el('p', { class: 'mas-hint', text: t('cellNoSettings') }),
+      ...fields,
+      el('div', { class: 'mas-row mas-wrap' }, [
+        keyBox, kindBox,
+        button('+ ' + t('cellAddParam'), () => {
+          const key = String(keyBox.value || '').trim();
+          if (!key) { toast(t('cellParamKey'), 'warn'); return; }
+          const kind = kindBox.value;
+          const item = { key, label: key, kind,
+            value: kind === 'bool' ? false : kind === 'number' ? 0 : '' };
+          if (kind === 'select') item.options = [];
+          step.settings.push(item);
+          persistFlow(); redraw();
+        }),
+      ]),
+    ]);
+  }
+  if (active === 'report') {
+    const report = step.lastReport;
+    if (!report) return el('p', { class: 'mas-hint', text: t('cellNoReport') });
+    return el('div', { class: 'mas-box' }, [
+      el('b', {
+        text: (report.ok ? '✅ ' + t('cellDone') : '❌ ' + t('cellFailed'))
+          + (report.when ? ' — ' + report.when : ''),
+      }),
+      el('pre', { class: 'mas-cell-report', text: String(report.text || '') }),
+    ]);
+  }
+  if (active === 'desc') {
+    const area = el('textarea', {
+      class: 'mas-input mas-area', rows: '6', value: step.note || '',
+      placeholder: t('stepNoteHint'),
+      onInput: (event) => { step.note = event.target.value; persistFlow(); },
+    });
+    const writeBtn = button('✨ ' + t('stepDocWrite'), async () => {
+      writeBtn.disabled = true;
+      try {
+        const data = await api('/agent/step-doc', { method: 'POST', body: { step } });
+        step.note = String((data && data.text) || '').trim();
+        persistFlow(); redraw();
+      } catch (error) { toast(error.message, 'error'); }
+      writeBtn.disabled = false;
+    }, { class: 'mas-btn' });
+    return el('div', {}, [area, el('div', { class: 'mas-row mas-wrap' }, [writeBtn])]);
+  }
+  if (active === 'outputs') {
+    const outputs = (step.outputs && typeof step.outputs === 'object') ? step.outputs : {};
+    const rows = Object.keys(outputs).map((key) => el('div', {
+      class: 'mas-row mas-cell-out-row',
+    }, [
+      el('b', { text: key }),
+      el('code', { class: 'mas-cell-out-value', text: String(outputs[key]) }),
+      button('📋', () => copyText(String(outputs[key]))),
+    ]));
+    const keyBox = el('input', { class: 'mas-input', placeholder: t('cellParamKey') });
+    const valueBox = el('input', { class: 'mas-input', placeholder: t('cellOutputValue') });
+    return el('div', {}, [
+      rows.length ? null : el('p', { class: 'mas-hint', text: t('cellNoOutputs') }),
+      ...rows,
+      el('div', { class: 'mas-row mas-wrap' }, [
+        keyBox, valueBox,
+        button('+ ' + t('cellAddOutput'), () => {
+          const key = String(keyBox.value || '').trim();
+          if (!key) { toast(t('cellParamKey'), 'warn'); return; }
+          if (!step.outputs || typeof step.outputs !== 'object') step.outputs = {};
+          step.outputs[key] = valueBox.value;
+          persistFlow(); redraw();
+        }),
+      ]),
+      el('p', { class: 'mas-hint', text: t('cellOutputsHint') }),
+    ]);
+  }
+  // script: the cell's one main input, beautiful and orderly
+  return el('div', {}, [
+    el('p', { class: 'mas-hint', text: t('cellScriptHint') }),
+    el('textarea', {
+      class: 'mas-input mas-area mas-cell-script', rows: '16',
+      value: step.code || '', spellcheck: 'false',
+      onInput: (event) => { step.code = event.target.value; persistFlow(); },
+    }),
   ]);
 }
 
@@ -1343,10 +1576,13 @@ async function refreshStatus() {
   // Once a run has finished the highlight stops moving, but the badges still
   // have to catch up, otherwise every step keeps looking "not run yet".
   const sig = `${state.status.runId || ''}:${(state.status.results || []).length}`;
-  if (currentTab() === 'flow' && sig !== state.lastResultsSig) {
+  if (sig !== state.lastResultsSig) {
     state.lastResultsSig = sig;
+    // Round 28, item 1: every cell keeps its own report and its concrete
+    // outputs, merged as results arrive whichever tab happens to be open.
+    mergeCellResults(state.status);
     // Never close an editor the human has open; the badges catch up later.
-    if (!state.openStepId) renderFlow();
+    if (currentTab() === 'flow' && !state.openStepId) renderFlow();
   }
 }
 

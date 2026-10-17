@@ -2345,11 +2345,33 @@ body.mas-desktop-dark .mas-toast {
 body.mas-desktop-dark .mas-toast-ok { border-left-color: #34d399; }
 body.mas-desktop-dark .mas-toast-error { border-left-color: #f87171; }
 
-/* The manual paste dialog (flow JSON from the operator's own clipboard):
- * the box must give the textarea room, on both themes. */
-#mas-root .mas-paste-area {
-  width: 100%;
-  min-width: 320px;
-  margin: 0 0 12px;
-  box-sizing: border-box;
+/* Round 28, item 1: Colab-style cells. Green when done, yellow while
+ * running or watching (a watchdog cell keeps its yellow), red on error. */
+#mas-root .mas-step.mas-cell-ok { border-inline-start: 4px solid #2ea043; }
+#mas-root .mas-step.mas-cell-run,
+#mas-root .mas-step.mas-cell-watch { border-inline-start: 4px solid #d29922; }
+#mas-root .mas-step.mas-cell-err { border-inline-start: 4px solid #f85149; }
+#mas-root .mas-cell-controls { display: inline-flex; gap: 2px; align-items: center; }
+#mas-root .mas-cell-script {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  direction: ltr;
+  text-align: left;
+  min-height: 240px;
+  font-size: 12.5px;
+}
+#mas-root .mas-cell-report {
+  white-space: pre-wrap;
+  direction: rtl;
+  text-align: right;
+  background: rgba(127, 127, 127, 0.08);
+  padding: 8px;
+  border-radius: 8px;
+  margin: 6px 0;
+}
+#mas-root .mas-cell-out-value {
+  font-family: ui-monospace, Menlo, monospace;
+  direction: ltr;
+  background: rgba(127, 127, 127, 0.08);
+  padding: 2px 8px;
+  border-radius: 6px;
 }
