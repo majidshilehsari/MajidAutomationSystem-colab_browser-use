@@ -1,0 +1,15 @@
+# English twin of fluxbox-menu, used when DESKTOP_LANG=en.
+[begin] (Majid Automation System)
+  [exec] (Automation Panel) {google-chrome --new-window http://127.0.0.1:6080/automation/panel.html}
+  [exec] (Desktop View) {google-chrome --new-window http://127.0.0.1:6080/vnc.html}
+  [exec] (New Chrome Window) {google-chrome --new-window about:blank}
+  [exec] (Screenshot) {sh -c "mkdir -p /data/shots && scrot /data/shots/desktop-$(date +%Y%m%d-%H%M%S).png"}
+  [separator]
+  [windowsmenu] (Open Windows)
+  [workspacesmenu] (Workspaces)
+  [exec] (Close Sticky "Open File" Dialogs) {sh -c "for w in $(wmctrl -l | grep -iE 'open file|file chooser' | awk '{print $1}'); do wmctrl -ic $w; done"}
+  [exec] (Close Active Window) {xdotool getwindowfocus windowkill}
+  [separator]
+  [config] (Desktop Settings)
+  [restart] (Restart Window Manager)
+[end]

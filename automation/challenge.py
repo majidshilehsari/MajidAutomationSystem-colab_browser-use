@@ -3,18 +3,33 @@
 This module intentionally only classifies page text and visible DOM hints. It
 never clicks, enters, solves, bypasses, or submits a challenge. The engine uses
 it as a safety interlock: when cues are found, it pauses for a human.
+
+Round-12 hardening (the false-pause loop): a *word* on the page is not a
+challenge.  Chat histories, model answers, code blocks, prompt boxes and our
+own UI are stripped before the text is read, and a pause now requires
+**structural** evidence - a visible widget/iframe/selector from a known
+provider, or a challenge-shaped title.  Text-only wording is still reported
+(as ``signals`` plus ``evidence``) so logs and reports stay informative, but it
+downgrades to a non-blocking progress notice instead of stopping the run.
+Every assessment also carries a small ``textHash`` fingerprint so the engine
+can refuse to raise the very same handoff twice on an unchanged page.
 """
 
 from __future__ import annotations
 
+import hashlib
 import re
 from typing import Any, Dict, Iterable, List
 from urllib.parse import urlsplit
 
 
 # Keep the probe read-only and small. Raw page text is inspected in memory, but
-# the classifier returns only coarse signal names; it does not persist text,
-# form values, iframe URLs, or query parameters in the run log.
+# the classifier returns only coarse signal names plus short evidence snippets;
+# it does not persist full body text, form values, iframe URLs, or queries.
+#
+# The text is read from a *clone* of the body with the non-credible regions
+# removed first: code, prompts, chat messages and hidden material mention
+# "captcha"/"security check" all the time without any challenge being present.
 CHALLENGE_SCRIPT = r"""
 (() => {
   const visible = (el) => {
@@ -37,10 +52,29 @@ CHALLENGE_SCRIPT = r"""
       el.getAttribute('src') || '',
       el.hasAttribute('data-sitekey') ? 'data-sitekey' : ''
     ].join(' ').slice(0, 400));
+  // Regions whose words must never stop a run on their own.
+  const EXCLUDE = [
+    'script', 'style', 'noscript', 'template', 'pre', 'code', 'textarea',
+    '[contenteditable="true"]', '[role="textbox"]',
+    '[data-message-author]', '[data-role="message"]',
+    '[class*="markdown" i]', '[class*="message-body" i]',
+    '[class*="message-content" i]', '[class*="chat-history" i]',
+    '[class*="conversation" i]', '#mas-root', '#mas-toast'
+  ].join(',');
+  let text = '';
+  try {
+    const clone = document.body ? document.body.cloneNode(true) : null;
+    if (clone) {
+      clone.querySelectorAll(EXCLUDE).forEach((el) => el.remove());
+      text = (clone.innerText || clone.textContent || '');
+    }
+  } catch (err) {
+    text = (document.body && document.body.innerText) || '';
+  }
   return {
     url: location.href,
     title: document.title || '',
-    text: (document.body && document.body.innerText || '').slice(0, 30000),
+    text: text.slice(0, 30000),
     hints
   };
 })()
@@ -80,6 +114,9 @@ _PERSIAN_HUMAN_PHRASE = re.compile(
     re.IGNORECASE,
 )
 
+#: Signals that mean "a real widget/page shape is in front of the browser".
+STRUCTURAL_SIGNALS = ("visible-captcha-or-challenge-widget", "browser-challenge-title")
+
 
 def safe_origin(url: Any) -> str:
     """Return only an HTTP(S) origin; omit credentials, path, query and hash."""
@@ -102,11 +139,19 @@ def safe_origin(url: Any) -> str:
         return ""
 
 
+def _snippet(match: "re.Match[str]", limit: int = 90) -> str:
+    # Only the matched phrase itself: no surrounding words, so the evidence
+    # never leaks neighbouring page text into logs and reports.
+    return " ".join(match.group(0).split())[:limit]
+
+
 def assess_page(payload: Any) -> Dict[str, Any]:
     """Classify a read-only page probe or a plain page-text string.
 
-    The result deliberately contains no raw body text or raw DOM attributes.
-    A positive result means "pause and ask the human", not "solve this".
+    The result deliberately contains no raw body text. ``detected`` now means
+    "structural evidence says pause and ask the human"; wording-only pages keep
+    their ``signals`` and ``evidence`` but report ``detected=False`` so the
+    engine can log them as a non-blocking notice instead of stopping.
     """
     if isinstance(payload, str):
         text = payload
@@ -134,24 +179,38 @@ def assess_page(payload: Any) -> Dict[str, Any]:
         title = ""
     if isinstance(hints, str):
         hint_text = hints
+        hint_items: List[str] = [hints]
     else:
-        hint_text = " ".join(str(item) for item in hints if isinstance(item, (str, int, float)))
+        hint_items = [str(item) for item in hints if isinstance(item, (str, int, float))]
+        hint_text = " ".join(hint_items)
 
-    # Collapse whitespace for phrase matching but do not expose this text in the
-    # assessment returned to callers.
+    # Collapse whitespace for phrase matching but do not expose this text in
+    # the assessment returned to callers.
     body = re.sub(r"\s+", " ", (title + " " + text)[:30000])
     signals: List[str] = []
+    evidence: List[Dict[str, Any]] = []
 
-    if _PROVIDER_HINT.search(hint_text):
-        signals.append("visible-captcha-or-challenge-widget")
-    if _HUMAN_PHRASE.search(body):
-        signals.append("human-verification-wording")
-    if _PERSIAN_HUMAN_PHRASE.search(body):
-        signals.append("localized-human-verification-wording")
-    if _SECURITY_PHRASE.search(body):
-        signals.append("security-verification-wording")
-    if _BROWSER_CHALLENGE.search(body):
-        signals.append("browser-challenge-wording")
+    def note(signal: str, kind: str, snippet: str, region: str, visible: bool) -> None:
+        signals.append(signal)
+        evidence.append({
+            "signal": signal, "kind": kind, "snippet": snippet[:120],
+            "region": region, "visible": visible,
+        })
+
+    provider = _PROVIDER_HINT.search(hint_text)
+    if provider:
+        where = next((item for item in hint_items if _PROVIDER_HINT.search(item)), hint_text)
+        note("visible-captcha-or-challenge-widget", "structural", where[:120],
+             "visible-widget", True)
+    for pattern, signal in (
+        (_HUMAN_PHRASE, "human-verification-wording"),
+        (_PERSIAN_HUMAN_PHRASE, "localized-human-verification-wording"),
+        (_SECURITY_PHRASE, "security-verification-wording"),
+        (_BROWSER_CHALLENGE, "browser-challenge-wording"),
+    ):
+        match = pattern.search(body)
+        if match:
+            note(signal, "text", _snippet(match), "page-text", True)
 
     if _CAPTCHA_TERM.search(body):
         # A bare mention in help/documentation is not enough. Require a nearby
@@ -165,18 +224,31 @@ def assess_page(payload: Any) -> Dict[str, Any]:
             body, re.IGNORECASE,
         )
         if nearby:
-            signals.append("captcha-instructions")
+            note("captcha-instructions", "text", _snippet(nearby), "page-text", True)
 
     # Cloudflare's interstitial commonly relies on a browser-check phrase and a
     # title rather than naming CAPTCHA. Require both cues to avoid flagging any
     # ordinary page whose title happens to say "Just a moment".
     if ("just a moment" in title.lower()
             and ("cloudflare" in hint_text.lower() or _BROWSER_CHALLENGE.search(body))):
-        signals.append("browser-challenge-title")
+        note("browser-challenge-title", "structural", title[:120], "title", True)
 
     signals = list(dict.fromkeys(signals))
+    seen: set = set()
+    unique_evidence: List[Dict[str, Any]] = []
+    for item in evidence:
+        key = (item["signal"], item["snippet"])
+        if key not in seen:
+            seen.add(key)
+            unique_evidence.append(item)
+    structural = any(item["signal"] in STRUCTURAL_SIGNALS for item in unique_evidence)
+    digest = hashlib.sha256()
+    digest.update(body[:8000].encode("utf-8", "replace"))
     return {
-        "detected": bool(signals),
+        "detected": structural,
+        "structural": structural,
         "signals": signals,
+        "evidence": unique_evidence[:12],
+        "textHash": digest.hexdigest()[:16],
         "pageOrigin": safe_origin(url),
     }

@@ -38,7 +38,9 @@ class ValidateFlowTest(unittest.TestCase):
         self.assertEqual(errors, [])
         first = normalized["steps"][1]
         self.assertTrue(first["id"])
-        self.assertEqual(first["label"], "click 100,200")
+        self.assertEqual(first["type"], "python")   # round 26: one language
+        self.assertEqual(first["label"], "کلیک در (100، 200)")
+        self.assertIn("check(click(100, 200))", first["code"])
         self.assertTrue(first["enabled"])
         self.assertFalse(first["requiresConfirmation"])
 
@@ -70,13 +72,20 @@ class ValidateFlowTest(unittest.TestCase):
         self.assertFalse(normalized["settings"]["stopOnError"])
         self.assertTrue(normalized["settings"]["screenshotAfterEachStep"] is False)
 
-    def test_type_accepts_fixed_typing_modes_and_inherits_flow_setting(self):
+    def test_type_overrides_land_in_code_and_flow_mode_is_runtime(self):
         normalized, errors = schema.validate_flow(flow(
             steps=[{"type": "type", "text": "hello", "typingMode": "low"}],
             settings={"typingMode": "fast"}))
         self.assertEqual(errors, [])
         self.assertEqual(normalized["settings"]["typingMode"], "fast")
-        self.assertEqual(normalized["steps"][0]["typingMode"], "low")
+        self.assertIn("mode='low'", normalized["steps"][0]["code"])
+        # without an override the code stays clean: the flow-level typing mode
+        # is resolved when the line runs, exactly like the old engine did
+        normalized, errors = schema.validate_flow(flow(
+            steps=[{"type": "type", "text": "hello"}],
+            settings={"typingMode": "fast"}))
+        self.assertEqual(errors, [])
+        self.assertNotIn("mode=", normalized["steps"][0]["code"])
 
     def test_rejects_unknown_typing_modes(self):
         _, errors = schema.validate_flow(flow(
@@ -95,7 +104,9 @@ class ValidateFlowTest(unittest.TestCase):
             "type": "pause_for_human_verification", "prompt": "Please do this manually.",
         }]))
         self.assertEqual(errors, [])
-        self.assertEqual(normalized["steps"][0]["type"], "pause_for_human_verification")
+        self.assertEqual(normalized["steps"][0]["type"], "python")
+        self.assertIn("human_verify('Please do this manually.')",
+                      normalized["steps"][0]["code"])
         _, errors = schema.validate_flow(flow(steps=[{"type": "pause_for_human_verification"}]))
         self.assertTrue(any("missing required field 'prompt'" in error for error in errors))
         _, errors = schema.validate_flow(flow(steps=[{
@@ -118,7 +129,7 @@ class ValidateFlowTest(unittest.TestCase):
             flow(steps=[{"type": "shell", "command": "ls"}],
                  settings={"allowShellSteps": True}))
         self.assertEqual(errors, [])
-        self.assertEqual(normalized["steps"][0]["command"], "ls")
+        self.assertIn("shell('ls')", normalized["steps"][0]["code"])
 
     def test_rejects_url_without_scheme(self):
         _, errors = schema.validate_flow(flow(steps=[{"type": "goto_url", "url": "example.com"}]))
@@ -135,7 +146,7 @@ class ValidateFlowTest(unittest.TestCase):
     def test_string_keys_are_promoted_to_a_list(self):
         normalized, errors = schema.validate_flow(flow(steps=[{"type": "key", "keys": "Return"}]))
         self.assertEqual(errors, [])
-        self.assertEqual(normalized["steps"][0]["keys"], ["Return"])
+        self.assertIn("press_key(['Return'])", normalized["steps"][0]["code"])
 
     def test_rejects_unsupported_schema_version(self):
         _, errors = schema.validate_flow(flow(schema=99))
@@ -182,7 +193,39 @@ class ValidateFlowTest(unittest.TestCase):
         compact = schema.flow_to_prompt_steps(normalized)
         self.assertNotIn("_index", compact[0])
         self.assertNotIn("enabled", compact[0])
-        self.assertEqual(compact[0]["type"], "goto_url")
+        self.assertEqual(compact[0]["type"], "python")
+        self.assertIn("goto('https://example.com')", compact[0]["code"])
+
+
+class Round28CellModelTest(unittest.TestCase):
+    """Round 28, item 1: a step is a cell - settings and outputs ride along."""
+
+    def test_a_python_cell_carries_settings_and_outputs(self):
+        normalized, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)",
+            "settings": [{"key": "wait", "kind": "number", "value": 2,
+                          "label": "\u0645\u06a9\u062b (\u062b\u0627\u0646\u06cc\u0647)"}],
+            "outputs": {"age": 31}}]))
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["steps"][0]["settings"][0]["value"], 2)
+        self.assertEqual(normalized["steps"][0]["outputs"], {"age": 31})
+
+    def test_cell_settings_are_validated(self):
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)",
+            "settings": [{"kind": "number"}]}]))
+        self.assertTrue(any("needs a 'key'" in error for error in errors))
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)",
+            "settings": [{"key": "x", "kind": "select"}]}]))
+        self.assertTrue(any("options list" in error for error in errors))
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)",
+            "settings": [{"key": "x", "kind": "color"}]}]))
+        self.assertTrue(any("number/text/select/bool" in error for error in errors))
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)", "outputs": ["no"]}]))
+        self.assertTrue(any("outputs must be an object" in error for error in errors))
 
 
 class DefaultLabelTest(unittest.TestCase):
@@ -198,6 +241,42 @@ class DefaultLabelTest(unittest.TestCase):
         }
         for expected, step in cases.items():
             self.assertEqual(schema.default_label(step), expected)
+
+
+class Round25StepTypesTest(unittest.TestCase):
+    """Round 25: python steps and nested operations are first-class."""
+
+    def test_python_and_run_operation_validate(self):
+        normalized, errors = schema.validate_flow(flow(steps=[
+            {"type": "python", "code": "log(1)", "timeout": 30},
+            {"type": "run_operation", "operation": "op-builtin-observe"},
+        ]))
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["steps"][0]["timeout"], 30)
+        self.assertEqual(normalized["steps"][1]["type"], "python")
+        self.assertIn("run_operation('op-builtin-observe')",
+                      normalized["steps"][1]["code"])
+        self.assertIn("python", schema.STEP_DOCS)
+        self.assertIn("run_operation", schema.STEP_DOCS)
+
+    def test_python_needs_code_and_run_operation_needs_an_operation(self):
+        _, errors = schema.validate_flow(flow(steps=[{"type": "python"}]))
+        self.assertTrue(any("'code'" in error for error in errors), errors)
+        _, errors = schema.validate_flow(flow(steps=[{"type": "run_operation"}]))
+        self.assertTrue(any("'operation'" in error for error in errors), errors)
+
+    def test_the_error_protocol_settings_default_to_safe(self):
+        normalized, errors = schema.validate_flow(flow())
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["settings"]["errorOperation"], "")
+        self.assertFalse(normalized["settings"]["retryAfterProtocol"])
+
+    def test_the_error_protocol_settings_are_accepted(self):
+        normalized, errors = schema.validate_flow(flow(
+            settings={"errorOperation": "op-fix", "retryAfterProtocol": True}))
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["settings"]["errorOperation"], "op-fix")
+        self.assertTrue(normalized["settings"]["retryAfterProtocol"])
 
 
 if __name__ == "__main__":

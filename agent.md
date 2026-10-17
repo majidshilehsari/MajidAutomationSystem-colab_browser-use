@@ -164,7 +164,6 @@ POST /automation/api/run       {"flow": {...}} validate then start
 POST /automation/api/control   {"action": "pause" | "resume" | "stop" | "confirm"}
 POST /automation/api/detect    screenshot, windows, page text, DOM elements
 GET  /automation/api/pages     every page detected so far
-GET  /automation/api/guide     the AI guide as markdown
 ```
 
 A step with `"requiresConfirmation": true` stops the run in the `waiting` state
@@ -185,6 +184,18 @@ retry consequential actions blindly, because that can duplicate a submission.
 to localhost). When that port is unreachable, detection degrades to a screenshot
 plus the window list plus the clipboard text, and `cdp` is `false` in the
 snapshot.
+
+### Cells (round 28)
+
+The stages tab is a Colab-style cell list: every cell is one python step and
+shows only its title, wearing green (done), yellow (running / watchdog) or red
+(error). Clicking a cell opens five tabs - user settings, the Persian text
+report, the long explanation, the concrete outputs and the script - and each
+cell has its own play/pause/stop. Cell code reads user settings through
+`params` / `S('key', default)` (seconds, never milliseconds), records concrete
+values with `set_output('key', value)`, and a watchdog cell freezes every
+operation with `pause_all('reason')` until a human resolves the moment. Full
+details: `automation/ai_guide.md` (section «سلول‌ها»).
 
 ## Stop the browser
 

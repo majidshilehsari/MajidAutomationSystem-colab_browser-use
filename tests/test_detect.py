@@ -61,7 +61,11 @@ class StaticCdp:
             "url": "https://example.com/security?session=private",
             "title": "Verify you are human",
             "bodyText": "Please verify you are human to continue.",
-            "elements": [], "elementCount": 0, "challengeHints": [],
+            "elements": [], "elementCount": 0,
+            # Round 12: wording alone is only a notice; the detector test
+            # wants a real challenge, so the fake page carries the widget.
+            "challengeHints": [
+                "IFRAME g-recaptcha https://www.google.com/recaptcha/api2/anchor"],
         }
         return {"value": dom, "url": dom["url"], "title": dom["title"]}
 

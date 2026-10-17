@@ -12,6 +12,14 @@ CDP_PORT=9222
 WEB_ROOT="$STATE_DIR/www"
 AUTOMATION_DIR="$SCRIPT_DIR/automation"
 
+# xclip interprets clipboard bytes in the current locale encoding, and Colab
+# starts with LANG unset (POSIX/ASCII), which turns Persian clipboard text
+# into question marks before Chrome ever sees it. C.UTF-8 is built into glibc
+# and needs no locale generation, so every child (server, xclip, xdotool)
+# inherits a UTF-8 world.
+export LANG=${LANG:-C.UTF-8}
+export LC_ALL=${LC_ALL:-C.UTF-8}
+
 # The sidebar API is served from the same port as noVNC, because the Cloudflare
 # tunnel exposes only one URL. When it runs, this name is also the pid file.
 WEB_MODE=automation
@@ -34,8 +42,12 @@ mkdir -p "$LOG_DIR" "$PROFILE_DIR" "$WEB_ROOT"
 chmod 700 "$STATE_DIR" "$LOG_DIR" "$PROFILE_DIR"
 
 start_chrome() {
+  # --test-type hides the "unsupported command-line flag: --no-sandbox"
+  # warning bar Chrome would otherwise pin to every window (no-sandbox is
+  # required inside Colab); the Docker deployment launcher already carries it.
   nohup env DISPLAY="$DISPLAY_ID" google-chrome \
     --no-sandbox \
+    --test-type \
     --disable-dev-shm-usage \
     --use-gl=swiftshader \
     --enable-unsafe-swiftshader \
@@ -113,6 +125,103 @@ done
 if [[ ! -S /tmp/.X11-unix/X1 ]]; then
   printf 'The virtual display did not start. See %s.\n' "$LOG_DIR/xvfb.log" >&2
   exit 1
+fi
+
+# -- the Persian keyboard ------------------------------------------------
+# noVNC forwards raw key events; the character that finally reaches Chrome is
+# decided by the X keyboard layout, not by the visitor's own OS layout. With
+# only "us" loaded there is simply no way to produce Persian characters, so
+# the desktop always starts with both groups and Alt+Shift as the toggle.
+# Everything here is best-effort on purpose: a missing tool costs one
+# convenience and must never stop the desktop from being served.
+XKB_MODEL=${XKB_MODEL:-pc104}
+XKB_LAYOUTS=${XKB_LAYOUTS:-us,fa}
+XKB_OPTIONS=${XKB_OPTIONS:-grp:alt_shift_toggle}
+PERSIAN_KEYBOARD=${PERSIAN_KEYBOARD:-on}
+NUMLOCK=${NUMLOCK:-on}
+
+configure_keyboard() {
+  local layouts="$XKB_LAYOUTS"
+  if [[ "$PERSIAN_KEYBOARD" == "off" ]]; then
+    layouts="us"
+  fi
+  local args=(-model "$XKB_MODEL" -layout "$layouts")
+  if [[ -n "$XKB_OPTIONS" && "$layouts" == *","* ]]; then
+    args+=(-option "$XKB_OPTIONS")
+  fi
+  if ! command -v setxkbmap >/dev/null 2>&1 \
+      && (( EUID == 0 )) && command -v apt-get >/dev/null 2>&1; then
+    printf 'setxkbmap is missing; installing the keyboard tools now...\n'
+    DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+      --no-install-recommends x11-xkb-utils xkb-data numlockx \
+      >>"$LOG_DIR/keyboard.log" 2>&1 || true
+  fi
+  if command -v setxkbmap >/dev/null 2>&1; then
+    if env DISPLAY="$DISPLAY_ID" setxkbmap "${args[@]}" \
+        2>>"$LOG_DIR/keyboard.log"; then
+      local active
+      active=$(env DISPLAY="$DISPLAY_ID" setxkbmap -query \
+        2>>"$LOG_DIR/keyboard.log" | tr '\n' ' ')
+      printf 'Keyboard layouts: %s (toggle: %s) -- X server reports: %s\n' \
+        "$layouts" "${XKB_OPTIONS:-none}" "${active:-unknown}"
+    else
+      printf 'Warning: setxkbmap failed; Persian typing may not work (see %s).\n' \
+        "$LOG_DIR/keyboard.log" >&2
+    fi
+  else
+    printf 'Warning: setxkbmap is missing; the X layout stays at its default.\n' >&2
+  fi
+  if [[ "$NUMLOCK" == "on" ]] && command -v numlockx >/dev/null 2>&1; then
+    env DISPLAY="$DISPLAY_ID" numlockx on 2>>"$LOG_DIR/keyboard.log" \
+      || printf 'Warning: numlockx failed; the keypad may send arrows.\n' >&2
+  fi
+}
+
+configure_keyboard
+
+# A click-based layout switch inside the desktop. Alt+Shift only works when
+# the key events reach X untouched, and operators whose own OS keyboard is
+# already Persian often toggle the wrong side; the fluxbox root menu gives
+# three unambiguous choices that always work with a mouse click. "fa only"
+# additionally makes plain keystrokes Persian even when the visitor's local
+# layout stays English.
+KB_HELPER="$STATE_DIR/kb-set.sh"
+if cat >"$KB_HELPER" <<'KBEOF'
+#!/usr/bin/env bash
+# Set the virtual desktop keyboard layout: kb-set.sh [fa|us|both]
+mode="${1:-both}"
+case "$mode" in
+  fa)   args=(-layout fa) ;;
+  us)   args=(-layout us) ;;
+  both) args=(-layout "${XKB_LAYOUTS:-us,fa}" \
+               -option "${XKB_OPTIONS:-grp:alt_shift_toggle}") ;;
+  *)    args=(-layout us) ;;
+esac
+setxkbmap -model "${XKB_MODEL:-pc104}" "${args[@]}"
+KBEOF
+then
+  chmod 0755 "$KB_HELPER"
+  FLUXBOX_HOME="${HOME:-/root}"
+  if mkdir -p "$FLUXBOX_HOME/.fluxbox" 2>/dev/null \
+      && cat >"$FLUXBOX_HOME/.fluxbox/menu" <<MENUEOF
+[begin] (Majid Automation)
+  [submenu] (Keyboard — صفحه‌کلید)
+    [exec] (Persian only — فقط فارسی) {$KB_HELPER fa;}
+    [exec] (English only — فقط انگلیسی) {$KB_HELPER us;}
+    [exec] (Both, Alt+Shift — هر دو) {$KB_HELPER both;}
+  [end]
+  [separator]
+  [restart] (Restart fluxbox)
+  [exit] (Exit)
+[end]
+MENUEOF
+  then
+    printf 'Right-click menu: keyboard layout switch installed.\n'
+  else
+    printf 'Warning: the fluxbox keyboard menu could not be installed.\n' >&2
+  fi
+else
+  printf 'Warning: the kb-set helper could not be written.\n' >&2
 fi
 
 nohup env DISPLAY="$DISPLAY_ID" dbus-launch --exit-with-session fluxbox \

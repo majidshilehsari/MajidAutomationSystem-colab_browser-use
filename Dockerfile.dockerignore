@@ -1,0 +1,33 @@
+# BuildKit reads "<dockerfile>.dockerignore" before "<context>/.dockerignore".
+# Keeping it next to the Dockerfile means the Hostim track does not have to add
+# a file to the repository root, which is shared with the Colab branch.
+#
+# The Dockerfile COPYs explicit paths, so nothing here is load-bearing for
+# correctness; it only keeps the build context (and the image) small. A builder
+# that ignores this file still produces a working image.
+
+.git
+.github
+.runtime
+.screen_shots
+screen_shots
+node_modules
+.venv
+venv
+__pycache__
+**/__pycache__
+*.pyc
+tests
+README.md
+agent.md
+LICENSE
+package.json
+package-lock.json
+install.sh
+start_colab_browser.sh
+stop_colab_browser.sh
+run_tests.sh
+.DS_Store
+.idea
+.vscode
+*.swp

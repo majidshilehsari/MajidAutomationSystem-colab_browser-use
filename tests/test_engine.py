@@ -219,18 +219,17 @@ class HappyPathTest(EngineTestBase):
         self.run_to_completion(flow)
         self.assertGreaterEqual(self.clock.now - before, 0.25)
 
-    def test_type_uses_fixed_flow_mode_and_step_override_and_reports_them(self):
-        status = self.run_to_completion(build_flow([
+    def test_type_uses_fixed_flow_mode_and_step_override(self):
+        self.run_to_completion(build_flow([
             {"type": "type", "text": "first"},
             {"type": "type", "text": "second", "typingMode": "fast"},
         ], typingMode="low"))
+        # round 26: the flow mode and the step override both arrive as the
+        # delay the backend actually receives; the per-row typing report died
+        # with the typed steps (the code itself now carries the intent)
         self.assertEqual([call for call in self.backend.calls if call[0] == "type"], [
             ("type", "first", 50), ("type", "second", 0),
         ])
-        self.assertEqual(
-            [(row["typingMode"], row["keyDelayMs"]) for row in status["results"]],
-            [("low", 50), ("fast", 0)],
-        )
 
     def test_repeat_runs_every_pass(self):
         flow = build_flow([{"type": "click", "x": 1, "y": 1}], repeat=3)
@@ -377,7 +376,8 @@ class HumanHandoffTest(EngineTestBase):
         cdp = SequenceCdp([
             {"url": "https://example.com/home", "text": "Home", "hints": []},
             {"url": "https://example.com/check?session=private",
-             "text": "Verify you are human", "hints": []},
+             "text": "Verify you are human",
+             "hints": ["IFRAME g-recaptcha https://www.google.com/recaptcha/api2/anchor"]},
             {"url": "https://example.com/home", "text": "Home", "hints": []},
         ])
         engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
@@ -390,7 +390,7 @@ class HumanHandoffTest(EngineTestBase):
         self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"))
         waiting = engine.status()["awaitingConfirmation"]
         self.assertEqual(waiting["kind"], "challenge")
-        self.assertIn("CAPTCHA", waiting["message"])
+        self.assertIn("\u0686\u0627\u0644\u0634", waiting["message"])  # «چالش»
         self.assertEqual(waiting["pageOrigin"], "https://example.com")
         self.assertEqual([call[0] for call in self.backend.calls], ["click", "screenshot"],
                          "the second browser action must not run before human review")
@@ -405,30 +405,66 @@ class HumanHandoffTest(EngineTestBase):
         self.assertEqual(engine.status()["handoffs"][0]["decision"], "continued")
         self.assertTrue(all("token=secret" not in str(call) for call in cdp.calls))
 
-    def test_acknowledgement_does_not_resume_while_challenge_is_still_detected(self):
-        cdp = SequenceCdp([
-            {"url": "https://example.com/check", "text": "Verify you are human", "hints": []},
-            {"url": "https://example.com/check", "text": "Verify you are human", "hints": []},
-            {"url": "https://example.com/home", "text": "Home", "hints": []},
-        ])
+    def test_acknowledgement_on_unchanged_evidence_never_builds_a_second_handoff(self):
+        # Round-12 acceptance: Continue on a page whose evidence (origin,
+        # signals, text hash) did not change must NOT raise another handoff -
+        # that loop is exactly what trapped recovery flows.
+        widget = {"url": "https://example.com/check", "text": "Verify you are human",
+                  "hints": ["IFRAME g-recaptcha https://www.google.com/recaptcha/api2/anchor"]}
+        cdp = SequenceCdp([dict(widget), dict(widget)])
         engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
                                   clock=self.clock.time, cdp=cdp)
         self.engines.append(engine)
         engine.start(build_flow([{"type": "click", "x": 3, "y": 4}]))
         self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"))
+        self.assertEqual(len(engine.status()["handoffs"]), 1)
 
         engine.confirm(True)
-        self.assertTrue(wait_until(lambda: engine.status()["status"] == "waiting"
-                                   and len(engine.status()["handoffs"]) == 2))
-        self.assertEqual(engine.status()["status"], "waiting")
-        self.assertEqual(self.backend.names, ["screenshot", "screenshot"],
-                         "no browser action may run while the challenge remains")
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"),
+                        "the run must continue instead of re-pausing on identical evidence")
+        self.assertEqual(len(engine.status()["handoffs"]), 1,
+                         "identical evidence created a handoff loop")
+        self.assertEqual(self.backend.names, ["screenshot", "click"])
+        self.assertIn("cooldown", str([entry for entry in engine.status()["entries"]
+                                       if "cooldown" in entry.get("message", "")]))
 
-        engine.confirm(True)
-        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"))
-        self.assertEqual(self.backend.names, ["screenshot", "screenshot", "click"])
-        self.assertEqual([event["decision"] for event in engine.status()["handoffs"]],
-                         ["continued", "continued"])
+    def test_chat_wording_about_captcha_is_a_notice_not_a_pause(self):
+        # The reported false positive: an ordinary chat page whose history
+        # discusses CAPTCHA / security verification, no widget anywhere.
+        chat = {"url": "https://arena.ai/c/old", "title": "Arena",
+                "text": "The previous answer explained reCAPTCHA and quoted "
+                        "'please verify you are human' inside the conversation.",
+                "hints": []}
+        cdp = SequenceCdp([dict(chat), dict(chat)])
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        engine.start(build_flow([{"type": "click", "x": 1, "y": 1},
+                                 {"type": "click", "x": 2, "y": 2}]))
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"),
+                        "wording-only pages must never pause: %s" % engine.status()["status"])
+        self.assertEqual(engine.status()["handoffs"], [])
+        notices = [entry for entry in engine.status()["entries"]
+                   if "progress notice" in entry.get("message", "")]
+        self.assertEqual(len(notices), 1, "exactly one non-blocking notice expected")
+        self.assertEqual(notices[0]["level"], "info")
+        self.assertTrue(notices[0].get("evidence"), "the notice must carry the evidence")
+
+    def test_recovery_steps_run_even_while_a_challenge_is_visible(self):
+        widget = {"url": "https://arena.ai/c/old", "text": "Verify you are human",
+                  "hints": ["IFRAME g-recaptcha https://www.google.com/recaptcha/api2/anchor"]}
+        cdp = SequenceCdp([dict(widget), dict(widget), dict(widget)])
+        engine = AutomationEngine(self.backend, self.tmp, sleep=self.clock.sleep,
+                                  clock=self.clock.time, cdp=cdp)
+        self.engines.append(engine)
+        engine.start(build_flow([
+            {"type": "key", "keys": "ctrl+l"},
+            {"type": "goto_url", "url": "https://arena.ai/"},
+            {"type": "capture_text"},
+        ]))
+        self.assertTrue(wait_until(lambda: engine.status()["status"] == "done"),
+                        "the safe recovery path must not wait on the detector")
+        self.assertEqual(engine.status()["handoffs"], [])
 
     def test_declining_a_challenge_handoff_stops_without_running_a_browser_action(self):
         cdp = SequenceCdp([{"url": "https://example.com/check", "text": "CAPTCHA challenge",
@@ -521,6 +557,21 @@ class MiscStepTest(EngineTestBase):
         history = self.engine.status()["history"]
         self.assertEqual(len(history), 2)
 
+    def test_a_finished_run_is_reported_to_the_completion_callback(self):
+        # Round 27, item 8: the hub listens for every finished run, so the
+        # conditional jobs and the brain's on-error decision see manual runs
+        # exactly like scheduled ones.
+        seen = []
+        self.engine.on_finished = \
+            lambda name, status, error: seen.append((name, status, error))
+        status = self.run_to_completion(build_flow([{"type": "wait", "ms": 1}]))
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(len(seen), 1, "the callback must fire exactly once")
+        name, finished, error = seen[0]
+        self.assertEqual(finished, "done")
+        self.assertEqual(error, "")
+        self.assertTrue(name, "the flow name must ride along")
+
 
 class RecordingBackend(ControlBackend):
     """Keeps the real ControlBackend logic but records the argv it would run."""
@@ -607,6 +658,257 @@ class BackendCommandTest(unittest.TestCase):
         from automation.engine import quote_command
         self.assertEqual(quote_command(["paste", "a b; rm -rf /"]),
                          "paste 'a b; rm -rf /'")
+
+
+class FakeLibrary:
+    """The slice of the operations library an engine is allowed to see."""
+
+    def __init__(self, ops):
+        self.ops = ops
+
+    def get(self, op_id):
+        return self.ops.get(str(op_id))
+
+    def list(self):
+        return list(self.ops.values())
+
+    def as_flow(self, op):
+        return {"schema": 1, "name": op.get("name", ""),
+                "steps": op.get("steps") or [], "settings": {}}
+
+
+class FakeOpsAgent:
+    """An agent whose only talent is lending its library to run_operation."""
+
+    def __init__(self, ops):
+        self.library = FakeLibrary(ops)
+
+
+class FlakyClickBackend(FakeBackend):
+    """The first click misses; the retry after the protocol succeeds."""
+
+    def __init__(self):
+        super().__init__()
+        self.clicks = 0
+
+    def click(self, x, y, button="left", clicks=1):
+        self.clicks += 1
+        if self.clicks == 1:
+            self.calls.append(("click", x, y, button, clicks))
+            return 1, "", "the first click always misses"
+        return super().click(x, y, button, clicks)
+
+
+ROUND25_OPS = {
+    "op-two": {"id": "op-two", "name": "دو گام", "steps": [
+        {"type": "click", "x": 3, "y": 4},
+        {"type": "move", "x": 5, "y": 6},
+    ]},
+    "op-fix": {"id": "op-fix", "name": "پروتکل خطا", "steps": [
+        {"type": "move", "x": 9, "y": 9},
+    ]},
+    "op-a": {"id": "op-a", "name": "a", "steps": [
+        {"type": "run_operation", "operation": "op-b"}]},
+    "op-b": {"id": "op-b", "name": "b", "steps": [
+        {"type": "run_operation", "operation": "op-c"}]},
+    "op-c": {"id": "op-c", "name": "c", "steps": [
+        {"type": "run_operation", "operation": "op-d"}]},
+    "op-d": {"id": "op-d", "name": "d", "steps": [
+        {"type": "click", "x": 7, "y": 7}]},
+}
+
+
+class PythonStepTest(EngineTestBase):
+    """Round 25, phase 2: steps written as real python."""
+
+    def test_python_step_runs_code_and_captures_output(self):
+        flow = build_flow([{"type": "python",
+                            "code": "click(10, 20)\nlog('done %d' % (6 * 7))"}])
+        status = self.run_to_completion(flow)
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(self.backend.calls, [("click", 10, 20, "left", 1)])
+        self.assertEqual(status["results"][0]["text"], "done 42")
+
+    def test_a_cell_reads_its_settings_in_seconds_and_records_outputs(self):
+        # Round 28, item 1: settings arrive as `params`, S() speaks seconds,
+        # and set_output() lands in the result row for the panel to show.
+        flow = build_flow([{
+            "type": "python",
+            "settings": [{"key": "wait", "kind": "number", "value": 2,
+                          "label": "\u0645\u06a9\u062b (\u062b\u0627\u0646\u06cc\u0647)"}],
+            "code": "set_output('age', 31)\nset_output('pixel', 'x=5,y=7')\n"
+                    "log(S('wait', 1))\nlog(params['wait'])"}])
+        status = self.run_to_completion(flow)
+        self.assertEqual(status["status"], "done")
+        row = status["results"][0]
+        self.assertEqual(row["outputs"], {"age": 31, "pixel": "x=5,y=7"})
+        self.assertIn("2.0", row["text"])
+
+    def test_pause_all_freezes_the_run_until_a_human_resolves_it(self):
+        flow = build_flow([{"type": "python",
+                            "code": "check(pause_all('\u06a9\u067e\u0686\u0627 \u062f\u06cc\u062f\u0647 \u0634\u062f'))"}])
+        self.engine.start(flow)
+        self.assertTrue(wait_until(lambda: self.engine.status()["status"] == "waiting"))
+        pending = self.engine.status()["awaitingConfirmation"]
+        self.assertEqual(pending["kind"], "manual_verification")
+        self.assertIn("\u0633\u0644\u0648\u0644 \u067e\u0627\u06cc\u0634\u06af\u0631", pending["message"])
+        self.engine.confirm(True)
+        self.assertTrue(wait_until(lambda: self.engine.status()["status"] == "done"))
+
+    def test_loops_conditions_and_vars_are_ordinary_python(self):
+        flow = build_flow([{"type": "python", "code": (
+            "total = 0\n"
+            "for i in range(4):\n"
+            "    if i % 2 == 0:\n"
+            "        total += i\n"
+            "vars['total'] = total\n"
+            "log(total)")}])
+        status = self.run_to_completion(flow)
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(status["results"][0]["text"], "2")
+
+    def test_vars_survive_to_the_next_python_step_of_the_run(self):
+        flow = build_flow([
+            {"type": "python", "code": "vars['n'] = 5"},
+            {"type": "python", "code": "log(vars['n'] * 2)"},
+        ])
+        status = self.run_to_completion(flow)
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(status["results"][1]["text"], "10")
+
+    def test_blank_code_fails_with_an_honest_message(self):
+        status = self.run_to_completion(
+            build_flow([{"type": "python", "code": "   "}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("needs code", status["error"])
+
+    def test_an_exception_fails_the_step_and_shows_what_happened(self):
+        status = self.run_to_completion(build_flow(
+            [{"type": "python", "code": "raise ValueError('boom')"}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("ValueError", status["error"])
+        self.assertIn("boom", status["error"])
+
+    def test_a_timeout_abandons_the_worker_and_revokes_its_helpers(self):
+        status = self.run_to_completion(build_flow(
+            [{"type": "python", "timeout": 0.2,
+              "code": "import time\ntime.sleep(30)"}]), timeout=8.0)
+        self.assertEqual(status["status"], "error")
+        self.assertIn("timed out", status["error"])
+
+
+class RunOperationStepTest(EngineTestBase):
+    """Round 25, phase 2: library operations nested inside a flow."""
+
+    def with_ops(self, backend=None):
+        self.engine = AutomationEngine(
+            backend or self.backend, self.tmp, sleep=self.clock.sleep,
+            clock=self.clock.time, agent=FakeOpsAgent(ROUND25_OPS))
+        self.engines.append(self.engine)
+        return self.engine
+
+    def test_runs_the_operation_steps_in_order(self):
+        self.with_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-two"}]))
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(self.backend.calls,
+                         [("click", 3, 4, "left", 1), ("move", 5, 6)])
+        # the trace shows each substep by its Persian label
+        self.assertIn("کلیک در (3، 4) → rc=0", status["results"][0]["text"])
+
+    def test_a_brain_only_operation_refuses_to_run_inside_a_flow(self):
+        # Round 26: scope='brain' operations are the brain's own tools; a
+        # flow written by the coworker agent must not be able to call them.
+        self.engine = AutomationEngine(
+            self.backend, self.tmp, sleep=self.clock.sleep,
+            clock=self.clock.time, agent=FakeOpsAgent({
+                "op-brain": {"id": "op-brain", "name": "چرخهٔ مشاهده",
+                             "scope": "brain",
+                             "steps": [{"id": "b1", "type": "python",
+                                        "code": "check(screenshot('observe'))"}]}}))
+        self.engines.append(self.engine)
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-brain"}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("اختصاصی مغز", status["error"])
+        # the refusal must not touch the desktop (an error screenshot is the
+        # only call the protocol itself is allowed to make)
+        self.assertEqual([call for call in self.backend.calls
+                          if call[0] != "screenshot"], [])
+
+    def test_resolves_the_operation_by_its_persian_name(self):
+        self.with_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "دو گام"}]))
+        self.assertEqual(status["status"], "done")
+
+    def test_an_unknown_operation_fails_honestly(self):
+        self.with_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-nope"}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("no operation", status["error"])
+
+    def test_nesting_stops_at_depth_three(self):
+        self.with_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-a"}]))
+        self.assertEqual(status["status"], "error")
+        # the depth refusal travels up through check(): the root cause stays
+        # visible in the run error, layer by layer
+        self.assertIn("nested too deep", status["error"])
+
+    def test_without_an_agent_the_step_says_so(self):
+        status = self.run_to_completion(build_flow(
+            [{"type": "run_operation", "operation": "op-two"}]))
+        self.assertEqual(status["status"], "error")
+        self.assertIn("no coworker agent", status["error"])
+
+
+class ErrorProtocolTest(EngineTestBase):
+    """Round 25, phase 2: the dedicated error protocol operation."""
+
+    def with_flaky_ops(self):
+        self.backend = FlakyClickBackend()
+        self.engine = AutomationEngine(
+            self.backend, self.tmp, sleep=self.clock.sleep,
+            clock=self.clock.time, agent=FakeOpsAgent(ROUND25_OPS))
+        self.engines.append(self.engine)
+
+    def test_a_failed_step_hands_over_to_the_error_operation(self):
+        self.with_flaky_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "click", "x": 1, "y": 1}], errorOperation="op-fix",
+            screenshotOnError=False))
+        self.assertEqual(status["status"], "error",
+                         "without retryAfterProtocol the step must stay failed")
+        self.assertEqual(self.backend.calls,
+                         [("click", 1, 1, "left", 1), ("move", 9, 9)])
+
+    def test_retry_after_protocol_repeats_the_step_exactly_once(self):
+        self.with_flaky_ops()
+        status = self.run_to_completion(build_flow(
+            [{"type": "click", "x": 1, "y": 1}], errorOperation="op-fix",
+            retryAfterProtocol=True, screenshotOnError=False))
+        self.assertEqual(status["status"], "done")
+        self.assertEqual(self.backend.calls, [
+            ("click", 1, 1, "left", 1),   # the original failure
+            ("move", 9, 9),               # the error protocol
+            ("click", 1, 1, "left", 1),   # the single retry
+        ])
+
+    def test_the_protocol_without_an_agent_still_fails_the_step(self):
+        self.backend = FlakyClickBackend()
+        self.engine = AutomationEngine(
+            self.backend, self.tmp, sleep=self.clock.sleep,
+            clock=self.clock.time)
+        self.engines.append(self.engine)
+        status = self.run_to_completion(build_flow(
+            [{"type": "click", "x": 1, "y": 1}], errorOperation="op-fix",
+            screenshotOnError=False))
+        self.assertEqual(status["status"], "error")
+        self.assertEqual(self.backend.calls, [("click", 1, 1, "left", 1)])
 
 
 if __name__ == "__main__":
@@ -718,7 +1020,8 @@ class RunResultsTest(EngineTestBase):
         rows = status["results"]
         self.assertEqual([r["index"] for r in rows], [0, 1, 2])
         self.assertEqual([r["status"] for r in rows], ["ok", "ok", "error"])
-        self.assertEqual(rows[2]["type"], "type")
+        self.assertEqual(rows[2]["type"], "python")   # round 26: one language
+        self.assertEqual(rows[2]["label"], "تایپ «boom»")
         self.assertTrue(rows[2]["error"], "the failing step must say why")
         self.assertIsInstance(rows[0]["durationMs"], int)
         self.assertEqual(status["status"], "error")

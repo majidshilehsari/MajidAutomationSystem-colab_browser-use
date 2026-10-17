@@ -1,0 +1,18 @@
+# خلاصهٔ فارسی: منوی راست‌کلیک دسکتاپ در دیپلوی Hostim. آیتم‌ها کوتاه و کاربردی:
+# پنل اتوماسیون، نمای مرورگر، یک پنجرهٔ جدید کروم، اسکرین‌شات، فهرست پنجره‌ها،
+# فضاهای کاری و تنظیمات خودِ fluxbox. هیچ آیتمی چیزی را نمی‌کشد یا خاموش نمی‌کند.
+# متغیرهای محیطی در دسترس نیستند، پس پورت‌ها همان پیش‌فرض‌های entrypoint اند.
+[begin] (سامانهٔ اتوماسیون مجید)
+  [exec] (🤖 پنل اتوماسیون) {google-chrome --new-window http://127.0.0.1:6080/automation/panel.html}
+  [exec] (🖥 نمای مرورگر) {google-chrome --new-window http://127.0.0.1:6080/vnc.html}
+  [exec] (🌐 پنجرهٔ جدید کروم) {google-chrome --new-window about:blank}
+  [exec] (📷 اسکرین‌شات) {sh -c "mkdir -p /data/shots && scrot /data/shots/desktop-$(date +%Y%m%d-%H%M%S).png"}
+  [separator]
+  [windowsmenu] (🪟 پنجره‌های باز)
+  [workspacesmenu] (🗂 فضاهای کاری)
+  [exec] (🧹 جمع‌کردن پنجرهٔ مزاحم «Open File») {sh -c "for w in $(wmctrl -l | grep -iE 'open file|file chooser|باز کردن پرونده' | awk '{print $1}'); do wmctrl -ic $w; done"}
+  [exec] (✖ بستن پنجرهٔ فعال) {xdotool getwindowfocus windowkill}
+  [separator]
+  [config] (⚙️ تنظیمات دسکتاپ)
+  [restart] (🔄 شروع دوبارهٔ مدیر پنجره)
+[end]

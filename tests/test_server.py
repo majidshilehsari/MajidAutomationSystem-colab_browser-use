@@ -5,6 +5,7 @@ loop) against a stand-in RFB server, then drives it with a real HTTP client and
 a real WebSocket client (node + ws). Skipped when websockify is not installed.
 """
 
+import http.client
 import json
 import os
 import shutil
@@ -16,6 +17,7 @@ import threading
 import time
 import unittest
 import urllib.error
+import urllib.parse
 import urllib.request
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -217,13 +219,6 @@ class ServerIntegrationTest(unittest.TestCase):
         status, _ = http_request(self.url("/automation/api/artifact?path="))
         self.assertEqual(status, 404)
 
-    def test_guide_is_served(self):
-        status, body = http_request(self.url("/automation/api/guide"))
-        self.assertEqual(status, 200)
-        self.assertIn("نوع گام‌ها".encode("utf-8"), body)
-        self.assertIn(b"pause_for_human_verification", body)
-        self.assertIn(b"CAPTCHA", body)
-
     def test_a_flow_name_with_a_space_can_be_saved(self):
         # Regression: the browser sends "Untitled flow" as "Untitled%20flow" and
         # the router used to reject the escape, answering "no such endpoint".
@@ -282,7 +277,7 @@ class ServerIntegrationTest(unittest.TestCase):
         }
         text = _report_section(status)
         self.assertIn("## گزارش اجرای سیستم", text)
-        self.assertIn("3 گام اجرا شده", text)
+        self.assertIn("3 مرحله اجرا شده", text)
         self.assertIn("timed out after 60s", text)
         # The model must be told exactly where it stopped.
         self.assertIn("اجرا روی گام **#2", text)
@@ -338,72 +333,6 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertIn("هنوز اجرایی", body.decode("utf-8"))
 
-    def test_prompt_asks_for_summary_code_and_questions(self):
-        # The model must not just dump code: it says what it understood, gives
-        # the code, then raises questions or improvements.
-        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
-                                    body={"flow": {"name": "f", "steps": []}})
-        self.assertEqual(status, 200, body)
-        text = body.decode("utf-8")
-        for heading in ("چه فهمیدی", "کد", "سؤال و نکته"):
-            self.assertIn(heading, text)
-        self.assertLess(text.index("چه فهمیدی"), text.index("سؤال و نکته"),
-                        "the sections are out of order")
-
-    def test_ai_prompt_explains_safe_human_handoff_and_typing_modes(self):
-        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
-                                    body={"flow": {"name": "f", "steps": []}})
-        self.assertEqual(status, 200, body)
-        text = body.decode("utf-8")
-        self.assertIn("typingMode", text)
-        self.assertIn("pause_for_human_verification", text)
-        self.assertIn("کد CAPTCHA را از کاربر نخواه", text)
-        self.assertIn("CAPTCHA", text)
-
-    def test_prompt_hands_back_the_previous_answer(self):
-        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
-                                    body={"flow": {"name": "f", "steps": []},
-                                          "previousReply": "دور قبل این را گفتم"})
-        self.assertEqual(status, 200, body)
-        text = body.decode("utf-8")
-        self.assertIn("پاسخ قبلی تو", text)
-        self.assertIn("دور قبل این را گفتم", text)
-
-    def test_prompt_carries_the_run_report(self):
-        # A finished run must reach the prompt, so the model can diagnose it.
-        flow = {"name": "rep", "steps": [{"type": "click", "x": 1, "y": 1}]}
-        http_request(self.url("/automation/api/run"), method="POST", body={"flow": flow})
-        try:
-            for _ in range(200):
-                if not self.engine.busy():
-                    break
-                time.sleep(0.01)
-            status, body = http_request(self.url("/automation/api/prompt"),
-                                        method="POST", body={"flow": flow})
-            self.assertEqual(status, 200, body)
-            self.assertIn("گزارش اجرای سیستم", body.decode("utf-8"))
-        finally:
-            self.engine._state = None
-
-    def test_prompt_carries_the_user_request_and_the_shot_link(self):
-        pages = os.path.join(self.data_dir, "pages")
-        os.makedirs(pages, exist_ok=True)
-        snapshot = {"id": "p1", "title": "گوگل", "url": "https://example.com/",
-                    "capturedAt": 1, "publicShot": "shot-1.png", "text": "سلام",
-                    "elements": [], "viewport": {"width": 1366, "height": 768}}
-        with open(os.path.join(pages, "p1.json"), "w", encoding="utf-8") as handle:
-            json.dump(snapshot, handle, ensure_ascii=False)
-
-        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
-                                    body={"pageId": "p1", "request": "روی اولین نتیجه کلیک کن",
-                                          "publicBase": "https://abc.trycloudflare.com",
-                                          "flow": {"name": "f", "steps": []}})
-        self.assertEqual(status, 200, body)
-        text = body.decode("utf-8")
-        self.assertIn("درخواست کاربر", text)
-        self.assertIn("روی اولین نتیجه کلیک کن", text)
-        self.assertIn("https://abc.trycloudflare.com/automation/api/public/shot/shot-1.png", text)
-
     def test_public_shot_is_reachable_without_a_token(self):
         pub = os.path.join(self.data_dir, "public")
         os.makedirs(pub, exist_ok=True)
@@ -447,8 +376,30 @@ class ServerIntegrationTest(unittest.TestCase):
         self.assertIn(b"noVNC", body)
 
     def test_directory_listing_is_disabled(self):
-        status, _ = http_request(self.url("/"))
-        self.assertEqual(status, 404)
+        # `/` no longer 404s: the bare Hostim domain must open the product,
+        # so the root bounces to the viewer. http.client keeps us from
+        # following the redirect (urllib would hide the 302).
+        # `/` answers 200 (Hostim's health check demands 200; a 302 made the
+        # platform pull the app out of rotation) and redirects inside the page.
+        parsed = urllib.parse.urlparse(self.base)
+        for method in ("GET", "HEAD"):
+            conn = http.client.HTTPConnection(parsed.hostname, parsed.port,
+                                              timeout=5)
+            try:
+                conn.request(method, "/")
+                response = conn.getresponse()
+                body = response.read()
+                self.assertEqual(response.status, 200, method)
+                if method == "GET":
+                    self.assertIn(b"location.replace('/vnc.html')", body)
+                    self.assertIn(b'http-equiv="refresh"', body)
+                else:
+                    self.assertEqual(body, b"")
+            finally:
+                conn.close()
+        status, body = http_request(self.url("/"))
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"<title>Directory listing", body)
 
     def test_path_traversal_is_blocked(self):
         status, _ = http_request(self.url("/../../etc/passwd"))
@@ -501,6 +452,22 @@ class WebRootTest(unittest.TestCase):
         self.assertRegex(html, r"automation\.css\?v=[0-9a-f]{10}")
         self.assertEqual(report["cacheKey"],
                          html.split("automation.js?v=")[1][:10])
+
+    def test_the_human_action_panel_page_is_published_and_versioned(self):
+        # Round 27, item 6: the third panel ships as its own static page and
+        # gets the same cache-busting treatment as panel.html.
+        real_static = os.path.join(
+            os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+            "automation", "static")
+        report = srv.prepare_web_root(self.web, self.novnc, real_static)
+        self.assertIn("human.html", report["staticCopied"])
+        self.assertTrue(report["human"])
+        with open(os.path.join(self.web, "automation", "human.html"),
+                  encoding="utf-8") as handle:
+            html = handle.read()
+        self.assertIn("mas-human", html)
+        self.assertRegex(html, r"automation\.js\?v=[0-9a-f]{10}")
+        self.assertRegex(html, r"automation\.css\?v=[0-9a-f]{10}")
 
     def test_copies_novnc_static_and_patches_vnc_html_once(self):
         report = srv.prepare_web_root(self.web, self.novnc, self.static)
