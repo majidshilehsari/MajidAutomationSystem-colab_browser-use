@@ -167,8 +167,8 @@ STEP_DOCS: Dict[str, Dict[str, str]] = {
                      "run_operation and log; loops and ifs are free and vars survive "
                      "across the python steps of a run. Brain tools: operations_list, "
                      "brain_note and brain_suggest."},
-    "run_operation": {"fa": "اجرای یک عملیات از کتابخانه در دل این جریان (تودرتو).",
-                      "en": "Run a library operation nested inside this flow."},
+    "run_operation": {"fa": "اجرای یک عملیات از کتابخانه در دل این عملیات (تودرتو).",
+                      "en": "Run a library operation nested inside this operation."},
     "agent_open": {"fa": "باز کردن سایت چت در مرورگر اختصاصی ایجنت (نمایش :2).",
                    "en": "Open a chat site in the agent's own browser (display :2)."},
     "agent_ask": {"fa": "تایپ پرامپت در چت ایجنت، صبر تا پایان پاسخ و آوردن متنش.",

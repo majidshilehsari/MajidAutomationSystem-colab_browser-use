@@ -148,7 +148,7 @@ API_INDEX = [
     ("GET", "/agent", "📇 نقشهٔ کامل: وضعیت ایجنت، تنظیمات ماسک‌شده، شمارش‌ها و "
                       "همین فهرست مسیرها.",
      "The full map: agent status, masked settings, counts and this index."),
-    ("POST", "/convert", "🔁 تبدیل جریانِ نوشته‌شده به زبان قدیمیِ گام‌های JSON به "
+    ("POST", "/convert", "🔁 تبدیل عملیاتِ نوشته‌شده به زبان قدیمیِ گام‌های JSON به "
                          "مراحل پایتون (دور ۲۶: زبان واحد).",
      "Translate a legacy JSON-step flow into python steps (round 26)."),
     ("GET", "/agent/chat/messages", "💬 تاریخچهٔ گفت‌وگو (تب چت) با وضعیت هر پیام.",
@@ -166,11 +166,11 @@ API_INDEX = [
     ("GET", "/status", "🖥 وضعیت اجرای فعلی اتوماسیون (قدم چندم از چند، منتظر "
                        "انسان یا نه).",
      "Current automation run state."),
-    ("GET", "/flows", "🧩 فهرست جریان‌های ذخیره‌شده.", "Saved flows."),
-    ("PUT", "/flows/<name>", "🧩 ذخیرهٔ یک جریان (با اعتبارسنجی کامل schema).",
-     "Save a flow, fully validated."),
-    ("POST", "/run", "▶ شروع یک اجرا از روی جریان داده‌شده.",
-     "Start a run from the supplied flow."),
+    ("GET", "/flows", "🧩 فهرست عملیات‌های ذخیره‌شده.", "Saved operations."),
+    ("PUT", "/flows/<name>", "🧩 ذخیرهٔ یک عملیات (با اعتبارسنجی کامل schema).",
+     "Save an operation, fully validated."),
+    ("POST", "/run", "▶ شروع یک اجرا از روی عملیات داده‌شده.",
+     "Start a run from the supplied operation."),
     ("POST", "/control", "🎮 pause / resume / stop / confirm و کلیک دستی.",
      "pause / resume / stop / confirm and manual clicks."),
     ("POST", "/detect", "🔍 شناسایی صفحهٔ فعال: عنوان، URL، عناصر با مختصات "
@@ -254,9 +254,9 @@ API_INDEX = [
      "List of the snapshot versions kept in Supabase: name, size and time — for restoring an older one (operator only)."),
     ("GET", "/supabase/status", "وضعیت همگام‌سازی Supabase: پیکربندی ماسک‌شده، آخرین نتیجه، دورهٔ زمانی (فقط اپراتور).",
      "Supabase sync status: masked config, last result, interval (operator only)."),
-    ("POST", "/agent/chat/apply-flow", "💬 ذخیرهٔ جریانی که مدل داخل پاسخ چت "
+    ("POST", "/agent/chat/apply-flow", "💬 ذخیرهٔ عملیاتی که مدل داخل پاسخ چت "
                                        "پیشنهاد داده است.",
-     "Save a flow the model proposed inside a chat answer."),
+     "Save an operation the model proposed inside a chat answer."),
     ("POST", "/agent/chat/clear", "💬 پاک کردن تاریخچهٔ گفت‌وگو.",
      "Clear the conversation history."),
     ("GET", "/agent/letters", "✉️ صندوق نامه‌های بین کاربر و ایجنت: نامهٔ «من → ایجنت»"
@@ -348,8 +348,8 @@ API_INDEX = [
      "Read one internal file (a screenshot) by relative path."),
     ("GET", "/pages/<id>", "🖼 جزئیات یک صفحهٔ شناسایی‌شده با عناصرش.",
      "One detected page, elements included."),
-    ("GET", "/flows/<name>", "🧩 خواندن یک جریان ذخیره‌شده.", "Read one saved flow."),
-    ("DELETE", "/flows/<name>", "🧩 حذف یک جریان ذخیره‌شده.", "Delete one saved flow."),
+    ("GET", "/flows/<name>", "🧩 خواندن یک عملیات ذخیره‌شده.", "Read one saved operation."),
+    ("DELETE", "/flows/<name>", "🧩 حذف یک عملیات ذخیره‌شده.", "Delete one saved operation."),
     ("DELETE", "/shots/<id>", "📷 حذف یک اسکرین‌شات.", "Delete one screenshot."),
     ("DELETE", "/texts/<id>", "📄 حذف یک متن ثبت‌شده.", "Delete one stored text."),
     ("GET", "/public/shot/<name>", "🌐 لینک عمومی یک اسکرین‌شات؛ بدون توکن باز "
@@ -750,8 +750,10 @@ class AgentHub:
         """History + the new message, as an ordinary conversation the model
         can continue. Deliberately plain: this is a chat page, not a tool."""
         lines = ["تو دستیار گفت‌وگوی این سامانهٔ اتوماسیون مرورگر هستی. روان، "
-                 "کوتاه و به زبان کاربر جواب بده. اگر کاربر جریان اتوماسیون "
-                 "خواست، همان JSON جریان را با کلید steps برگردان."]
+                 "کوتاه و به زبان کاربر جواب بده. اگر کاربر عملیات اتوماسیون "
+                 "خواست، عملیات را با کلید steps برگردان؛ هر مرحله فقط از نوع "
+                 "python باشد (کد کامل داخل code) - زبان قدیمیِ گام‌های JSON "
+                 "برچیده شده است."]
         letters = self.letters_section()
         if letters:
             lines.append("\n" + letters)
@@ -776,7 +778,7 @@ class AgentHub:
             parts.append("اجرای فعلی: %s" % (status.get("status") or "idle"))
         if self.flows is not None:
             names = [flow.get("name") for flow in self.flows.list()]
-            parts.append("جریان‌های ذخیره‌شده: %s" % (", ".join(names) or "-"))
+            parts.append("عملیات‌های ذخیره‌شده: %s" % (", ".join(names) or "-"))
         operations = self.store.list_operations()
         parts.append("عملیات کتابخانه: %s"
                      % (", ".join(op.get("name", "") for op in operations) or "-"))
@@ -818,7 +820,7 @@ class AgentHub:
                 str(text)[:120], len(body), provider or "-",
                 "، %.1f ثانیه" % float(elapsed) if elapsed else "")
             if meta.get("flow"):
-                summary += " جریان اتوماسیون هم پیشنهاد داد (%d مرحله)." % len(
+                summary += " عملیات اتوماسیون هم پیشنهاد داد (%d مرحله)." % len(
                     (meta["flow"] or {}).get("steps") or [])
             self._report_agent("پاسخ", summary)
         except Exception as exc:  # noqa: BLE001 - the pane shows this, not a 500
@@ -979,7 +981,7 @@ class AgentHub:
         if not configured:
             raise AgentError("the coworker agent is not configured yet", 409)
         prompt = ("برای این مرحلهٔ اتوماسیون یک توضیح کوتاه، فارسی، شکیل و "
-                  "دوستانه بنویس (یک یا دو جمله؛ طوری که کسی که جریان را می‌بیند "
+                  "دوستانه بنویس (یک یا دو جمله؛ طوری که کسی که عملیات را می‌بیند "
                   "فهم این مرحله چه کار می‌کند): %s"
                   % json.dumps(step, ensure_ascii=False)[:2000])
         try:

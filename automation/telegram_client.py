@@ -59,7 +59,7 @@ DEFAULT_HANDOFF_TEMPLATE = (
 
 DEFAULT_RESULT_TEMPLATE = (
     "{emoji} {title}\n"
-    "جریان: {flow}\n"
+    "عملیات: {flow}\n"
     "وضعیت: {status}\n"
     "زمان: {when}\n"
     "خطا: {error}"

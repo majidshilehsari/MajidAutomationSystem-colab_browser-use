@@ -2667,12 +2667,7 @@ test('language and theme both live in the settings tab', async () => {
 });
 
 test('the flow tab has one floating action line above the footer', async () => {
-  const page = await mount({
-    standalone: true,
-    clipText: JSON.stringify({ name: '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
-      steps: [{ type: 'python', code: 'check(move(5, 5))',
-                label: '\u062d\u0631\u06a9\u062a \u0628\u0647 (5\u060c 5)' }] }),
-  });
+  const page = await mount({ standalone: true });
   try {
     await authenticate(page);
     clickTab(page, 'flow');
@@ -2683,10 +2678,10 @@ test('the flow tab has one floating action line above the footer', async () => {
     assert.equal(style.top, '0px', 'it sticks to the top of the pane scroller');
     assert.equal(style.flexWrap, 'nowrap', 'one line only');
     const labels = Array.from(bar.querySelectorAll('button')).map((b) => b.textContent.trim());
+    // Round 28, item 6: the two clipboard-JSON buttons are gone with the
+    // JSON step method; save, load, the report and the bin remain.
     for (const want of ['\u0630\u062e\u06cc\u0631\u0647',
-      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc',
-      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u0645\u0631\u0648\u0631\u06af\u0631',
-      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc \u0627\u0632 \u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u062f\u0633\u06a9\u062a\u0627\u067e']) {
+      '\u0628\u0627\u0631\u06af\u0630\u0627\u0631\u06cc']) {
       assert.ok(labels.some((label) => label.includes(want)),
         `the line lost its "${want}" button: ` + labels.join(' | '));
     }
@@ -2694,46 +2689,6 @@ test('the flow tab has one floating action line above the footer', async () => {
     // leaving the tab takes the floating line with it
     clickTab(page, 'db');
     assert.equal(page.display('#mas-tab-flow'), 'none');
-
-    // the clipboard button really loads the flow JSON
-    clickTab(page, 'flow');
-    const clipBtn = Array.from(bar.querySelectorAll('button'))
-      .find((b) => b.textContent.includes('\u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u062f\u0633\u06a9\u062a\u0627\u067e'));
-    clipBtn.dispatchEvent(new page.window.Event('click'));
-    const flowPane = page.doc.getElementById('mas-tab-flow');
-    // the imported step shows up in the list and the name lands in the input
-    assert.ok(await page.until(() => flowPane.textContent
-      .includes('\u062d\u0631\u06a9\u062a \u0628\u0647 (5\u060c 5)')),
-      'the clipboard flow never arrived: ' + flowPane.textContent.slice(0, 200));
-    assert.ok(page.posts.some((item) => item.url.endsWith('/convert')),
-      'the clipboard import must go through the server converter');
-    assert.equal(flowPane.querySelector('input.mas-input').value,
-      '\u062c\u0631\u06cc\u0627\u0646 \u06a9\u0644\u06cc\u067e',
-      'the imported flow kept the wrong name');
-
-    // jsdom has no clipboard API - exactly the "Read permission denied" case
-    // in a real browser: the button must open the manual paste dialog (native
-    // Ctrl+V needs no permission) and import the flow from it
-    const browserBtn = Array.from(bar.querySelectorAll('button'))
-      .find((b) => b.textContent.includes('\u06a9\u0644\u06cc\u067e\u200c\u0628\u0648\u0631\u062f \u0645\u0631\u0648\u0631\u06af\u0631'));
-    assert.ok(browserBtn, 'the browser-clipboard button is missing');
-    browserBtn.dispatchEvent(new page.window.Event('click'));
-    assert.ok(await page.until(() => page.doc.getElementById('mas-paste') !== null),
-      'a denied browser clipboard must open the paste dialog');
-    const area = page.doc.getElementById('mas-paste-area');
-    area.value = JSON.stringify({ name: '\u062c\u0631\u06cc\u0627\u0646 \u0686\u0633\u0628\u0627\u0646',
-      steps: [{ type: 'python', code: 'check(move(7, 7))',
-                label: '\u062d\u0631\u06a9\u062a \u0628\u0647 (7\u060c 7)' }] });
-    page.byText('button', '\u0648\u0627\u0631\u062f \u06a9\u0631\u062f\u0646')
-      .dispatchEvent(new page.window.Event('click'));
-    assert.ok(await page.until(() => flowPane.textContent
-      .includes('\u062d\u0631\u06a9\u062a \u0628\u0647 (7\u060c 7)')),
-      'the pasted flow never arrived');
-    assert.equal(page.doc.getElementById('mas-paste'), null,
-      'the dialog must close after importing');
-    assert.equal(flowPane.querySelector('input.mas-input').value,
-      '\u062c\u0631\u06cc\u0627\u0646 \u0686\u0633\u0628\u0627\u0646',
-      'the pasted flow kept the wrong name');
 
     // round 25: the prompt shortcut left the bar (the agent tab has it)
   } finally {

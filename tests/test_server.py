@@ -277,7 +277,7 @@ class ServerIntegrationTest(unittest.TestCase):
         }
         text = _report_section(status)
         self.assertIn("## گزارش اجرای سیستم", text)
-        self.assertIn("3 گام اجرا شده", text)
+        self.assertIn("3 مرحله اجرا شده", text)
         self.assertIn("timed out after 60s", text)
         # The model must be told exactly where it stopped.
         self.assertIn("اجرا روی گام **#2", text)

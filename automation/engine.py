@@ -1774,7 +1774,7 @@ class AutomationEngine:
             # round 26: brain-only tools never run inside an ordinary flow;
             # the brain itself starts them directly, not through run_operation
             return 1, "", ("عملیات «%s» اختصاصی مغز است (دامنه: مغز) و داخل "
-                           "جریان‌های معمولی اجرا نمی‌شود"
+                           "عملیات‌های معمولی اجرا نمی‌شود"
                            % operation.get("name"))
         try:
             flow = convert_flow(library.as_flow(operation))

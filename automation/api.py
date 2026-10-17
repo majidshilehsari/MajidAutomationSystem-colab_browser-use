@@ -1631,14 +1631,14 @@ def _snapshot_section(snapshot: Dict[str, Any], public_base: str = "") -> str:
 
 
 def _flow_section(flow: Dict[str, Any], errors: List[str]) -> str:
-    lines = ["## جریان فعلی", "", "```json"]
+    lines = ["## عملیات فعلی", "", "```json"]
     lines.append(json.dumps({"name": flow.get("name"), "settings": flow.get("settings"),
                              "steps": schema.flow_to_prompt_steps(flow)},
                             ensure_ascii=False, indent=2))
     lines.append("```")
     if errors:
         lines.append("")
-        lines.append("ایرادهای اعتبارسنجی جریان فعلی:")
+        lines.append("ایرادهای اعتبارسنجی عملیات فعلی:")
         lines.extend("- %s" % e for e in errors)
     return "\n".join(lines)
 
@@ -1695,7 +1695,7 @@ def _report_section(status: Dict[str, Any], public_base: str = "") -> str:
     state = _STATUS_FA.get(status.get("status"), status.get("status"))
 
     lines = ["## گزارش اجرای سیستم", ""]
-    lines.append("وضعیت: **%s** · %d گام در جریان · %d گام اجرا شده · %.1f ثانیه"
+    lines.append("وضعیت: **%s** · %d مرحله در عملیات · %d مرحله اجرا شده · %.1f ثانیه"
                  % (state, total, len(results), elapsed))
     if status.get("error"):
         lines.append("")
@@ -1784,8 +1784,8 @@ def _report_section(status: Dict[str, Any], public_base: str = "") -> str:
                                            entry.get("message", "")[:200], detail))
         lines.append("```")
 
-    lines += ["", "اگر اجرا نیمه‌کاره مانده، اول علت همان گام را از این گزارش پیدا کن،",
-              "بعد جریان را اصلاح کن؛ از گامی که موفق بوده دوباره شروع نکن."]
+    lines += ["", "اگر اجرا نیمه‌کاره مانده، اول علت همان مرحله را از این گزارش پیدا کن،",
+              "بعد عملیات را اصلاح کن؛ از مرحله‌ای که موفق بوده دوباره شروع نکن."]
     return "\n".join(lines)
 
 

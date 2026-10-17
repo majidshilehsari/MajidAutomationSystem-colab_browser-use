@@ -142,80 +142,6 @@ async function imageBlobUrl(path) {
   return URL.createObjectURL(await response.blob());
 }
 
-/* Manual paste dialog: reading the OS clipboard programmatically depends on
- * a browser permission that silently resets whenever the tunnel URL (origin)
- * changes, while a native Ctrl+V into a textarea needs no permission at all.
- * This dialog is therefore the guaranteed import path for flow JSON from the
- * operator's own machine. Resolves with the pasted text, or '' on cancel. */
-function openPasteDialog() {
-  return new Promise((resolve) => {
-    const area = el('textarea', {
-      id: 'mas-paste-area', class: 'mas-input mas-mono mas-paste-area', rows: 10,
-      placeholder: t('flowPastePh'),
-    });
-    const overlay = el('div', { id: 'mas-paste', class: 'mas-confirm' }, [
-      el('div', { class: 'mas-confirm-box' }, [
-        el('h3', { text: '📋 ' + t('flowPasteTitle') }),
-        el('p', { text: t('flowPasteHint') }),
-        area,
-        el('div', { class: 'mas-row' }, [
-          el('button', {
-            class: 'mas-btn mas-primary', type: 'button', text: t('flowPasteImport'),
-            onClick: () => { const value = area.value; overlay.remove(); resolve(value); },
-          }),
-          el('button', {
-            class: 'mas-btn', type: 'button', text: t('close'),
-            onClick: () => { overlay.remove(); resolve(''); },
-          }),
-        ]),
-      ]),
-    ]);
-    const host = document.getElementById('mas-root') || document.body;
-    host.appendChild(overlay);
-    area.focus();
-  });
-}
-
-async function loadFlowFromClipboard(source) {
-  // Two explicit sources and no silent fallback: one button that quietly
-  // swapped "my Windows clipboard" for "the automation desktop clipboard"
-  // reported confusing errors from whichever side happened to be empty.
-  try {
-    let text = '';
-    if (source === 'browser') {
-      if (navigator.clipboard && navigator.clipboard.readText) {
-        try { text = await navigator.clipboard.readText(); } catch (err) { text = ''; }
-      }
-      if (!text) {
-        // Permission denied, no API, or an empty clipboard: instead of a
-        // dead-end English error, open the manual paste dialog - Ctrl+V
-        // always works, on every origin, with no permission at all.
-        toast(t('flowClipDenied'), 'warn');
-        text = await openPasteDialog();
-        if (!text) return;
-      }
-    } else {
-      // a truly empty desktop clipboard arrives as the server's own message
-      text = ((await api('/clipboard')).text) || '';
-      if (!text) throw new Error(t('flowClipDesktopEmpty'));
-    }
-    let parsed;
-    try { parsed = JSON.parse(text); } catch (err) { throw new Error(t('flowClipBad')); }
-    const data = parsed && parsed.flow ? parsed.flow : parsed;
-    // Round 26: the server converts whatever arrived in the old step
-    // language first, then the shared importer validates the python flow
-    const result = normaliseImportedFlow(await convertFlowServer(data));
-    if (!result || !result.flow) throw new Error(t('flowClipBad'));
-    state.flow = result.flow;
-    persistFlow();
-    renderFlow();
-    toast(`${t('load')}: ${state.flow.name || t('flowClipLoaded')}`, 'ok');
-    if (result.errors && result.errors.length) toast(result.errors.join(' | '), 'info');
-  } catch (error) {
-    toast(error.message || t('flowClipBad'), 'error');
-  }
-}
-
 /* ------------------------------------------------------------------ *
  * DOM helpers
  * ------------------------------------------------------------------ */
@@ -844,8 +770,6 @@ function renderFlow() {
   const ioRow = el('div', { class: 'mas-flowbar' }, [
     button(t('save'), () => saveFlow(), { class: 'mas-btn mas-primary' }),
     button(t('load'), loadFlowDialog),
-    button('🪟 ' + t('flowLoadClipBrowser'), () => loadFlowFromClipboard('browser')),
-    button('🖥 ' + t('flowLoadClipDesktop'), () => loadFlowFromClipboard('desktop')),
     button('📋 ' + t('copyReport'), copyReport, { class: 'mas-btn' }),
     button('🗑 ' + t('clearAll'), clearAllSteps, { class: 'mas-btn mas-danger' }),
   ]);
@@ -1210,20 +1134,10 @@ function stepEditor(step) {
         el('span', { text: field.key }),
         el('select', {
           class: 'mas-input',
-          onChange: (event) => {
-            if (field.key === 'typingMode' && event.target.value === 'inherit') delete step[field.key];
-            else step[field.key] = event.target.value;
-          },
-        }, (field.options || []).map((option) => {
-          const selected = field.key === 'typingMode'
-            ? String(step[field.key] || 'inherit') === option
-            : String(step[field.key] || '') === option;
-          const optionLabel = field.key === 'typingMode'
-            ? t(option === 'inherit' ? 'typingInherit'
-              : 'typing' + option[0].toUpperCase() + option.slice(1))
-            : option;
-          return el('option', { value: option, selected }, optionLabel);
-        })),
+          onChange: (event) => { step[field.key] = event.target.value; },
+        }, (field.options || []).map((option) => el('option', {
+          value: option, selected: String(step[field.key] || '') === option,
+        }, option))),
       ]));
       continue;
     }
@@ -4417,6 +4331,20 @@ function start() {
   wireStandaloneHead();
   setPanelOpen(true);
   selectTab(initialTab());
+  // Round 28, item 6: a flow still saved in the old JSON step language
+  // (round 25 or older) is translated to python the first time the panel
+  // opens with a token. The server also translates on every run and save;
+  // this only makes the stages list speak the one language right away.
+  if (state.token && (state.flow.steps || []).some((s) => s && s.type !== 'python')) {
+    convertFlowServer(state.flow).then((converted) => {
+      if (!converted || !(converted.steps || []).length) return;
+      if (!(converted.steps || []).some((s) => s && s.type !== 'python')) {
+        state.flow = converted;
+        persistFlow();
+        renderFlow();
+      }
+    }).catch(() => { /* the server still translates on run */ });
+  }
   refreshAgentTabs();
   renderStatus();
   refreshStatus();
