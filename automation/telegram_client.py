@@ -204,6 +204,31 @@ class TelegramBot:
                           {"chat_id": chat_id, "caption": caption[:1024]},
                           files={"document": path})
 
+    def download_document(self, file_id: str) -> bytes:
+        """Round 28, item 8: read one file BACK from Telegram by its file_id.
+
+        getFile hands out a temporary path under the bot file endpoint; the
+        bytes are fetched with one plain HTTPS GET.
+        """
+        info = self._call("getFile", {"file_id": str(file_id)})
+        file_path = str((info or {}).get("file_path") or "")
+        if not file_path:
+            raise TelegramError("Telegram did not return a path for that file_id")
+        url = "%s/file/bot%s/%s" % (BOT_API_BASE, self.token, file_path)
+        if self._opener is not None:
+            # Tests inject the transport: they get the file URL to fake.
+            data = self._opener("getFile.download", {"url": url}, None)
+            if isinstance(data, (bytes, bytearray)):
+                return bytes(data)
+            return str(data).encode("utf-8")
+        try:
+            with urllib.request.urlopen(url, timeout=300) as response:
+                return response.read()
+        except urllib.error.HTTPError as exc:
+            raise TelegramError("Telegram refused the download: HTTP %s" % exc.code)
+        except urllib.error.URLError as exc:
+            raise TelegramError("could not reach Telegram: %s" % exc.reason)
+
 
 class TelegramAccount:
     """The operator's own account through Telethon, imported lazily.
@@ -321,6 +346,11 @@ class TelegramAccount:
                       caption: str = "") -> Dict[str, Any]:
         """Telethon picks the right media type from the file itself."""
         return self.send_photo(chat_id, path, caption)
+
+    def download_document(self, file_id: str) -> bytes:
+        """Downloading a file back is a bot-API feature; the account transport
+        records no file_id, so it cannot serve one."""
+        raise TelegramError("downloading a file back works in bot mode")
 
 
 class Notifier:
@@ -477,6 +507,7 @@ class Notifier:
         sent = 0
         errors: List[str] = []
         used: List[str] = []
+        details: List[Dict[str, Any]] = []
         # One log row per destination, so «لیست پیام‌ها» reads like a mailbox:
         # a row appears as "queued" the moment delivery starts and ends up
         # sent / partial / failed with the reason attached.
@@ -510,7 +541,21 @@ class Notifier:
                 state = per_target[chat_id]
                 try:
                     if document_path:
-                        client.send_document(chat_id, document_path, text)
+                        res = client.send_document(chat_id, document_path, text)
+                        doc = res.get("document") if isinstance(res, dict) else None
+                        file_id = str((doc or {}).get("file_id") or "")
+                        if file_id:
+                            # Round 28, item 8: keep the message info of every
+                            # file shipped out, so the very same file can be
+                            # downloaded back from Telegram later.
+                            details.append({
+                                "chatId": chat_id if isinstance(chat_id, int)
+                                else str(chat_id),
+                                "channel": name,
+                                "messageId": (res or {}).get("message_id"),
+                                "fileId": file_id,
+                                "fileName": str((doc or {}).get("file_name") or ""),
+                            })
                     elif photo_path:
                         client.send_photo(chat_id, photo_path, text)
                     else:
@@ -538,7 +583,8 @@ class Notifier:
                 except Exception:  # keep delivery independent of logging
                     pass
         result = {"sent": sent, "failed": len(errors),
-                  "channels": used, "reason": "; ".join(errors)}
+                  "channels": used, "reason": "; ".join(errors),
+                  "details": details}
         self.store.audit("telegram", "notify.sent" if sent else "notify.failed",
                          "channels=%s targets=%d sent=%d %s"
                          % (",".join(used) or "-", len(chosen), sent,
@@ -566,6 +612,22 @@ class Notifier:
             raise TelegramError("the file is gone: %s" % path)
         return self.send(caption or "📦 فایل پشتیبان", targets=targets,
                          purpose=purpose, channel=channel, document_path=path)
+
+    def download_document(self, file_id: str) -> bytes:
+        """Round 28, item 8: fetch one sent file back (bot transport first)."""
+        last: Optional[Exception] = None
+        for name in ("bot", "account"):
+            try:
+                client = self.transport(name)
+            except TelegramError as exc:
+                last = exc
+                continue
+            try:
+                return client.download_document(file_id)
+            except TelegramError as exc:
+                last = exc
+        raise TelegramError("no transport could download the file back: %s"
+                            % (last or "no telegram transport configured"))
 
     def notify_handoff(self, payload: Dict[str, Any]) -> None:
         """Called by the engine when a run stops for a human.

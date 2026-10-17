@@ -30,15 +30,17 @@ Design notes:
 
 from __future__ import annotations
 
+import io
 import json
 import os
+import re
 import shutil
 import sqlite3
 import tarfile
 import tempfile
 import time
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from automation.agent_store import JOB_KINDS
 
@@ -55,6 +57,11 @@ SETTING_SECRETS = "backup.includeSecrets"
 SETTING_LABEL = "backup.label"
 SETTING_NOTIFY = "backup.notify"
 SETTING_LAST = "backup.last"
+#: round 28, item 8: the telegram tab owns its own automatic decision, and the
+#: message info of every backup file that went out is kept so the very same
+#: file can be downloaded back from Telegram later
+SETTING_AUTOSEND = "backup.telegramAuto"
+SETTING_SENT = "backup.telegramSent"
 #: the action used by the single automatic-backup job this manager owns
 JOB_TARGET = "backup"
 
@@ -320,61 +327,76 @@ class BackupManager:
         except OSError as exc:
             raise BackupError("the backup could not be read: %s" % exc, 500)
 
-    def restore(self, name: str, actor: str = "operator") -> Dict[str, Any]:
+    def restore(self, name: str, actor: str = "operator",
+                items: Optional[List[str]] = None) -> Dict[str, Any]:
         """Pour one backup tar.gz back over the live data.
 
         ``agent.db`` returns to the database path, ``flows/*.json`` to the
         flows directory and — when the backup carried one — the secrets file
         to its old 0600 place.  The caller MUST restart the process right
         after this: the open SQLite connection cannot follow the file swap.
+
+        Round 28, item 4: ``items`` is the operator's per-item choice (the
+        keys from :meth:`inspect`). Without a list, every COMPATIBLE item is
+        restored and every incompatible one is skipped — a red row is never
+        imported. Asking for a red item on purpose is refused with 409.
         """
         path = self.safe_path(name)
-        staged = Path(tempfile.mkdtemp(prefix="mas-restore-"))
         try:
-            count = 0
-            with tarfile.open(str(path), "r:gz") as archive:
-                for member in archive.getmembers():
-                    if not member.isfile():
-                        continue
-                    rel = member.name.replace("\\", "/")
-                    if rel.startswith("/") or ".." in rel.split("/"):
-                        raise BackupError(
-                            "the backup contains an unsafe path: %s" % rel, 400)
-                    source = archive.extractfile(member)
-                    if source is None:
-                        continue
-                    target = staged / rel
-                    target.parent.mkdir(parents=True, exist_ok=True)
-                    with source, open(str(target), "wb") as out:
-                        shutil.copyfileobj(source, out)
-                    count += 1
-            db_src = staged / "agent.db"
-            if not db_src.exists():
-                raise BackupError("that backup holds no agent.db", 400)
-            os.replace(str(db_src), str(self.db_path))
-            # The snapshot db is self-contained; a stale -wal/-shm pair from
-            # the previous database would be replayed onto it at the next
-            # open and could corrupt the restore.
-            for suffix in ("-wal", "-shm"):
-                try:
-                    os.remove(str(self.db_path) + suffix)
-                except OSError:
-                    pass
-            flows_src = staged / "flows"
-            if self.flows_dir is not None and flows_src.exists():
-                self.flows_dir.mkdir(parents=True, exist_ok=True)
-                for flow in flows_src.glob("*.json"):
-                    os.replace(str(flow), str(self.flows_dir / flow.name))
-            secrets = self.secrets_path()
-            secrets_src = staged / secrets.name if secrets is not None else None
-            if secrets_src is not None and secrets_src.exists():
-                os.replace(str(secrets_src), str(secrets))
-                try:
-                    os.chmod(str(secrets), 0o600)
-                except OSError:
-                    pass
+            staged = self._extract_staged(path, "mas-restore-")
         except tarfile.TarError as exc:
             raise BackupError("the backup could not be opened: %s" % exc, 500)
+        chosen: set = set()
+        known: set = set()
+        try:
+            verdicts = self._inspect_staged(staged)
+            known = {row["key"] for row in verdicts}
+            chosen = ({str(key) for key in items} if items is not None
+                      else {row["key"] for row in verdicts if row["compatible"]})
+            unknown = sorted(chosen - known)
+            if unknown:
+                raise BackupError("these items are not inside that backup: %s"
+                                  % ", ".join(unknown), 400)
+            red = sorted(row["key"] for row in verdicts
+                         if row["key"] in chosen and not row["compatible"])
+            if red:
+                raise BackupError("these items are not compatible with this app "
+                                  "version: %s" % ", ".join(red), 409)
+            count = 0
+            db_src = staged / "agent.db"
+            if "agent.db" in chosen and db_src.exists():
+                os.replace(str(db_src), str(self.db_path))
+                # The snapshot db is self-contained; a stale -wal/-shm pair from
+                # the previous database would be replayed onto it at the next
+                # open and could corrupt the restore.
+                for suffix in ("-wal", "-shm"):
+                    try:
+                        os.remove(str(self.db_path) + suffix)
+                    except OSError:
+                        pass
+                count += 1
+            elif items is None and not db_src.exists():
+                raise BackupError("that backup holds no agent.db", 400)
+            if self.flows_dir is not None:
+                for key in sorted(chosen):
+                    if not key.startswith("flows/"):
+                        continue
+                    src = staged / key
+                    if not src.exists():
+                        continue
+                    self.flows_dir.mkdir(parents=True, exist_ok=True)
+                    os.replace(str(src), str(self.flows_dir / src.name))
+                    count += 1
+            secrets = self.secrets_path()
+            if secrets is not None:
+                secrets_src = staged / secrets.name
+                if secrets_src.exists() and secrets.name in chosen:
+                    os.replace(str(secrets_src), str(secrets))
+                    try:
+                        os.chmod(str(secrets), 0o600)
+                    except OSError:
+                        pass
+                    count += 1
         except OSError as exc:
             raise BackupError("the backup could not be restored: %s" % exc, 500)
         finally:
@@ -383,10 +405,14 @@ class BackupManager:
         # which the restart replaces — honesty about the limits of auditing a
         # restore that overwrites the audit log itself.
         try:
-            self.store.audit(actor, "backup.restored", path.name)
+            self.store.audit(actor, "backup.restored",
+                             "%s (items: %s)" % (path.name,
+                                                 ", ".join(sorted(chosen)) or "-"))
         except Exception:  # noqa: BLE001
             pass
-        return {"restored": path.name, "files": count}
+        return {"restored": path.name, "files": count,
+                "items": sorted(chosen),
+                "skipped": sorted(known - chosen)}
 
     def delete(self, name: str, actor: str = "operator") -> Dict[str, Any]:
         path = self.safe_path(name)
@@ -467,6 +493,12 @@ class BackupManager:
             "last": last if isinstance(last, dict) else None,
             "jobId": str(job.get("id") or ""),
             "notifyAfterBackup": bool(self.setting(SETTING_NOTIFY)),
+            # the telegram tab's own automatic decision: default ON, so the
+            # round-26 behaviour (a target is set => the file ships) survives
+            "telegramAuto": self.setting(SETTING_AUTOSEND) is None
+            or bool(self.setting(SETTING_AUTOSEND)),
+            "telegramSent": [row for row in (self.setting(SETTING_SENT) or [])
+                             if isinstance(row, dict)],
         }
 
     def configure(self, values: Dict[str, Any], actor: str = "operator") -> Dict[str, Any]:
@@ -489,7 +521,8 @@ class BackupManager:
                 if len(text) > 200:
                     raise BackupError("«%s» is too long" % key, 400)
                 self.store.set_setting(name, text)
-        for key, name in (("includeSecrets", SETTING_SECRETS), ("notify", SETTING_NOTIFY)):
+        for key, name in (("includeSecrets", SETTING_SECRETS), ("notify", SETTING_NOTIFY),
+                          ("telegramAuto", SETTING_AUTOSEND)):
             if key in values:
                 self.store.set_setting(name, bool(values[key] in (True, "1", 1, "true")))
         if "enabled" in values or "schedule" in values:
@@ -590,8 +623,226 @@ class BackupManager:
                          "%s -> %s" % (row["name"], destination))
         result = dict(result or {})
         result["backup"] = {"name": row["name"], "sizeText": row["sizeText"]}
+        self._record_sent(row, result.get("details") or [])
         return result
 
     def newest_name(self) -> str:
         backups = self.list()
         return backups[0]["name"] if backups else ""
+
+    # -- round 28: compatibility table, selective restore, upload, telegram --
+    def _record_sent(self, row: Dict[str, Any], details: List[Dict[str, Any]]) -> None:
+        """Keep the message info of every backup shipped to Telegram.
+
+        The user's rule: the system talks to Telegram directly — it saves the
+        message info when a snapshot goes out and downloads the very same
+        file back later. Newest first, capped so the setting never grows
+        forever.
+        """
+        entries = [item for item in (self.setting(SETTING_SENT) or [])
+                   if isinstance(item, dict)]
+        stamp = time.strftime("%Y-%m-%d %H:%M:%S",
+                              time.localtime(float(self._clock())))
+        added = 0
+        for item in details[:4]:
+            file_id = str(item.get("fileId") or "")
+            if not file_id:
+                continue
+            entries.insert(0, {
+                "name": str(row.get("name") or ""),
+                "sizeText": str(row.get("sizeText") or ""),
+                "at": stamp,
+                "chatId": item.get("chatId"),
+                "messageId": item.get("messageId"),
+                "channel": str(item.get("channel") or ""),
+                "fileId": file_id,
+            })
+            added += 1
+        if not added:
+            return
+        try:
+            self.store.set_setting(SETTING_SENT, entries[:20])
+        except Exception:  # noqa: BLE001 - losing the record is not fatal
+            pass
+
+    def upload(self, data: bytes, name: str = "",
+               actor: str = "operator") -> Dict[str, Any]:
+        """Round 28, item 8 (manual tab): accept a backup file that lives on
+        the user's own machine. It must open as a tar.gz and hold agent.db or
+        flows — a random archive never poisons the restore list."""
+        if not data or len(data) < 512:
+            raise BackupError("that file is far too small to be a backup", 400)
+        try:
+            with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+                members = [m.name.replace("\\", "/")
+                           for m in archive.getmembers() if m.isfile()]
+        except tarfile.TarError as exc:
+            raise BackupError(
+                "that file is not a readable .tar.gz backup: %s" % exc, 400)
+        if ("agent.db" not in members
+                and not any(m.startswith("flows/") for m in members)):
+            raise BackupError("that archive holds neither agent.db nor any flows "
+                              "- it is not one of our backups", 400)
+        clean = re.sub(r"[^A-Za-z0-9._-]", "", str(name or "").strip())
+        if not clean.endswith(".tar.gz"):
+            clean = ""
+        if clean and not clean.startswith(ARCHIVE_PREFIX):
+            clean = ARCHIVE_PREFIX + clean
+        if not clean:
+            clean = "%supload-%s.tar.gz" % (ARCHIVE_PREFIX,
+                                            _stamp(float(self._clock())))
+        self.ensure_dir()
+        path = self.dir / clean
+        if path.exists():
+            clean = "%s-%d.tar.gz" % (clean[:-len(".tar.gz")],
+                                      int(float(self._clock())))
+            path = self.dir / clean
+        try:
+            path.write_bytes(data)
+            os.chmod(str(path), 0o600)
+        except OSError as exc:
+            raise BackupError(
+                "the uploaded backup could not be kept: %s" % exc, 500)
+        self.store.audit(actor, "backup.uploaded", "%s (%d member(s), %s)"
+                         % (clean, len(members), human_bytes(len(data))))
+        return {"name": clean, "size": len(data),
+                "sizeText": human_bytes(len(data)),
+                "members": len(members), "uploaded": True}
+
+    def inspect(self, name: str) -> Dict[str, Any]:
+        """Round 28, item 4: the full table of what this backup would bring
+        back, one verdict per item: green = fully compatible with this app
+        version (imported by default), red = not compatible (never imported).
+        Nothing is touched — inspect only reads."""
+        path = self.safe_path(name)
+        try:
+            staged = self._extract_staged(path, "mas-inspect-")
+        except tarfile.TarError as exc:
+            raise BackupError("the backup could not be opened: %s" % exc, 500)
+        try:
+            meta: Dict[str, Any] = {}
+            meta_src = staged / "backup.json"
+            if meta_src.exists():
+                try:
+                    meta = json.loads(meta_src.read_text(encoding="utf-8"))
+                except (OSError, ValueError):
+                    meta = {}
+            items = self._inspect_staged(staged)
+        except OSError as exc:
+            raise BackupError("the backup could not be inspected: %s" % exc, 500)
+        finally:
+            shutil.rmtree(str(staged), ignore_errors=True)
+        return {"name": path.name, "items": items,
+                "createdAtText": str((meta or {}).get("createdAtText") or ""),
+                "generator": str((meta or {}).get("generator") or ""),
+                "green": sum(1 for row in items if row["compatible"]),
+                "red": sum(1 for row in items if not row["compatible"])}
+
+    def _extract_staged(self, path: Path, prefix: str) -> Path:
+        """One safe extractor shared by restore and inspect: members with
+        absolute or climbing paths are refused before anything touches disk."""
+        staged = Path(tempfile.mkdtemp(prefix=prefix))
+        try:
+            with tarfile.open(str(path), "r:gz") as archive:
+                for member in archive.getmembers():
+                    if not member.isfile():
+                        continue
+                    rel = member.name.replace("\\", "/")
+                    if rel.startswith("/") or ".." in rel.split("/"):
+                        raise BackupError(
+                            "the backup contains an unsafe path: %s" % rel, 400)
+                    source = archive.extractfile(member)
+                    if source is None:
+                        continue
+                    target = staged / rel
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    with source, open(str(target), "wb") as out:
+                        shutil.copyfileobj(source, out)
+        except BaseException:
+            shutil.rmtree(str(staged), ignore_errors=True)
+            raise
+        return staged
+
+    def _inspect_staged(self, staged: Path) -> List[Dict[str, Any]]:
+        """One verdict row per restorable item inside an extracted backup."""
+        rows: List[Dict[str, Any]] = []
+        db_src = staged / "agent.db"
+        if db_src.exists():
+            ok, reason = self._db_verdict(db_src)
+            rows.append({
+                "key": "agent.db",
+                "label": "دیتابیس ایجنت (گفتگو، نامه‌ها، گزارش‌ها، مغز، تنظیمات)",
+                "kind": "database", "compatible": ok, "reason": reason,
+                "sizeText": human_bytes(int(db_src.stat().st_size))})
+        else:
+            rows.append({"key": "agent.db",
+                         "label": "دیتابیس ایجنت",
+                         "kind": "database", "compatible": False,
+                         "reason": "این پشتیبان agent.db ندارد"})
+        flows_src = staged / "flows"
+        if flows_src.exists():
+            for flow in sorted(flows_src.glob("*.json")):
+                ok, reason = self._flow_verdict(flow)
+                rows.append({"key": "flows/%s" % flow.name,
+                             "label": "عملیات «%s»" % flow.stem,
+                             "kind": "flow", "compatible": ok, "reason": reason})
+        secrets = self.secrets_path()
+        if secrets is not None and (staged / secrets.name).exists():
+            rows.append({"key": secrets.name,
+                         "label": "فایل secrets (رمزها و کلیدها)",
+                         "kind": "secrets", "compatible": True,
+                         "reason": "با اجازهٔ ۰۶۰۰ سر جای خودش بازنشانی می‌شود"})
+        return rows
+
+    def _db_verdict(self, db_src: Path) -> Tuple[bool, str]:
+        """A snapshot database is compatible when SQLite can read it; tables
+        this version added are created automatically at the next open, so an
+        OLD database is fine — an unreadable or empty one is not."""
+        try:
+            conn = sqlite3.connect("file:%s?mode=ro" % str(db_src), uri=True)
+        except sqlite3.Error as exc:
+            return False, "دیتابیس باز نمی‌شود: %s" % exc
+        try:
+            rows = conn.execute(
+                "select name from sqlite_master where type='table' "
+                "and name not like 'sqlite_%'").fetchall()
+            health = conn.execute("pragma integrity_check").fetchone()
+        except sqlite3.Error as exc:
+            conn.close()
+            return False, "دیتابیس خوانده نمی‌شود: %s" % exc
+        conn.close()
+        tables = {str(row[0]) for row in rows}
+        if not tables:
+            return False, "دیتابیس هیچ جدولی ندارد"
+        if str((health or [""])[0]).lower() != "ok":
+            return False, "دیتابیس آسیب دیده (integrity_check رد شد)"
+        missing = [name for name in ("settings", "telegram_log")
+                   if name not in tables]
+        if missing:
+            return True, ("سازگار؛ جدول‌های جدیدتر (%s) هنگام اولین "
+                          "باز شدن خودکار ساخته می‌شوند"
+                          % "، ".join(missing))
+        return True, "کاملاً سازگار با نسخهٔ فعلی"
+
+    def _flow_verdict(self, flow_file: Path) -> Tuple[bool, str]:
+        """An operation file is compatible when the validator accepts it;
+        legacy typed steps are translated to Python automatically, so they
+        stay green with a note about the translation."""
+        try:
+            raw = json.loads(flow_file.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            return False, "فایل JSON خوانده نمی‌شود"
+        from automation import schema
+        steps = raw.get("steps") if isinstance(raw, dict) else None
+        legacy = isinstance(steps, list) and any(
+            isinstance(step, dict)
+            and str(step.get("type") or "") not in ("", "python")
+            for step in steps)
+        _normalized, errors = schema.validate_flow(raw)
+        if errors:
+            return False, "اعتبارسنجی رد کرد: %s" % "؛ ".join(
+                str(item) for item in errors[:3])
+        if legacy:
+            return True, ("سازگار — مراحله‌های قدیمی هنگام وارد "
+                          "شدن خودکار به پایتون ترجمه می‌شوند")
+        return True, "کاملاً سازگار (مراحل پایتون)"

@@ -8,6 +8,7 @@ unit-testable without a browser, an X server or a VNC connection.
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import os
@@ -306,7 +307,10 @@ class AutomationApi:
             ("GET", "/agent/backups", self.route_agent_backups_list),
             ("POST", "/agent/backups", self.route_agent_backups_create),
             ("GET", "/agent/backup-download", self.route_agent_backup_download),
+            ("POST", "/agent/backup-inspect", self.route_agent_backup_inspect),
             ("POST", "/agent/backup-restore", self.route_agent_backup_restore),
+            ("POST", "/agent/backup-upload", self.route_agent_backup_upload),
+            ("POST", "/agent/backup-fetch", self.route_agent_backup_fetch),
             ("POST", "/agent/backup-delete", self.route_agent_backup_delete),
             ("POST", "/agent/backup-send", self.route_agent_backup_send),
             ("POST", "/agent/backup-config", self.route_agent_backup_config),
@@ -1353,10 +1357,50 @@ class AutomationApi:
         if self.engine is not None and self.engine.busy():
             raise ApiError(409, "یک اجرا در جریان است؛ اول متوقفش کن و بعد بازیابی کن.")
         payload = self.read_json(body)
-        info = self.agent.backup_restore(str(payload.get("name") or ""))
+        raw_items = payload.get("items")
+        items = ([str(key) for key in raw_items]
+                 if isinstance(raw_items, list) else None)
+        info = self.agent.backup_restore(str(payload.get("name") or ""),
+                                         items=items)
         _restart_later()
         return json_response(200, {"ok": True, "restored": info.get("restored"),
+                                   "items": info.get("items"),
+                                   "skipped": info.get("skipped"),
                                    "files": info.get("files"), "restarting": True})
+
+    def route_agent_backup_inspect(self, *, body: bytes = b"", **_: Any) -> Response:
+        """Round 28, item 4: the compatibility table a restore decision is
+        made from. Operator-only, like every restore path."""
+        self._require_operator()
+        payload = self.read_json(body)
+        return json_response(200, self.agent.backup_inspect(
+            str(payload.get("name") or "")))
+
+    def route_agent_backup_upload(self, *, body: bytes = b"", **_: Any) -> Response:
+        """Round 28, item 8 (manual tab): a backup file from the user's own
+        machine arrives base64-in-JSON and is validated before it is kept."""
+        self._require_operator()
+        payload = self.read_json(body)
+        raw = str(payload.get("data") or "")
+        if raw.startswith("data:") and "," in raw[:200]:
+            raw = raw.split(",", 1)[1]  # a FileReader data URL
+        try:
+            data = base64.b64decode(raw.encode("ascii", "ignore"))
+        except (ValueError, TypeError) as exc:
+            raise ApiError(400, "the file did not arrive as readable base64: %s" % exc)
+        if not data:
+            raise ApiError(400, "that upload arrived empty")
+        info = self.agent.backup_upload(data, name=str(payload.get("name") or ""))
+        return json_response(201, {"ok": True, "backup": info})
+
+    def route_agent_backup_fetch(self, *, body: bytes = b"", **_: Any) -> Response:
+        """Round 28, item 8 (telegram tab): one sent file comes back down by
+        the message info recorded when it went up."""
+        self._require_operator()
+        payload = self.read_json(body)
+        info = self.agent.backup_fetch(file_id=str(payload.get("fileId") or ""),
+                                       name=str(payload.get("name") or ""))
+        return json_response(200, {"ok": True, "backup": info})
 
     def route_agent_backup_delete(self, *, body: bytes = b"", **_: Any) -> Response:
         payload = self.read_json(body)

@@ -532,6 +532,7 @@ async function refreshAgentTabs() {
       if (str(prefs['ui.agentSub'])) state.agentSub = prefs['ui.agentSub'];
       if (str(prefs['ui.tgSub'])) state.tgSub = prefs['ui.tgSub'];
       if (str(prefs['ui.dbSub'])) state.dbSub = prefs['ui.dbSub'];
+      if (str(prefs['ui.backupSub'])) state.backupSub = prefs['ui.backupSub'];
       if (prefs['ui.reportsKind'] !== undefined && prefs['ui.reportsKind'] !== null) {
         state.reportsKind = String(prefs['ui.reportsKind']);
       }
@@ -5154,6 +5155,68 @@ async function renderLetters(host) {
   replace(pane, compose, listCard);
 }
 
+// Round 28, item 4: the restore-compatibility modal. One green/red verdict
+// per item the backup holds; green items are ticked by default (that IS the
+// default restore), red ones can never be imported, and the operator may
+// untick any green item before the server restarts itself.
+async function openRestoreCompatModal(name) {
+  const body = el('div', {}, [el('p', { class: 'mas-empty', text: '…' })]);
+  const close = modalCard([
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '♻️ ' + t('restoreTitle') + ' — ' + name })]),
+    el('p', { class: 'mas-hint', text: t('restoreHint') }),
+    body,
+    // deferred: `close` is what modalCard returns, so the handler may only
+    // look it up at click time (a direct reference is a TDZ crash)
+    el('div', { class: 'mas-row' }, [button('✕ ' + t('supaClose'), () => close())]),
+  ]);
+  let data;
+  try {
+    data = await api('/agent/backup-inspect', { method: 'POST', body: { name } });
+  } catch (error) {
+    replace(body, el('p', { class: 'mas-warn', text: error.message || String(error) }));
+    return;
+  }
+  const items = data.items || [];
+  const boxes = new Map();
+  const rows = items.map((item) => {
+    const box = el('input', {
+      type: 'checkbox', checked: !!item.compatible, disabled: !item.compatible,
+      dataset: { itemKey: item.key },
+    });
+    boxes.set(item.key, box);
+    return [
+      el('span', { text: item.compatible ? '🟢' : '🔴' }),
+      item.label || item.key,
+      el('span', { class: 'mas-hint', text: item.reason || '' }),
+      box,
+    ];
+  });
+  replace(body,
+    el('p', {
+      class: 'mas-hint',
+      text: `${data.createdAtText || '-'} · 🟢 ${data.green || 0} · 🔴 ${data.red || 0}`,
+    }),
+    items.length ? agentTable(
+      [t('restoreColState'), t('restoreColItem'),
+       t('restoreColReason'), t('restoreColPick')],
+      rows) : el('p', { class: 'mas-empty', text: t('restoreEmpty') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('♻️ ' + t('restoreSelected'), async () => {
+        const chosen = [];
+        boxes.forEach((box, key) => { if (box.checked) chosen.push(key); });
+        if (!chosen.length) { toast(t('restoreNone'), 'warn'); return; }
+        close();
+        try {
+          await api('/agent/backup-restore',
+            { method: 'POST', body: { name, items: chosen } });
+          toast(t('dbRestoring'), 'warn', { sticky: true });
+          supaReloadSoon();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+    ]));
+}
+
 async function renderBackups(host) {
   const pane = host;
   replace(pane, el('p', { class: 'mas-empty', text: '…' }));
@@ -5172,6 +5235,8 @@ async function renderBackups(host) {
     schedule: config.schedule || '', keep: config.keep || 7,
     target: config.telegramTarget || '', channel: config.telegramChannel || '',
     secrets: !!config.includeSecrets, notify: !!config.notifyAfterBackup,
+    auto: config.telegramAuto !== false,
+    sent: Array.isArray(config.telegramSent) ? config.telegramSent : [],
   };
   const sendDraft = { name: '', target: draft.target, channel: draft.channel };
 
@@ -5213,16 +5278,12 @@ async function renderBackups(host) {
       backups.map((row) => [
         row.name, row.sizeText, tehranWhen(row.created_at || row.createdAt),
         el('span', { class: 'mas-row' }, [
-          button('♻️ ' + t('dbRestore'), async () => {
-            // The operator's rule: wherever a backup button lives, a restore
-            // button lives beside it. Restoring replaces the live database,
-            // so the server restarts itself right after (same pid).
-            if (!window.confirm(t('dbConfirmRestore'))) return;
-            try {
-              await api('/agent/backup-restore', { method: 'POST', body: { name: row.name } });
-              toast(t('dbRestoring'), 'warn', { sticky: true });
-              supaReloadSoon();
-            } catch (error) { toast(error.message, 'error'); }
+          button('♻️ ' + t('dbRestore'), () => {
+            // Round 28, item 4: the restore button no longer restores blindly.
+            // It opens the compatibility table first: green items are ticked
+            // by default, red ones can never be imported, and the operator
+            // decides item by item. The server restarts right after.
+            openRestoreCompatModal(row.name);
           }),
           button('📥 ' + t('dbDownload'), () => downloadBackup(row.name)),
           button('📤 ' + t('dbSendTg'), async () => {
@@ -5482,25 +5543,6 @@ async function renderBackups(host) {
     ]),
     el('p', { class: 'mas-hint', text: draft.kind === 'cron' ? t('dbCronHint')
       : (draft.kind === 'every' ? t('dbEveryHint') : t('dbAtHint')) }),
-    agentField('🎯 ' + t('dbTarget'), el('input', {
-      class: 'mas-input', value: draft.target, placeholder: '@mychannel یا -100…',
-      onInput: (event) => { draft.target = event.target.value; },
-    })),
-    el('p', { class: 'mas-hint', text: t('dbTargetHint') }),
-    el('div', { class: 'mas-row mas-wrap' }, [
-      agentField(t('tgTestChannel'), agentSelect([
-        { value: '', label: t('tgChannelAuto') },
-        { value: 'bot', label: t('tgChannelBot') },
-        { value: 'account', label: t('tgChannelAccount') },
-      ], draft.channel, (event) => { draft.channel = event.target.value; })),
-      el('label', { class: 'mas-check' }, [
-        el('input', {
-          type: 'checkbox', checked: draft.notify,
-          onChange: (event) => { draft.notify = event.target.checked; },
-        }),
-        el('span', { text: t('dbNotify') }),
-      ]),
-    ]),
     el('div', { class: 'mas-row mas-wrap' }, [
       button('💾 ' + t('dbSave'), async () => {
         try {
@@ -5508,8 +5550,7 @@ async function renderBackups(host) {
             method: 'POST',
             body: {
               enabled: draft.enabled, scheduleKind: draft.kind, schedule: draft.schedule,
-              keep: draft.keep, telegramTarget: draft.target,
-              telegramChannel: draft.channel, notify: draft.notify,
+              keep: draft.keep,
             },
           });
           toast(t('agentSaved'), 'ok');
@@ -5548,7 +5589,117 @@ async function renderBackups(host) {
     }, { class: 'mas-btn mas-primary' }),
   ]);
 
-  replace(pane, statsCard, listCard, supaCard, autoCard, sendCard);
+  /* Round 28, item 8: three sub-sub-tabs, each owning its own automatic
+     decision — دستی (files on the user's own system), تلگرام (snapshots go
+     out AND come back through Telegram) and سوپابیس (the cloud copy). */
+  const tgCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' }, [el('b', { text: '📨 ' + t('bkTgTitle') })]),
+    el('p', { class: 'mas-hint', text: t('bkTgHint') }),
+    agentField('🎯 ' + t('dbTarget'), el('input', {
+      class: 'mas-input', value: draft.target, placeholder: '@mychannel یا -100…',
+      onInput: (event) => { draft.target = event.target.value; },
+    })),
+    el('p', { class: 'mas-hint', text: t('dbTargetHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      agentField(t('tgTestChannel'), agentSelect([
+        { value: '', label: t('tgChannelAuto') },
+        { value: 'bot', label: t('tgChannelBot') },
+        { value: 'account', label: t('tgChannelAccount') },
+      ], draft.channel, (event) => { draft.channel = event.target.value; })),
+      el('label', { class: 'mas-check' }, [
+        el('input', {
+          type: 'checkbox', checked: draft.auto,
+          onChange: (event) => { draft.auto = event.target.checked; },
+        }),
+        el('span', { text: t('bkTgAuto') }),
+      ]),
+      el('label', { class: 'mas-check' }, [
+        el('input', {
+          type: 'checkbox', checked: draft.notify,
+          onChange: (event) => { draft.notify = event.target.checked; },
+        }),
+        el('span', { text: t('dbNotify') }),
+      ]),
+    ]),
+    button('💾 ' + t('bkTgSave'), async () => {
+      try {
+        await api('/agent/backup-config', {
+          method: 'POST',
+          body: {
+            telegramTarget: draft.target, telegramChannel: draft.channel,
+            telegramAuto: draft.auto, notify: draft.notify,
+          },
+        });
+        toast(t('agentSaved'), 'ok');
+        renderDatabase();
+      } catch (error) { toast(error.message, 'error'); }
+    }, { class: 'mas-btn mas-primary' }),
+  ]);
+
+  // What went OUT to Telegram stays listed with its message info, and every
+  // row can bring the very same file back down (round 28, item 8).
+  const sentCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '🗂 ' + t('bkTgSentTitle') })]),
+    draft.sent.length ? agentTable(
+      [t('dbColName'), t('dbColWhen'), t('dbColSize'), t('dbColActions')],
+      draft.sent.map((entry) => [
+        entry.name || '-', entry.at || '-', entry.sizeText || '-',
+        button('⬇️ ' + t('bkTgFetch'), async () => {
+          try {
+            const res = await api('/agent/backup-fetch', {
+              method: 'POST', body: { fileId: entry.fileId, name: entry.name },
+            });
+            toast(t('bkTgFetchOk'), 'ok');
+            const landed = (res.backup || {}).name || '';
+            if (landed) openRestoreCompatModal(landed);
+          } catch (error) { toast(error.message, 'error'); }
+        }),
+      ])) : el('p', { class: 'mas-hint', text: t('bkTgSentEmpty') }),
+  ]);
+
+  // The manual tab's other half: a backup file from the user's own computer
+  // is uploaded here, validated, and lands in the list above.
+  const uploadInput = el('input',
+    { type: 'file', accept: '.tar.gz,.tgz', class: 'mas-input' });
+  const uploadCard = el('div', { class: 'mas-box mas-card' }, [
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '📤 ' + t('bkUploadTitle') })]),
+    el('p', { class: 'mas-hint', text: t('bkUploadHint') }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      uploadInput,
+      button('📤 ' + t('bkUploadBtn'), async () => {
+        const file = uploadInput.files && uploadInput.files[0];
+        if (!file) { toast(t('bkUploadPick'), 'warn'); return; }
+        try {
+          const dataUrl = await new Promise((resolve, reject) => {
+            const reader = new FileReader();
+            reader.onload = () => resolve(String(reader.result || ''));
+            reader.onerror = () => reject(new Error('FileReader failed'));
+            reader.readAsDataURL(file);
+          });
+          const res = await api('/agent/backup-upload', {
+            method: 'POST', body: { name: file.name, data: dataUrl },
+          });
+          toast(`${t('bkUploadOk')} · ${(res.backup || {}).name || ''}`, 'ok');
+          renderDatabase();
+        } catch (error) { toast(error.message, 'error'); }
+      }, { class: 'mas-btn mas-primary' }),
+    ]),
+  ]);
+
+  const bkSubs = ['manual', 'telegram', 'supabase'];
+  const bkActive = bkSubs.includes(state.backupSub) ? state.backupSub : 'manual';
+  const bkTabs = el('div', { class: 'mas-tabs mas-subtabs' }, bkSubs.map((name) => el('button', {
+    class: 'mas-tab' + (bkActive === name ? ' is-active' : ''), type: 'button',
+    dataset: { bksub: name }, text: t('bkSub' + name.charAt(0).toUpperCase() + name.slice(1)),
+    onClick: () => { state.backupSub = name; saveUiPref('backupSub', name); renderDatabase(); },
+  })));
+  const bkBody = el('div', { id: 'mas-backup-body' });
+  if (bkActive === 'manual') replace(bkBody, listCard, uploadCard, autoCard);
+  else if (bkActive === 'telegram') replace(bkBody, tgCard, sendCard, sentCard);
+  else replace(bkBody, supaCard);
+  replace(pane, statsCard, bkTabs, bkBody);
 }
 
 /* ------------------------------------------------------------------ *

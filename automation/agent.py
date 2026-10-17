@@ -62,6 +62,7 @@ PLAIN_SETTINGS = {
     "ui.agentSub": str,
     "ui.tgSub": str,
     "ui.dbSub": str,
+    "ui.backupSub": str,
     "ui.reportsKind": str,
     "ui.brainSub": str,
     "ui.panel": str,
@@ -376,8 +377,14 @@ API_INDEX = [
      "Take one backup right now (a tar.gz on the volume)."),
     ("GET", "/agent/backup-download", "📥 دانلود یک پشتیبان برای نگهداری بیرون.",
      "Download one backup archive."),
-    ("POST", "/agent/backup-restore", "♻️ بازیابی یک پشتیبان محلی (جایگزینی دیتابیس و فلوها با همان نسخه) و راه‌اندازی مجدد سرور (فقط اپراتور؛ هنگام اجرای فعال رد می‌شود).",
-     "Restore one local backup (database and flows return to that version) and restart the server (operator only; refused while a run is active)."),
+    ("POST", "/agent/backup-restore", "♻️ بازیابی یک پشتیبان محلی (جایگزینی دیتابیس و فلوها با همان نسخه) و راه‌اندازی مجدد سرور (فقط اپراتور؛ هنگام اجرای فعال رد می‌شود). دور ۲۸: با فهرست items فقط قلم‌های انتخابی بازمی‌گردند.",
+     "Restore one local backup (database and flows return to that version) and restart the server (operator only; refused while a run is active). Round 28: with an items list only the chosen parts come back."),
+    ("POST", "/agent/backup-inspect", "♻️ جدول سازگاری یک پشتیبان: هر قلم با حکم سبز (سازگار، پیش‌فرض بازیابی می‌شود) یا قرمز (ناسازگار، هرگز وارد نمی‌شود) — فقط اپراتور.",
+     "The compatibility table of one backup: every item with a green verdict (compatible, restored by default) or a red one (incompatible, never imported) - operator only."),
+    ("POST", "/agent/backup-upload", "📤 بارگذاری یک فایل پشتیبان از سیستم خود کاربر (base64)؛ قبل از پذیرفتن به‌عنوان یکی از پشتیبان‌های ما اعتبارسنجی می‌شود — فقط اپراتور.",
+     "Upload a backup file from the user's own machine (base64); validated as one of our archives before it is accepted - operator only."),
+    ("POST", "/agent/backup-fetch", "📨 برگرداندن یک پشتیبان از تلگرام با اطلاعات پیامی که هنگام ارسال ذخیره شد، و نشاندنش در فهرست پشتیبان‌ها — فقط اپراتور.",
+     "Fetch a backup back from Telegram using the message info saved when it was sent, and land it in the backup list - operator only."),
     ("POST", "/agent/backup-delete", "🗄 حذف یک پشتیبان.", "Delete one backup."),
     ("POST", "/agent/backup-send", "🗄 فرستادن یک پشتیبان به تلگرام (کانال/چت "
                                    "دلخواه).",
@@ -1087,7 +1094,9 @@ class AgentHub:
         info = self.backup_create(actor="scheduler", label="زمان‌بندی‌شده")
         pruned = self.backups.prune(actor="scheduler")
         shipped: Dict[str, Any] = {}
-        if str(self.backups.config().get("telegramTarget") or ""):
+        cfg = self.backups.config()
+        # Round 28, item 8: the telegram tab owns its own automatic decision
+        if str(cfg.get("telegramTarget") or "") and bool(cfg.get("telegramAuto", True)):
             try:
                 shipped = self.backups.send(name=info["name"], actor="scheduler")
             except BackupError as exc:
@@ -1122,9 +1131,12 @@ class AgentHub:
         except BackupError as exc:
             raise AgentError(str(exc), exc.status)
 
-    def backup_restore(self, name: str, actor: str = "operator") -> Dict[str, Any]:
+    def backup_restore(self, name: str, actor: str = "operator",
+                       items: Optional[List[str]] = None) -> Dict[str, Any]:
+        """Round 28, item 4: ``items`` is the operator's per-item choice from
+        the compatibility table; None restores every compatible item."""
         try:
-            return self.backups.restore(name, actor=actor)
+            return self.backups.restore(name, actor=actor, items=items)
         except BackupError as exc:
             raise AgentError(str(exc), exc.status)
 
@@ -1148,6 +1160,37 @@ class AgentHub:
             return self.backups.configure(values, actor=actor)
         except BackupError as exc:
             raise AgentError(str(exc), exc.status)
+
+    def backup_inspect(self, name: str) -> Dict[str, Any]:
+        """Round 28, item 4: the compatibility table behind every restore."""
+        try:
+            return self.backups.inspect(name)
+        except BackupError as exc:
+            raise AgentError(str(exc), exc.status)
+
+    def backup_upload(self, data: bytes, name: str = "",
+                      actor: str = "operator") -> Dict[str, Any]:
+        """Round 28, item 8: a backup file from the user's own machine."""
+        try:
+            return self.backups.upload(data, name=name, actor=actor)
+        except BackupError as exc:
+            raise AgentError(str(exc), exc.status)
+
+    def backup_fetch(self, file_id: str, name: str = "",
+                     actor: str = "operator") -> Dict[str, Any]:
+        """Round 28, item 8: download one backup back from Telegram using the
+        message info recorded when it was sent, then keep it locally."""
+        if not str(file_id or "").strip():
+            raise AgentError("a fileId from the sent-files list is required", 400)
+        if self.notifier is None:
+            raise AgentError("no Telegram transport is attached", 501)
+        try:
+            data = self.notifier.download_document(str(file_id))
+        except AgentError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - every telegram failure is one message
+            raise AgentError("Telegram could not hand the file back: %s" % exc, 502)
+        return self.backup_upload(data, name=name, actor=actor)
 
     # -- everything Chrome -------------------------------------------------
     def browser_overview(self, profile: str = "", port: Optional[int] = None,

@@ -61,6 +61,18 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
           createdAt: '2026-10-14T09:10:10.000Z' },
       ] });
     }
+    if (clean.endsWith('/agent/backup-inspect')) {
+      // Round 28, item 4: the compatibility table behind every restore
+      return json({ name: 'mas-backup-test.tar.gz', createdAtText: '۱۴۰۴/۰۷/۲۵',
+        items: [
+          { key: 'agent.db', label: 'دیتابیس ایجنت', kind: 'database',
+            compatible: true, reason: 'کاملاً سازگار با نسخهٔ فعلی' },
+          { key: 'flows/jaryan.json', label: 'عملیات «jaryan»', kind: 'flow',
+            compatible: true, reason: 'کاملاً سازگار (مراحل پایتون)' },
+          { key: 'agent-secrets.json', label: 'فایل secrets (رمزها و کلیدها)',
+            kind: 'secrets', compatible: false, reason: 'ناسازگار' },
+        ], green: 2, red: 1 });
+    }
     if (clean.endsWith('/agent/backup-restore')) {
       return json({ ok: true, restored: 'mas-backup-test.tar.gz', files: 3,
                     restarting: true });
@@ -1753,6 +1765,13 @@ function clickTgSub(page, name) {
 }
 
 /** Switch inside the database tab to one of its three sub-tabs. */
+// Round 28, item 8: the backups pane owns its own sub-sub-tabs
+function clickBkSub(page, name) {
+  const button = page.doc.querySelector(`button[data-bksub="${name}"]`);
+  assert.ok(button, `the backup sub-sub-tab for ${name} is missing`);
+  button.dispatchEvent(new page.window.Event('click'));
+}
+
 function clickDbSub(page, name) {
   const sub = page.doc.querySelector(`#mas-tab-db [data-dbsub="${name}"]`);
   assert.ok(sub, `db sub-tab ${name} is missing`);
@@ -3181,6 +3200,11 @@ test('the supabase card lives in the database backups sub-tab and fully works th
       'the supabase card must no longer render inside settings');
     clickTab(page, 'db');
     const pane = page.doc.getElementById('mas-tab-db');
+    // Round 28, item 8: the supabase card lives under its own sub-sub-tab
+    assert.ok(await page.until(() =>
+      !!page.doc.querySelector('button[data-bksub="supabase"]')),
+      'the backup sub-sub-tabs never rendered');
+    clickBkSub(page, 'supabase');
     assert.ok(await page.until(() => pane.textContent.includes('پشتیبان‌گیری ابری Supabase')),
       'the supabase card did not render in the backups sub-tab');
     const connInput = Array.from(pane.querySelectorAll('input'))
@@ -3248,6 +3272,11 @@ test('round 27: the supabase restore button opens the snapshot management modal'
     page.window.confirm = () => true;
     clickTab(page, 'db');
     clickDbSub(page, 'backups');
+    // Round 28, item 8: the supabase card lives under its own sub-sub-tab
+    assert.ok(await page.until(() =>
+      !!page.doc.querySelector('button[data-bksub="supabase"]')),
+      'the backup sub-sub-tabs never rendered');
+    clickBkSub(page, 'supabase');
     const pane = page.doc.getElementById('mas-tab-db');
     assert.ok(await page.until(() => pane.textContent.includes('Supabase')),
       'the supabase card never rendered');
@@ -3463,6 +3492,11 @@ test('cloud versions are listed and each one can be restored, local backups too'
     await authenticate(page);
     clickTab(page, 'db');
     const pane = page.doc.getElementById('mas-tab-db');
+    // Round 28, item 8: the cloud list lives under the «سوپابیس» sub-sub-tab
+    assert.ok(await page.until(() =>
+      !!page.doc.querySelector('button[data-bksub="supabase"]')),
+      'the backup sub-sub-tabs never rendered');
+    clickBkSub(page, 'supabase');
     assert.ok(await page.until(() => pane.textContent.includes('نسخه‌های ابری (2)')),
       'the cloud version list never rendered');
     assert.ok(pane.textContent.includes('20 KB'), 'the size column is missing');
@@ -3482,16 +3516,70 @@ test('cloud versions are listed and each one can be restored, local backups too'
     assert.ok(asked.some((message) => message.includes('نسخهٔ قدیمی‌تر')),
       'restoring an old version must warn first');
 
-    // and the local backup row carries its own restore button, right beside
-    // download/send — the operator's rule for every backup list
+    // and the local backup row carries its own restore button - round 28,
+    // item 4: it opens the compatibility table first; green items are ticked
+    // by default, red ones can never be imported
+    clickBkSub(page, 'manual');
+    assert.ok(await page.until(() => !!page.byText('button', '♻️ بازیابی')),
+      'the local backup list never rendered');
     const localButton = page.byText('button', '♻️ بازیابی');
     localButton.dispatchEvent(new page.window.Event('click'));
-    await page.wait(30);
+    assert.ok(await page.until(() => page.posts.some(
+      (item) => item.url.endsWith('/agent/backup-inspect'))),
+      'the restore button never asked for the compatibility table');
+    assert.ok(await page.until(() =>
+      !!page.doc.querySelector('input[data-item-key="agent.db"]')),
+      'the compatibility modal never listed the items');
+    const greenBox = page.doc.querySelector('input[data-item-key="agent.db"]');
+    assert.ok(greenBox.checked, 'a green item must be ticked by default');
+    const redBox = page.doc.querySelector('input[data-item-key="agent-secrets.json"]');
+    assert.ok(redBox && redBox.disabled && !redBox.checked,
+      'a red item must never be importable');
+    const goButton = page.byText('button', '♻️ بازیابی منتخب‌ها و راه‌اندازی مجدد');
+    assert.ok(goButton, 'the modal has no way to restore the chosen items');
+    goButton.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts.some(
+      (item) => item.url.endsWith('/agent/backup-restore'))),
+      'the chosen restore never reached the server');
     const localPost = page.posts.find((item) => item.url.endsWith('/agent/backup-restore'));
-    assert.ok(localPost, 'the local restore button never reached the server');
-    assert.equal(JSON.parse(localPost.body).name, 'mas-backup-test.tar.gz');
+    const sentBody = JSON.parse(localPost.body);
+    assert.equal(sentBody.name, 'mas-backup-test.tar.gz');
+    assert.deepEqual(sentBody.items, ['agent.db', 'flows/jaryan.json']);
 
     page.window.confirm = original;
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 28: backups split into manual, telegram and supabase tabs', async () => {
+  // each sub-sub-tab owns its own automatic decision, and the manual one can
+  // also swallow a backup file from the user's own machine
+  const page = await mount({ supaOn: true });
+  try {
+    await authenticate(page);
+    clickTab(page, 'db');
+    const pane = page.doc.getElementById('mas-tab-db');
+    assert.ok(await page.until(() =>
+      !!page.doc.querySelector('button[data-bksub="manual"]')),
+      'the backup sub-sub-tabs never rendered');
+    // manual: the local list + the upload card + the automatic schedule
+    assert.ok(await page.until(() => pane.textContent.includes('بازیابی از فایل شخصی')),
+      'the manual tab must offer restoring from the user’s own file');
+    assert.ok(pane.textContent.includes('پشتیبان‌گیری خودکار'),
+      'the manual tab lost the automatic schedule');
+    // telegram: destination, its own automatic toggle, the sent-files list
+    clickBkSub(page, 'telegram');
+    assert.ok(await page.until(() =>
+      pane.textContent.includes('فایل‌های فرستاده‌شده به تلگرام')),
+      'the telegram tab must list what was sent out');
+    assert.ok(pane.textContent.includes('خودکار: بعد از هر پشتیبان‌گیری'),
+      'the telegram tab must own its automatic decision');
+    // supabase: the cloud card moved here untouched
+    clickBkSub(page, 'supabase');
+    assert.ok(await page.until(() => pane.textContent.includes('نسخه‌های ابری')),
+      'the supabase tab must still show the cloud versions');
     assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();

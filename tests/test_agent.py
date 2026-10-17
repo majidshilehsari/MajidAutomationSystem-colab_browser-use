@@ -766,7 +766,30 @@ class TelegramTest(TempDirCase):
             TelegramBot("t", opener=lambda *a: {}).send_photo(
                 -1, os.path.join(self.tmp, "gone.png"), "")
 
-    def test_discovered_chats_come_from_get_updates(self):
+    def test_a_sent_file_can_be_downloaded_back_by_its_file_id(self) -> None:
+        # Round 28, item 8: the telegram restore path - getFile hands out the
+        # path, one HTTPS GET brings the very same bytes back down
+        from automation.telegram_client import TelegramBot, TelegramError
+        seen: List[str] = []
+
+        def opener(method, payload, files):
+            seen.append(method)
+            if method == "getFile":
+                self.assertEqual(payload["file_id"], "FID")
+                return {"file_id": "FID",
+                        "file_path": "documents/mas-backup-x.tar.gz"}
+            if method == "getFile.download":
+                self.assertIn("/file/bot12345:ABC/documents/", payload["url"])
+                return b"ARCHIVE"
+            raise AssertionError(method)
+
+        bot = TelegramBot("12345:ABC", opener=opener)
+        self.assertEqual(bot.download_document("FID"), b"ARCHIVE")
+        self.assertEqual(seen, ["getFile", "getFile.download"])
+        with self.assertRaises(TelegramError):
+            TelegramBot("t", opener=lambda *a: {}).download_document("FID")
+
+    def test_discovered_chats_come_from_get_updates(self) -> None:
         updates = [
             {"message": {"chat": {"id": -100123, "title": "گروه من",
                                   "type": "supergroup"}, "text": "سلام",
@@ -1754,6 +1777,43 @@ class AgentApiTest(TempDirCase):
         with self.assertRaises(ApiError) as ctx:
             self.api.route_agent_backup_restore(body=b'{"name": "x"}')
         self.assertEqual(ctx.exception.status, 403)
+
+    def test_backup_inspect_upload_and_selective_restore_routes(self):
+        # Round 28, items 4+8 through the real HTTP surface
+        import base64
+        from unittest import mock
+        status, info = self.call("POST", "/agent/backups", {})
+        self.assertEqual(status, 201)
+        status, table = self.call("POST", "/agent/backup-inspect",
+                                  {"name": info["name"]})
+        self.assertEqual(status, 200)
+        keys = {row["key"] for row in table["items"]}
+        self.assertIn("agent.db", keys)
+        self.assertGreaterEqual(table["green"], 1)
+        # a file from the user's own machine lands through the upload route
+        # (checked BEFORE the selective restore: a restore replaces the live
+        # database file and the open connection only survives a restart)
+        data = self.api.agent.backup_read(info["name"])
+        blob = ("data:application/gzip;base64,"
+                + base64.b64encode(data).decode("ascii"))
+        status, payload = self.call("POST", "/agent/backup-upload",
+                                    {"name": "mine.tar.gz", "data": blob})
+        self.assertEqual(status, 201)
+        self.assertEqual(payload["backup"]["name"], "mas-backup-mine.tar.gz")
+        status, listing = self.call("GET", "/agent/backups", {})
+        self.assertIn("mas-backup-mine.tar.gz",
+                      [row["name"] for row in listing["backups"]])
+        # but a random blob is refused before it can poison the list
+        status, payload = self.call(
+            "POST", "/agent/backup-upload",
+            {"data": base64.b64encode(b"x" * 900).decode("ascii")})
+        self.assertEqual(status, 400)
+        with mock.patch("automation.api._restart_later"):
+            status, payload = self.call("POST", "/agent/backup-restore",
+                                        {"name": info["name"],
+                                         "items": ["agent.db"]})
+        self.assertEqual(status, 200)
+        self.assertEqual(payload["items"], ["agent.db"])
 
     def test_ui_preferences_round_trip_through_the_database(self):
         from automation.agent import PLAIN_SETTINGS
@@ -3032,6 +3092,108 @@ class BackupManagerTest(TempDirCase):
         with self.assertRaises(BackupError):
             self.manager.send(target="-100", channel="pigeon")
 
+    def test_inspect_gives_every_item_a_verdict(self) -> None:
+        # Round 28, item 4: green = compatible with this app version,
+        # red = never imported
+        with open(os.path.join(self.flows, "broken.json"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("{this is not json")
+        info = self.manager.create()
+        table = self.manager.inspect(info["name"])
+        verdicts = {row["key"]: row for row in table["items"]}
+        self.assertTrue(verdicts["agent.db"]["compatible"])
+        self.assertIn("سازگار", verdicts["agent.db"]["reason"])
+        self.assertTrue(verdicts["flows/jaryan.json"]["compatible"])
+        self.assertFalse(verdicts["flows/broken.json"]["compatible"])
+        self.assertEqual(table["red"], 1)
+        self.assertEqual(table["name"], info["name"])
+
+    def test_restore_default_skips_the_red_items(self) -> None:
+        from automation.agent_store import AgentStore
+        with open(os.path.join(self.flows, "broken.json"), "w",
+                  encoding="utf-8") as fh:
+            fh.write("{this is not json")
+        info = self.manager.create()
+        self.store.set_setting("restore.marker", "v2")
+        os.remove(os.path.join(self.flows, "broken.json"))
+        os.remove(os.path.join(self.flows, "jaryan.json"))
+        result = self.manager.restore(info["name"])
+        self.assertIn("flows/jaryan.json", result["items"])
+        self.assertIn("flows/broken.json", result["skipped"])
+        self.assertTrue(os.path.exists(os.path.join(self.flows, "jaryan.json")))
+        self.assertFalse(os.path.exists(os.path.join(self.flows, "broken.json")))
+        # the database was green, so it came back too
+        fresh = AgentStore(self.tmp)
+        self.addCleanup(fresh.close)
+        self.assertNotEqual(fresh.get_setting("restore.marker"), "v2")
+
+    def test_restore_items_choice_and_unknown_refusal(self) -> None:
+        from automation.agent_store import AgentStore
+        from automation.backup import BackupError
+        info = self.manager.create()
+        self.store.set_setting("restore.marker", "v2")
+        os.remove(os.path.join(self.flows, "jaryan.json"))
+        result = self.manager.restore(info["name"], items=["flows/jaryan.json"])
+        self.assertEqual(result["items"], ["flows/jaryan.json"])
+        self.assertIn("agent.db", result["skipped"])
+        self.assertTrue(os.path.exists(os.path.join(self.flows, "jaryan.json")))
+        # the database was NOT chosen, so the live marker survives
+        fresh = AgentStore(self.tmp)
+        self.addCleanup(fresh.close)
+        self.assertEqual(fresh.get_setting("restore.marker"), "v2")
+        with self.assertRaises(BackupError) as ctx:
+            self.manager.restore(info["name"], items=["nope.json"])
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_upload_accepts_only_our_archives(self) -> None:
+        import io
+        from automation.backup import BackupError
+        info = self.manager.create()
+        with open(info["path"], "rb") as fh:
+            data = fh.read()
+        landed = self.manager.upload(data, name="my copy.tar.gz")
+        self.assertEqual(landed["name"], "mas-backup-mycopy.tar.gz")
+        self.assertIn(landed["name"],
+                      [row["name"] for row in self.manager.list()])
+        with self.assertRaises(BackupError):
+            self.manager.upload(b"x" * 900)
+        foreign = io.BytesIO()
+        with tarfile.open(fileobj=foreign, mode="w:gz") as archive:
+            payload = b"hello"
+            member = tarfile.TarInfo("notes.txt")
+            member.size = len(payload)
+            archive.addfile(member, io.BytesIO(payload))
+        with self.assertRaises(BackupError) as ctx:
+            self.manager.upload(foreign.getvalue())
+        self.assertEqual(ctx.exception.status, 400)
+
+    def test_telegram_auto_toggle_and_the_sent_record(self) -> None:
+        # Round 28, item 8: the telegram tab owns its automatic decision, and
+        # every shipped file keeps its message info for the way back
+        self.assertTrue(self.manager.config()["telegramAuto"])
+        self.manager.configure({"telegramAuto": False})
+        self.assertFalse(self.manager.config()["telegramAuto"])
+        self.manager.configure({"telegramAuto": True})
+        self.manager.create()
+
+        class Notifier:
+            def targets(self):
+                return [{"id": -100, "title": "kanal"}]
+
+            def send_document(self, path, caption="", targets=None,
+                              purpose=None, channel=None):
+                return {"sent": 1, "failed": 0, "channels": ["bot"],
+                        "details": [{"chatId": -100, "channel": "bot",
+                                     "messageId": 7, "fileId": "FILE",
+                                     "fileName": "x.tar.gz"}]}
+
+        self.manager.notifier = Notifier()
+        self.manager.send(target="-100", channel="bot")
+        sent = self.manager.config()["telegramSent"]
+        self.assertEqual(len(sent), 1)
+        self.assertEqual(sent[0]["fileId"], "FILE")
+        self.assertEqual(sent[0]["messageId"], 7)
+
 
 class BackupHubTest(HubCase):
     def test_the_automatic_job_backs_up_and_the_routes_serve_it(self) -> None:
@@ -3075,6 +3237,29 @@ class BackupHubTest(HubCase):
         status, payload = self.call(api, "POST", "/agent/backup-send", {})
         self.assertEqual(status, 400)
         self.assertIn("destination", payload["error"])
+
+    def test_backup_fetch_downloads_from_telegram_and_lands_locally(self) -> None:
+        # Round 28, item 8: one sent file comes back by its recorded file_id
+        from automation.agent import AgentError
+        hub, _backend, flows = self.build()
+        hub.backup_create()
+        name = hub.backups.newest_name()
+        with open(str(hub.backups.safe_path(name)), "rb") as fh:
+            data = fh.read()
+
+        class Fetcher:
+            def download_document(self, file_id):
+                assert file_id == "FID"
+                return data
+
+        hub.notifier = Fetcher()
+        info = hub.backup_fetch("FID", name="from-telegram.tar.gz")
+        self.assertEqual(info["name"], "mas-backup-from-telegram.tar.gz")
+        self.assertIn(info["name"],
+                      [row["name"] for row in hub.backups.list()])
+        with self.assertRaises(AgentError) as ctx:
+            hub.backup_fetch("")
+        self.assertEqual(ctx.exception.status, 400)
 
 
 class BrowserInfoTest(TempDirCase):
