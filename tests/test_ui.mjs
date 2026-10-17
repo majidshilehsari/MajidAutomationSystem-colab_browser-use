@@ -2294,6 +2294,54 @@ test('a python step edits as real code', async () => {
   }
 });
 
+test('round 28: the new-operation button registers through a modal', async () => {
+  const page = await mount();
+  try {
+    await authenticate(page);
+    clickTab(page, 'library');
+    const find = () => Array.from(page.doc.querySelectorAll('#mas-tab-library button'))
+      .find((b) => b.textContent.includes('\u0639\u0645\u0644\u06cc\u0627\u062a \u062a\u0627\u0632\u0647'));
+    assert.ok(await page.until(() => find() !== undefined),
+      'the new-operation button never rendered');
+    find().dispatchEvent(new page.window.Event('click'));
+    // round 28, item 2: registration happens inside a modal, not inline
+    assert.ok(await page.until(
+      () => page.doc.querySelector('.mas-modal #mas-op-modal-body') !== null),
+      'the registration modal never opened');
+    const modal = page.doc.querySelector('.mas-modal');
+    const inputs = modal.querySelectorAll('input.mas-input');
+    inputs[0].value = '\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 \u06af\u0648\u06af\u0644';
+    inputs[0].dispatchEvent(new page.window.Event('input'));
+    // add one python step inside the modal and write its code
+    Array.from(modal.querySelectorAll('button'))
+      .find((b) => b.textContent.includes('\u0627\u0641\u0632\u0648\u062f\u0646 \u0645\u0631\u062d\u0644\u0647'))
+      .dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.doc.querySelector('.mas-modal textarea')),
+      'the step code area never appeared in the modal');
+    const area = page.doc.querySelector('.mas-modal textarea');
+    area.value = "check(goto('https://www.google.com/'))";
+    area.dispatchEvent(new page.window.Event('input'));
+    // save from inside the modal
+    Array.from(page.doc.querySelectorAll('.mas-modal button'))
+      .find((b) => b.textContent.includes('\u0630\u062e\u06cc\u0631\u0647\u0654 \u0639\u0645\u0644\u06cc\u0627\u062a'))
+      .dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(
+      () => page.posts.some((item) => item.url.endsWith('/agent/operations'))),
+      'the operation was never posted');
+    const sent = page.posts.find((item) => item.url.endsWith('/agent/operations'));
+    const body = JSON.parse(sent.body);
+    assert.equal(body.name, '\u0628\u0627\u0632 \u06a9\u0631\u062f\u0646 \u06af\u0648\u06af\u0644');
+    assert.equal(body.steps.length, 1);
+    assert.ok(body.steps[0].code.includes('google'));
+    assert.equal(body.steps[0].type, 'python');
+    // the modal closed after registering
+    assert.ok(await page.until(() => page.doc.querySelector('.mas-modal') === null),
+      'the modal must close after saving');
+  } finally {
+    await page.cleanup();
+  }
+});
+
 test('the library flips an operation between auto and ask', async () => {
   const page = await mount();
   try {

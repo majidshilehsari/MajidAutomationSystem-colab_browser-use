@@ -3882,7 +3882,7 @@ function operationCard(op) {
           const converted = await convertFlowServer({ name: op.name, steps });
           editSteps = (converted && converted.steps) || steps;
         }
-        state.editingOperation = {
+        openOperationModal({
           id: op.id, name: op.name, description: op.description || '',
           tags: tags.join('، '), builtin: !!op.builtin,
           scope: op.scope === 'brain' ? 'brain' : 'general',
@@ -3891,8 +3891,7 @@ function operationCard(op) {
             code: String(step.code || ''),
             label: String(step.label || ''),
           })),
-        };
-        renderOperations();
+        });
       }),
       op.builtin ? button('↺ ' + t('opReset'), () => resetOperation(op)) : null,
       op.builtin ? null : (state.deleteArmed === op.id
@@ -3906,7 +3905,22 @@ function operationCard(op) {
   ]);
 }
 
-function operationEditor(draft) {
+function openOperationModal(draft) {
+  // Round 28, item 2: «عملیات تازه» opens a modal and the operation is
+  // registered from inside it - editing an existing one uses the same modal,
+  // so the library pane never grows an inline editor any more.
+  const body = el('div', { id: 'mas-op-modal-body' });
+  const draw = () => replace(body, operationEditor(draft, draw, close));
+  const close = modalCard([
+    el('div', { class: 'mas-card-head' }, [el('b', {
+      text: '💾 ' + (draft.id ? t('opEdit') : t('opNew')),
+    })]),
+    body,
+  ]);
+  draw();
+}
+
+function operationEditor(draft, redraw = renderOperations, onClose = null) {
   // Round 26: every step of an operation is a python program with a Persian
   // description; no type picker and no JSON fields remain.
   const stepRows = (draft.steps || []).map((row, index) => el('div', { class: 'mas-op-steprow mas-op-steprow-code' }, [
@@ -3920,7 +3934,7 @@ function operationEditor(draft) {
       spellcheck: 'false', placeholder: 'check(click(512, 300))',
       onInput: (event) => { row.code = event.target.value; },
     }),
-    button('🗑', () => { draft.steps.splice(index, 1); renderOperations(); }),
+    button('🗑', () => { draft.steps.splice(index, 1); redraw(); }),
   ]));
 
   return el('div', { class: 'mas-box mas-op-editor' }, [
@@ -3954,19 +3968,22 @@ function operationEditor(draft) {
       button('＋ ' + t('opAddStep'), () => {
         draft.steps = draft.steps || [];
         draft.steps.push({ type: 'python', code: '', label: '' });
-        renderOperations();
+        redraw();
       }),
     ]),
     el('div', {}, stepRows),
     el('p', { class: 'mas-hint', text: t('opFieldsHint') }),
     el('div', { class: 'mas-row mas-wrap' }, [
-      button('💾 ' + t('opSave'), () => saveOperation(draft), { class: 'mas-btn mas-primary' }),
-      button(t('opCancel'), () => { state.editingOperation = null; renderOperations(); }),
+      button('💾 ' + t('opSave'), () => saveOperation(draft, onClose), { class: 'mas-btn mas-primary' }),
+      button(t('opCancel'), () => {
+        state.editingOperation = null;
+        if (onClose) onClose(); else renderOperations();
+      }),
     ]),
   ]);
 }
 
-async function saveOperation(draft) {
+async function saveOperation(draft, onClose = null) {
   const name = String(draft.name || '').trim();
   if (!name) { toast(t('opNeedName'), 'warn'); return; }
   const steps = [];
@@ -3995,6 +4012,7 @@ async function saveOperation(draft) {
     }
     state.editingOperation = null;
     toast(t('opSaved'), 'ok');
+    if (onClose) onClose();
     renderOperations();
   } catch (error) { toast(error.message, 'error'); }
 }
@@ -4033,12 +4051,9 @@ async function renderOperations() {
   state.stepTypes = data.stepTypes || {};
 
   const head = el('div', { class: 'mas-row mas-wrap' }, [
-    button('＋ ' + t('opNew'), () => {
-      state.editingOperation = {
-        id: '', name: '', description: '', tags: '', steps: [], scope: 'general',
-      };
-      renderOperations();
-    }, { class: 'mas-btn mas-primary' }),
+    button('＋ ' + t('opNew'), () => openOperationModal({
+      id: '', name: '', description: '', tags: '', steps: [], scope: 'general',
+    }), { class: 'mas-btn mas-primary' }),
     button('↻ ' + t('refresh'), renderOperations),
     el('span', { class: 'mas-hint', text: `${state.operations.length} ${t('opCount')}` }),
   ]);
@@ -4046,7 +4061,6 @@ async function renderOperations() {
   replace(pane,
     el('p', { class: 'mas-hint', text: t('opHint') }),
     head,
-    state.editingOperation ? operationEditor(state.editingOperation) : null,
     el('div', { class: 'mas-ops' }, cards.length ? cards
       : [el('p', { class: 'mas-empty', text: t('opNone') })]),
     el('div', { class: 'mas-box mas-card' }, [
