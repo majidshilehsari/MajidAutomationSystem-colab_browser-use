@@ -8,8 +8,8 @@
 
 import {
   API_PREFIX, createStep, labelFor, validateFlow, emptyFlow,
-  moveStep, extractJson,
-  normaliseImportedFlow, promptSteps, translate, formatElapsed, formatTime,
+  moveStep,
+  normaliseImportedFlow, translate, formatElapsed, formatTime,
   stepDef, truncate, structuredCloneSafe, compact, formatDateTime,
 } from './core.mjs';
 
@@ -29,7 +29,6 @@ function initialTab() {
 const LS = {
   token: 'mas.token', lang: 'mas.lang', flow: 'mas.flow', panel: 'mas.panelOpen',
   clip: 'mas.clipSync',
-  request: 'mas.userRequest', reply: 'mas.aiReply',
   provider: 'mas.chatProvider', context: 'mas.chatContext', tab: 'mas.tab',
   theme: 'mas.theme', appliedChat: 'mas.appliedChat',
 };
@@ -75,9 +74,6 @@ const state = {
   runSeenRun: null,
   runSeenRunAt: 0,
   tokenRejected: false,
-  userRequest: localStorage.getItem(LS.request) || '',
-  aiReply: localStorage.getItem(LS.reply) || '',
-  aiNotes: '',
   // Chat tab: the draft survives a re-render, the provider and the context
   // switch survive a tab change, and the answer arrives by polling.
   chatDraft: '',
@@ -2236,142 +2232,6 @@ async function renderTexts(host, kind) {
  * AI tab
  * ------------------------------------------------------------------ */
 
-function renderAgentAssistant(host) {
-  // Its home is the chat tab's toolbox now; the old agent sub-pane id stays as
-  // a fallback so an older panel.html keeps working.
-  const pane = host || document.getElementById('mas-prompt-host')
-    || document.getElementById('mas-chat-assistant')
-    || document.getElementById('mas-agent-sub');
-  if (!pane) return;
-  // The model's whole answer. Kept so the next prompt can hand it back, which
-  // is what turns one shot into a conversation.
-  const importBox = el('textarea', {
-    id: 'mas-ai-reply', class: 'mas-input mas-area', rows: '10',
-    value: state.aiReply, placeholder: t('importHint'),
-    onInput: (event) => {
-      state.aiReply = event.target.value;
-      try { localStorage.setItem(LS.reply, state.aiReply); } catch (_) { /* quota */ }
-    },
-  });
-  // What the human wants done on this page. Kept in state so switching tabs
-  // does not lose it, and sent to /prompt as part of the prompt.
-  const requestBox = el('textarea', {
-    id: 'mas-ai-request', class: 'mas-input mas-area', rows: '4',
-    value: state.userRequest, placeholder: t('aiRequestHint'),
-    onInput: (event) => {
-      state.userRequest = event.target.value;
-      try { localStorage.setItem(LS.request, state.userRequest); } catch (_) { /* quota */ }
-    },
-  });
-
-  replace(pane,
-    el('label', { class: 'mas-field mas-wide' }, [
-      el('span', { text: t('token') }),
-      el('input', {
-        id: 'mas-ai-token', class: 'mas-input', type: 'password',
-        value: state.token, placeholder: t('tokenHint'),
-        onInput: (event) => setToken(event.target.value),
-      }),
-    ]),
-    el('label', { class: 'mas-field mas-wide' }, [
-      el('span', { text: t('aiRequest') }),
-      requestBox,
-    ]),
-    el('div', { class: 'mas-row mas-wrap' }, [
-      button('📄 ' + t('copyGuide'), () => copyFrom('/guide')),
-      button('🧩 ' + t('copyPrompt'), buildPrompt, { class: 'mas-btn mas-primary' }),
-      button('🤖 ' + t('agentChatDirect'), askAgentDirectly, { class: 'mas-btn mas-primary' }),
-      button('⤓ JSON', () => copyText(JSON.stringify({ name: state.flow.name, steps: promptSteps(state.flow) }, null, 2))),
-    ]),
-    el('div', { class: 'mas-row' }, [
-      button(t('importBtn'), async () => {
-        const raw = importBox.value;
-        // Show what the model said even when its code turns out to be unusable:
-        // its summary and questions are the point of the exchange.
-        state.aiNotes = aiNotesFrom(raw);
-        const parsed = extractJson(raw);
-        if (!parsed) { renderAgentAssistant(); toast('JSON?', 'error'); return; }
-        const { flow, errors } = normaliseImportedFlow(
-          await convertFlowServer(parsed), state.flow.viewport);
-        if (!flow || !flow.steps.length) {
-          renderAgentAssistant();
-          toast(errors.join(' | '), 'error');
-          return;
-        }
-        state.flow = flow;
-        persistFlow();
-        renderFlow();
-        selectTab('flow');
-        toast(errors.length ? errors[0] : `${flow.steps.length} steps`, errors.length ? 'warn' : 'ok');
-      }, { class: 'mas-btn mas-primary' }),
-    ]),
-    importBox,
-    state.agentFlowProposal
-      ? el('div', { class: 'mas-box' }, [
-        el('b', { text: `🧩 ${(state.agentFlowProposal.steps || []).length} steps` }),
-        el('div', { class: 'mas-row mas-wrap' }, [
-          button(t('importBtn'), () => {
-            state.flow = state.agentFlowProposal;
-            state.agentFlowProposal = null;
-            persistFlow();
-            renderFlow();
-            selectTab('flow');
-          }, { class: 'mas-btn mas-primary' }),
-          button('✕', () => { state.agentFlowProposal = null; renderAgentAssistant(); }),
-        ]),
-      ])
-      : null,
-    state.aiNotes
-      ? el('div', { class: 'mas-ai-notes' }, [
-        el('b', { text: '💬 ' + t('aiNotes') }),
-        el('pre', { text: state.aiNotes }),
-      ])
-      : null,
-    el('p', { class: 'mas-hint', text: `${state.flow.steps.length} steps · ${state.flow.name}` }),
-  );
-}
-
-/** The model's prose with the JSON block taken out: its summary and questions. */
-function aiNotesFrom(raw) {
-  return String(raw || '')
-    .replace(/```json[\s\S]*?```/gi, '')
-    .replace(/```[\s\S]*?```/g, '')
-    .trim();
-}
-
-async function copyFrom(path) {
-  try {
-    const response = await fetch(API_PREFIX + path, { headers: { 'X-Automation-Token': state.token } });
-    copyText(await response.text());
-  } catch (error) {
-    toast(error.message, 'error');
-  }
-}
-
-async function buildPrompt() {
-  // The copied prompt must be self-contained, so it carries the user's request,
-  // the detected page, and an absolute link to its screenshot. Fall back to the
-  // most recent detection when no page is selected.
-  const page = state.activePage || (state.pages || [])[0] || null;
-  const body = { flow: state.flow, publicBase: window.location.origin };
-  if (page) body.pageId = page.id;
-  if (state.userRequest && state.userRequest.trim()) body.request = state.userRequest;
-  // Hand the model its own previous answer back, so it can iterate on it.
-  if (state.aiReply && state.aiReply.trim()) body.previousReply = state.aiReply;
-  if (!page) toast(t('aiRequestNone'), 'warn');
-  try {
-    const response = await fetch(API_PREFIX + '/prompt', {
-      method: 'POST',
-      headers: { 'X-Automation-Token': state.token, 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-    copyText(await response.text());
-  } catch (error) {
-    toast(error.message, 'error');
-  }
-}
-
 /* ------------------------------------------------------------------ *
  * Coworker agent tab
  *
@@ -2381,13 +2241,13 @@ async function buildPrompt() {
  * so a failure in one cannot blank the others.
  * ------------------------------------------------------------------ */
 
-// «پرامپت» comes first on purpose: building a prompt for a model is its own
-// workspace, separate from the ordinary chat, and it is where the panel opens.
-const AGENT_SUBS = ['prompt', 'pages', 'suggestions', 'agentkey', 'telegram',
+// Round 28, item 3: the «پرامپت» sub-tab is gone. Talking to the coworker
+// agent happens in the chat tab, and the copy-prompt / import-JSON workflow
+// died with the JSON step method - python cells own the stages now.
+const AGENT_SUBS = ['pages', 'suggestions', 'agentkey', 'telegram',
   'browser', 'cursor', 'jobs', 'captcha', 'scripts', 'data', 'keys'];
 
 const AGENT_RENDERERS = {
-  prompt: renderAgentPrompt,
   pages: renderAgentPages,
   suggestions: renderAgentSuggestions,
   agentkey: renderAgentKey,
@@ -2505,15 +2365,6 @@ function selectAgentSub(name) {
   state.agentSub = name;
   saveUiPref('agentSub', name);
   renderAgent();
-}
-
-/* The prompt workspace: copy-prompt / import-JSON, as its own sub-tab. */
-function renderAgentPrompt(host) {
-  // One card wrapper keeps the sub-pane contract (a .mas-box inside
-  // #mas-agent-sub) and gives re-renders a stable home id.
-  const wrap = el('div', { id: 'mas-prompt-host', class: 'mas-box mas-card' });
-  replace(host, wrap);
-  renderAgentAssistant(wrap);
 }
 
 function renderAgentSub(name) {
@@ -3539,44 +3390,6 @@ async function renderAgentKeys(host) {
  *  The old workflow was: copy the prompt, paste it into a chat website, paste
  *  the answer back. This does all three without leaving the sidebar, and keeps
  *  the copy/paste buttons next to it for when the agent has no model attached. */
-async function askAgentDirectly() {
-  const page = state.activePage || (state.pages || [])[0] || null;
-  const body = { flow: state.flow, publicBase: window.location.origin };
-  if (page) body.pageId = page.id;
-  if (state.userRequest && state.userRequest.trim()) body.request = state.userRequest;
-  if (state.aiReply && state.aiReply.trim()) body.previousReply = state.aiReply;
-  if (!body.request) {
-    toast(t('aiRequest'), 'warn');
-    return;
-  }
-  toast('…', 'info');
-  try {
-    const reply = await api('/agent/chat', { method: 'POST', body });
-    state.aiReply = reply.text || '';
-    try { localStorage.setItem(LS.reply, state.aiReply); } catch (_) { /* quota */ }
-    state.aiNotes = aiNotesFrom(state.aiReply);
-    let applied = false;
-    if (reply.flow && reply.flowValid && (reply.flow.steps || []).length) {
-      state.agentFlowProposal = reply.flow;
-      // Round 26: the agent's output goes straight into the stages so the
-      // steps can be checked one by one, without an extra button.
-      applied = applyFlowToStages(await convertFlowServer(reply.flow));
-    }
-    renderAgentAssistant();
-    if (applied) {
-      toast(t('chatFlowApplied'), 'ok');
-    } else if (state.agentFlowProposal) {
-      toast(`${reply.flow.steps.length} steps`, 'ok');
-    } else if (reply.flowErrors && reply.flowErrors.length) {
-      toast(reply.flowErrors[0], 'warn');
-    } else {
-      toast(reply.provider || 'ok', 'ok');
-    }
-  } catch (error) {
-    toast(error.message, error.status === 404 ? 'warn' : 'error');
-  }
-}
-
 async function copyText(text) {
   try {
     await navigator.clipboard.writeText(text);

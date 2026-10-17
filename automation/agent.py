@@ -254,9 +254,6 @@ API_INDEX = [
      "List of the snapshot versions kept in Supabase: name, size and time — for restoring an older one (operator only)."),
     ("GET", "/supabase/status", "وضعیت همگام‌سازی Supabase: پیکربندی ماسک‌شده، آخرین نتیجه، دورهٔ زمانی (فقط اپراتور).",
      "Supabase sync status: masked config, last result, interval (operator only)."),
-    ("POST", "/agent/chat", "💬 پرسش مستقیم از ایجنت با زمینهٔ اتوماسیون؛ جواب "
-                            "همزمان برمی‌گردد (برخلاف chat/send).",
-     "Ask the agent directly with automation context; answers synchronously."),
     ("POST", "/agent/chat/apply-flow", "💬 ذخیرهٔ جریانی که مدل داخل پاسخ چت "
                                        "پیشنهاد داده است.",
      "Save a flow the model proposed inside a chat answer."),
@@ -342,11 +339,6 @@ API_INDEX = [
      "Finish the login with the code; the session is stored on /data."),
     ("GET", "/info", "ℹ️ آیا توکن لازم است، اندازهٔ صفحه، و اینکه موتور آزاد است.",
      "Whether a token is needed, the viewport, and whether the engine is idle."),
-    ("GET", "/guide", "📖 راهنمای پرامپت‌نویسی برای مدل (متن ساده).",
-     "The prompt-writing guide, as plain text."),
-    ("POST", "/prompt", "📖 ساخت پرامپت آماده برای یک مدل بیرونی، با لینک عمومی "
-                        "اسکرین‌شات.",
-     "Build a prompt for an outside model, public screenshot link included."),
     ("GET", "/report", "🧾 گزارش اجرای آخر به‌صورت متن.", "The last run report as text."),
     ("GET", "/runs", "🧾 فهرست اجراهای گذشته.", "Past runs."),
     ("GET", "/runs/<id>/log", "🧾 لاگ کامل یک اجرا.", "The full log of one run."),
@@ -690,38 +682,6 @@ class AgentHub:
         self.store.audit(actor, "agent.ask", "%d chars via %s"
                          % (len(prompt), reply.get("provider")))
         return reply
-
-    def chat(self, prompt: str, actor: str = "operator") -> Dict[str, Any]:
-        """Ask, and if the answer contains a flow, validate it for the operator."""
-        # Round 27, item 5: every request to the coworker agent is reported
-        # with its exact timestamp - what was asked and what the agent did.
-        self._report_agent("درخواست دستیار",
-                           "کاربر از دستیار پرسید: «%s»" % str(prompt)[:400])
-        try:
-            reply = self.ask(prompt, actor=actor)
-        except AgentError as exc:
-            self._report_agent("درخواست دستیار",
-                               "دستیار شکست خورد: %s" % exc, ok=False)
-            raise
-        out: Dict[str, Any] = {"text": reply.get("text", ""),
-                               "provider": reply.get("provider"),
-                               "elapsed": reply.get("elapsed"),
-                               "source": reply.get("source") or {}}
-        parsed = extract_json(reply.get("text", ""))
-        if isinstance(parsed, dict) and isinstance(parsed.get("steps"), list):
-            normalized, errors = schema.validate_flow(parsed)
-            out["flow"] = normalized if not errors else parsed
-            out["flowErrors"] = errors
-            out["flowValid"] = not errors
-        summary = "دستیار پاسخ داد (provider: %s%s)." % (
-            out.get("provider") or "-",
-            "، %.1f ثانیه" % float(out["elapsed"]) if out.get("elapsed") else "")
-        if out.get("flow"):
-            summary += " جریان اتوماسیون هم پیشنهاد داد (%d مرحله، معتبر: %s)." % (
-                len((out["flow"] or {}).get("steps") or []),
-                "بله" if out.get("flowValid") else "نه")
-        self._report_agent("پاسخ دستیار", summary)
-        return out
 
     def _report_agent(self, phase: str, message: str, ok: bool = True) -> None:
         """One line of the coworker-agent report stream (round 27, item 5);

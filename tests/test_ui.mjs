@@ -1067,42 +1067,6 @@ test('a hand written label survives editing the step', async () => {
   }
 });
 
-test('the agent assistant sends the user request and an absolute origin', async () => {
-  const page = await mount();
-  try {
-    const input = page.doc.getElementById('mas-token-input');
-    input.value = VALID_TOKEN;
-    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
-    await page.wait(60);
-
-    await openPrompt(page);
-
-    const box = page.doc.getElementById('mas-ai-request');
-    assert.ok(box, 'the request box is missing');
-    box.value = 'روی اولین نتیجه کلیک کن';
-    box.dispatchEvent(new page.window.Event('input'));
-
-    // Switching tabs and back must not lose what the human typed.
-    clickTab(page, 'flow');
-    clickTab(page, 'agent');
-    await page.wait(10);
-    assert.equal(page.doc.getElementById('mas-ai-request').value, 'روی اولین نتیجه کلیک کن');
-
-    const build = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
-      .find((b) => b.textContent.includes('🧩'));
-    build.dispatchEvent(new page.window.Event('click'));
-    await page.wait(60);
-
-    const sent = page.posts.find((p) => p.url.endsWith('/prompt'));
-    assert.ok(sent, '/prompt was never called');
-    const body = JSON.parse(sent.body);
-    assert.equal(body.request, 'روی اولین نتیجه کلیک کن');
-    assert.equal(body.publicBase, 'https://example.trycloudflare.com');
-  } finally {
-    await page.cleanup();
-  }
-});
-
 test('the standalone panel opens full page and has no record tab', async () => {
   const page = await mount({ standalone: true });
   try {
@@ -1278,51 +1242,6 @@ test('stop reacts at once and reaches the server', async () => {
     assert.equal(stop.disabled, false, 'the button should unlock afterwards');
     assert.ok(page.posts.some((p) => p.url.endsWith('/control')
       && JSON.parse(p.body).action === 'stop'), '/control stop was never sent');
-  } finally {
-    await page.cleanup();
-  }
-});
-
-test('the AI answer is kept and handed back on the next prompt', async () => {
-  const page = await mount();
-  try {
-    const input = page.doc.getElementById('mas-token-input');
-    input.value = VALID_TOKEN;
-    page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
-    await page.wait(60);
-    await openPrompt(page);
-
-    const reply = page.doc.getElementById('mas-ai-reply');
-    assert.ok(reply, 'no AI reply box');
-    reply.value = '### ۱) چه فهمیدی\nباید جستجو کنم.\n```json\n'
-      + '{"name":"t","steps":[{"type":"click","x":5,"y":5}]}\n```\n'
-      + '### ۳) سؤال و نکته\nکدام نتیجه را کلیک کنم؟';
-    reply.dispatchEvent(new page.window.Event('input'));
-
-    const build = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
-      .find((b) => b.textContent.includes('🧩'));
-    build.dispatchEvent(new page.window.Event('click'));
-    await page.wait(60);
-
-    const sent = page.posts.filter((p) => p.url.endsWith('/prompt')).pop();
-    assert.ok(sent, '/prompt was never called');
-    assert.ok(JSON.parse(sent.body).previousReply.includes('چه فهمیدی'),
-      'the previous answer was not sent back');
-
-    // Importing shows the model's prose, not just its code.
-    const importBtn = Array.from(page.doc.querySelectorAll('#mas-agent-sub button'))
-      .find((b) => b.textContent.includes('وارد کردن'));
-    importBtn.dispatchEvent(new page.window.Event('click'));
-    await page.wait(40);
-    clickTab(page, 'agent');
-    await page.wait(10);
-    const notes = page.doc.querySelector('.mas-ai-notes');
-    assert.ok(notes, 'the AI notes box did not appear');
-    assert.ok(notes.textContent.includes('باید جستجو کنم'), notes.textContent);
-    assert.ok(!notes.querySelector('pre').textContent.includes('```json'),
-      'the JSON block should be stripped from the notes');
-    assert.ok(notes.textContent.includes('کدام نتیجه را کلیک کنم؟'),
-      'the model question was lost');
   } finally {
     await page.cleanup();
   }
@@ -1670,7 +1589,7 @@ test('the click-capture layer is gone with the record tab', async () => {
  * The coworker agent tab
  * ------------------------------------------------------------------ */
 
-const AGENT_SUB_LABELS = ['پرامپت', 'صفحه اختصاصی', 'پیشنهادات ایجنت',
+const AGENT_SUB_LABELS = ['صفحه اختصاصی', 'پیشنهادات ایجنت',
   'کلید ایجنت', 'تلگرام', 'مرورگر', 'نشانگر', 'وظایف', 'کپچا', 'اسکریپت',
   'داده‌ها', 'کلیدها'];
 
@@ -1691,17 +1610,6 @@ async function openAgentSub(page, label) {
   assert.ok(sub, `sub-tab ${label} is missing`);
   sub.dispatchEvent(new page.window.Event('click'));
   await page.until(() => page.doc.querySelector('#mas-agent-sub .mas-box') !== null);
-}
-
-/** Authenticate and open the agent's prompt sub-tab (the first one). */
-async function openPrompt(page) {
-  const input = page.doc.getElementById('mas-token-input');
-  input.value = VALID_TOKEN;
-  page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
-  await page.wait(60);
-  clickTab(page, 'agent');
-  const ready = await page.until(() => page.doc.getElementById('mas-ai-request') !== null);
-  assert.ok(ready, 'the prompt sub-tab never rendered');
 }
 
 /** Switch inside the telegram pane to one of its nested sub-tabs. */
@@ -1728,32 +1636,30 @@ function findButton(page, needle, scope = '#mas-tab-agent') {
     .find((node) => node.textContent.includes(needle));
 }
 
-test('the agent tab lists its sub-panes and the chat tab keeps the assistant', async () => {
+test('the agent tab lists its sub-panes and the prompt workspace is gone', async () => {
   const page = await mount();
   try {
     await openAgentSub(page);
     const labels = Array.from(page.doc.querySelectorAll('#mas-tab-agent [data-sub]'))
       .map((node) => node.textContent.trim());
     assert.deepEqual(labels, AGENT_SUB_LABELS);
-    // The prompt workspace is the agent's first sub-tab now; the chat tab
-    // only keeps a pointer button, so there is one home for prompts.
-    assert.equal(page.doc.querySelectorAll('#mas-tab-agent [data-sub]')[0]
-      .textContent.trim(), 'پرامپت', 'the prompt sub-tab must come first');
-    assert.ok(page.doc.getElementById('mas-ai-request'), 'the request box is gone');
-    assert.ok(page.doc.getElementById('mas-ai-reply'), 'the import box is gone');
-    assert.ok(findButton(page, '🧩', '#mas-tab-agent'), 'the copy-prompt button is gone');
-    assert.ok(findButton(page, '🤖', '#mas-tab-agent'),
-      'the ask-the-agent-directly button is missing');
+    // Round 28, item 3: the prompt sub-tab is deleted. The chat tab is the
+    // only way to talk to the coworker agent, and the copy-prompt /
+    // import-JSON workflow is gone with the JSON step method.
+    assert.equal(labels[0], 'صفحه اختصاصی', 'the pages sub-tab must come first');
+    assert.equal(page.doc.getElementById('mas-ai-request'), null);
+    assert.equal(page.doc.getElementById('mas-ai-reply'), null);
+    assert.equal(page.doc.getElementById('mas-prompt-host'), null);
+    assert.equal(findButton(page, '🧩', '#mas-tab-agent'), undefined,
+      'the copy-prompt button must be gone');
+    assert.equal(findButton(page, '🤖', '#mas-tab-agent'), undefined,
+      'the ask-directly button must be gone');
     clickTab(page, 'chat');
     await page.wait(10);
-    assert.ok(!page.doc.querySelector('#mas-tab-chat #mas-ai-request'),
-      'the chat tab must not embed a second prompt workspace');
-    // the chat tab keeps no prompt toolbox at all any more: the prompt
-    // sub-tab is the single home, and the header must stay quiet.
     assert.ok(!page.doc.querySelector('#mas-tab-chat .mas-chat-tools'),
       'the chat tab must not carry the old toolbox');
-    assert.ok(!findButton(page, 'پرامپت', '#mas-tab-chat'),
-      'no pointer button should remain in the chat tab');
+    assert.ok(!page.doc.querySelector('#mas-tab-chat #mas-ai-request'),
+      'the chat tab must not embed a prompt workspace');
   } finally {
     await page.cleanup();
   }

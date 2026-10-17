@@ -219,15 +219,6 @@ class ServerIntegrationTest(unittest.TestCase):
         status, _ = http_request(self.url("/automation/api/artifact?path="))
         self.assertEqual(status, 404)
 
-    def test_guide_is_served(self):
-        status, body = http_request(self.url("/automation/api/guide"))
-        self.assertEqual(status, 200)
-        # round 26: the guide teaches the one language - python steps
-        self.assertIn("زبان مرحله‌ها".encode("utf-8"), body)
-        self.assertIn(b"human_verify", body)
-        self.assertIn("type\": \"python".encode("utf-8"), body)
-        self.assertIn(b"CAPTCHA", body)
-
     def test_a_flow_name_with_a_space_can_be_saved(self):
         # Regression: the browser sends "Untitled flow" as "Untitled%20flow" and
         # the router used to reject the escape, answering "no such endpoint".
@@ -341,72 +332,6 @@ class ServerIntegrationTest(unittest.TestCase):
         status, body = http_request(self.url("/automation/api/report"))
         self.assertEqual(status, 200)
         self.assertIn("هنوز اجرایی", body.decode("utf-8"))
-
-    def test_prompt_asks_for_summary_code_and_questions(self):
-        # The model must not just dump code: it says what it understood, gives
-        # the code, then raises questions or improvements.
-        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
-                                    body={"flow": {"name": "f", "steps": []}})
-        self.assertEqual(status, 200, body)
-        text = body.decode("utf-8")
-        for heading in ("چه فهمیدی", "کد", "سؤال و نکته"):
-            self.assertIn(heading, text)
-        self.assertLess(text.index("چه فهمیدی"), text.index("سؤال و نکته"),
-                        "the sections are out of order")
-
-    def test_ai_prompt_explains_safe_human_handoff_and_typing_modes(self):
-        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
-                                    body={"flow": {"name": "f", "steps": []}})
-        self.assertEqual(status, 200, body)
-        text = body.decode("utf-8")
-        self.assertIn("typingMode", text)
-        self.assertIn("pause_for_human_verification", text)
-        self.assertIn("کد CAPTCHA را از کاربر نخواه", text)
-        self.assertIn("CAPTCHA", text)
-
-    def test_prompt_hands_back_the_previous_answer(self):
-        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
-                                    body={"flow": {"name": "f", "steps": []},
-                                          "previousReply": "دور قبل این را گفتم"})
-        self.assertEqual(status, 200, body)
-        text = body.decode("utf-8")
-        self.assertIn("پاسخ قبلی تو", text)
-        self.assertIn("دور قبل این را گفتم", text)
-
-    def test_prompt_carries_the_run_report(self):
-        # A finished run must reach the prompt, so the model can diagnose it.
-        flow = {"name": "rep", "steps": [{"type": "click", "x": 1, "y": 1}]}
-        http_request(self.url("/automation/api/run"), method="POST", body={"flow": flow})
-        try:
-            for _ in range(200):
-                if not self.engine.busy():
-                    break
-                time.sleep(0.01)
-            status, body = http_request(self.url("/automation/api/prompt"),
-                                        method="POST", body={"flow": flow})
-            self.assertEqual(status, 200, body)
-            self.assertIn("گزارش اجرای سیستم", body.decode("utf-8"))
-        finally:
-            self.engine._state = None
-
-    def test_prompt_carries_the_user_request_and_the_shot_link(self):
-        pages = os.path.join(self.data_dir, "pages")
-        os.makedirs(pages, exist_ok=True)
-        snapshot = {"id": "p1", "title": "گوگل", "url": "https://example.com/",
-                    "capturedAt": 1, "publicShot": "shot-1.png", "text": "سلام",
-                    "elements": [], "viewport": {"width": 1366, "height": 768}}
-        with open(os.path.join(pages, "p1.json"), "w", encoding="utf-8") as handle:
-            json.dump(snapshot, handle, ensure_ascii=False)
-
-        status, body = http_request(self.url("/automation/api/prompt"), method="POST",
-                                    body={"pageId": "p1", "request": "روی اولین نتیجه کلیک کن",
-                                          "publicBase": "https://abc.trycloudflare.com",
-                                          "flow": {"name": "f", "steps": []}})
-        self.assertEqual(status, 200, body)
-        text = body.decode("utf-8")
-        self.assertIn("درخواست کاربر", text)
-        self.assertIn("روی اولین نتیجه کلیک کن", text)
-        self.assertIn("https://abc.trycloudflare.com/automation/api/public/shot/shot-1.png", text)
 
     def test_public_shot_is_reachable_without_a_token(self):
         pub = os.path.join(self.data_dir, "public")

@@ -1401,26 +1401,8 @@ class AgentHubTest(TempDirCase):
         hub, _, _ = self.build(llm=FakeLlm("hi"))
         hub.set_kill_switch(True)
         with self.assertRaises(AgentError) as caught:
-            hub.chat("سلام")
+            hub.ask("سلام")
         self.assertEqual(caught.exception.status, 409)
-
-    def test_chat_returns_a_validated_flow_when_the_model_produces_one(self):
-        reply = json.dumps({"name": "پیشنهادی", "steps": [
-            {"id": "s1", "type": "goto_url", "url": "https://example.com"}]})
-        hub, _, _ = self.build(llm=FakeLlm(reply))
-        result = hub.chat("یک جریان بساز")
-        self.assertTrue(result["flowValid"])
-        # round 26: the model's old-JSON flow arrives translated to python
-        self.assertEqual(result["flow"]["steps"][0]["type"], "python")
-        self.assertIn("goto('https://example.com')",
-                      result["flow"]["steps"][0]["code"])
-
-    def test_chat_reports_a_broken_flow_instead_of_hiding_it(self):
-        reply = json.dumps({"steps": [{"type": "teleport"}]})
-        hub, _, _ = self.build(llm=FakeLlm(reply))
-        result = hub.chat("x")
-        self.assertFalse(result["flowValid"])
-        self.assertTrue(result["flowErrors"])
 
     def test_a_job_must_reference_something_real(self):
         hub, _, _ = self.build()
@@ -1642,10 +1624,10 @@ class AgentApiTest(TempDirCase):
 
     def test_the_kill_switch_returns_409_for_every_acting_route(self):
         self.call("POST", "/agent/kill-switch", {"on": True})
-        self.assertEqual(self.call("POST", "/agent/chat", {"request": "x"})[0], 409)
+        self.assertEqual(self.call("POST", "/agent/chat/send", {"text": "x"})[0], 409)
         self.assertEqual(self.call("POST", "/agent/captcha/solve", {})[0], 409)
         self.call("POST", "/agent/kill-switch", {"on": False})
-        self.assertEqual(self.call("POST", "/agent/chat", {"request": "x"})[0], 200)
+        self.assertEqual(self.call("POST", "/agent/chat/send", {"text": "x"})[0], 200)
 
     def test_jobs_are_validated_and_listed(self):
         status, payload = self.call("POST", "/agent/jobs",
@@ -1708,25 +1690,7 @@ class AgentApiTest(TempDirCase):
         self.assertEqual(self.call("POST", "/agent/job-run", {})[0], 400)
         self.assertEqual(self.call("POST", "/agent/script-run", {})[0], 400)
         self.assertEqual(self.call("POST", "/agent/script-decision", {})[0], 400)
-        self.assertEqual(self.call("POST", "/agent/chat", {})[0], 400)
         self.assertEqual(self.call("POST", "/agent/captcha/execute", {})[0], 400)
-
-    def test_chat_sends_the_same_context_the_prompt_route_builds(self):
-        status, payload = self.call("POST", "/agent/chat",
-                                    {"request": "روی اولین نتیجه کلیک کن"})
-        self.assertEqual(status, 200)
-        prompt = self.hub.llm.calls[-1]["prompt"]
-        self.assertIn("روی اولین نتیجه کلیک کن", prompt,
-                      "the operator's request never reached the model")
-        self.assertIn("1366", prompt, "the viewport context is missing")
-
-    def test_the_prompt_route_still_returns_plain_text(self):
-        raw = json.dumps({"request": "سلام"}).encode()
-        status, headers, data = self.api.handle("POST", "/prompt", body=raw,
-                                                headers=self.headers)
-        self.assertEqual(status, 200)
-        self.assertIn("text/plain", headers["Content-Type"])
-        self.assertIn("سلام", data.decode("utf-8"))
 
     def test_captcha_config_and_history_over_http(self):
         status, payload = self.call("GET", "/agent/captcha/config")
@@ -2520,14 +2484,6 @@ class ChatTabTest(HubCase):
         self.assertTrue(bad, "a failed turn must be reported with ok=0")
         self.assertIn("شکست خورد", bad[0]["message"])
 
-    def test_the_assistant_path_reports_too(self):
-        hub, _, _ = self.build(llm=FakeLlm("پاسخ دستیار"))
-        out = hub.chat("یک سؤال مهم")
-        self.assertEqual(out["text"], "پاسخ دستیار")
-        phases = [row["phase"] for row in hub.store.list_step_reports("agent")]
-        self.assertIn("درخواست دستیار", phases)
-        self.assertIn("پاسخ دستیار", phases)
-
     def test_reports_route_filters_by_kind(self):
         hub, backend, flows = self.build(llm=FakeLlm("باشه"))
         hub.chat_send("سلام")
@@ -2626,24 +2582,6 @@ class LettersTest(HubCase):
         status, _ = self.call(api, "DELETE", "/agent/letters/%s" % letter_id)
         self.assertEqual(status, 404)
 
-    def test_build_prompt_carries_letters(self):
-        hub, backend, flows = self.build()
-        api = self.api_for(hub, backend, flows)
-        hub.letter_add("to_agent", "قابلیت تازه: پایتون.")
-        status, _, data = api.handle("POST", "/prompt", body=b"{}",
-                                     headers={"x-automation-token": TOKEN})
-        self.assertEqual(status, 200)
-        text = data.decode("utf-8")
-        self.assertIn("قابلیت تازه: پایتون.", text)
-        self.assertIn("نامه‌های تازهٔ کاربر به تو", text)
-        # consumed: a second prompt no longer carries the letter
-        status, _, data = api.handle("POST", "/prompt", body=b"{}",
-                                     headers={"x-automation-token": TOKEN})
-        self.assertEqual(status, 200)
-        self.assertNotIn("نامه‌های تازهٔ کاربر به تو", data.decode("utf-8"))
-
-
-class TelegramChannelsTest(HubCase):
     def test_both_channels_can_be_on_at_once(self):
         hub, _, _ = self.build()
         hub.save_settings({"telegram.mode": "both"})

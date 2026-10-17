@@ -164,7 +164,6 @@ POST /automation/api/run       {"flow": {...}} validate then start
 POST /automation/api/control   {"action": "pause" | "resume" | "stop" | "confirm"}
 POST /automation/api/detect    screenshot, windows, page text, DOM elements
 GET  /automation/api/pages     every page detected so far
-GET  /automation/api/guide     the AI guide as markdown
 ```
 
 A step with `"requiresConfirmation": true` stops the run in the `waiting` state

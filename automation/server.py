@@ -462,11 +462,10 @@ def build_api(args: argparse.Namespace) -> AutomationApi:
         (lambda: {key: value for key in _supa_keys
                   if (value := agent.store.get_setting(key)) is not None})
         if agent is not None else None))
-    guide_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "ai_guide.md")
     return AutomationApi(
         engine, flows, detector,
         data_dir=args.data_dir, token=token, control_script=args.control_script,
-        viewport=dict(schema.DEFAULT_VIEWPORT), guide_path=guide_path,
+        viewport=dict(schema.DEFAULT_VIEWPORT),
         shots=shots, texts=texts, agent=agent, supabase=supabase)
 
 
