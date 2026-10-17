@@ -197,6 +197,37 @@ class ValidateFlowTest(unittest.TestCase):
         self.assertIn("goto('https://example.com')", compact[0]["code"])
 
 
+class Round28CellModelTest(unittest.TestCase):
+    """Round 28, item 1: a step is a cell - settings and outputs ride along."""
+
+    def test_a_python_cell_carries_settings_and_outputs(self):
+        normalized, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)",
+            "settings": [{"key": "wait", "kind": "number", "value": 2,
+                          "label": "\u0645\u06a9\u062b (\u062b\u0627\u0646\u06cc\u0647)"}],
+            "outputs": {"age": 31}}]))
+        self.assertEqual(errors, [])
+        self.assertEqual(normalized["steps"][0]["settings"][0]["value"], 2)
+        self.assertEqual(normalized["steps"][0]["outputs"], {"age": 31})
+
+    def test_cell_settings_are_validated(self):
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)",
+            "settings": [{"kind": "number"}]}]))
+        self.assertTrue(any("needs a 'key'" in error for error in errors))
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)",
+            "settings": [{"key": "x", "kind": "select"}]}]))
+        self.assertTrue(any("options list" in error for error in errors))
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)",
+            "settings": [{"key": "x", "kind": "color"}]}]))
+        self.assertTrue(any("number/text/select/bool" in error for error in errors))
+        _, errors = schema.validate_flow(flow(steps=[{
+            "type": "python", "code": "log(1)", "outputs": ["no"]}]))
+        self.assertTrue(any("outputs must be an object" in error for error in errors))
+
+
 class DefaultLabelTest(unittest.TestCase):
     def test_labels_are_readable(self):
         cases = {

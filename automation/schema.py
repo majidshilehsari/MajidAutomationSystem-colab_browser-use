@@ -115,6 +115,10 @@ COMMON_STEP_FIELDS = [
     "delayAfterMs",
     "requiresConfirmation",
     "continueOnError",
+    # Round 28, item 1: the cell model - user-tunable settings and the
+    # concrete outputs the cell recorded on its last run.
+    "settings",
+    "outputs",
 ]
 
 _INT_COORD_FIELDS = ("x", "y", "x1", "y1", "x2", "y2")
@@ -267,6 +271,25 @@ def _validate_step(step: Any, index: int, viewport: Dict[str, int], errors: List
 
     if "button" in step and str(step["button"]) not in BUTTONS:
         _err(errors, "%s (%s): button must be one of left/middle/right/1-5" % (where, kind))
+
+    if "settings" in step:
+        items = step["settings"]
+        if not isinstance(items, list):
+            _err(errors, "%s (%s): settings must be a list of cell parameters" % (where, kind))
+        else:
+            for pos, item in enumerate(items):
+                if not isinstance(item, dict) or not str(item.get("key") or ""):
+                    _err(errors, "%s (%s): settings[%d] needs a 'key'" % (where, kind, pos))
+                    continue
+                cell_kind = str(item.get("kind") or "text")
+                if cell_kind not in ("number", "text", "select", "bool"):
+                    _err(errors, "%s (%s): settings[%d]: kind must be number/text/select/bool"
+                         % (where, kind, pos))
+                if cell_kind == "select" and not isinstance(item.get("options"), list):
+                    _err(errors, "%s (%s): settings[%d]: a select needs an options list"
+                         % (where, kind, pos))
+    if "outputs" in step and not isinstance(step["outputs"], dict):
+        _err(errors, "%s (%s): outputs must be an object" % (where, kind))
 
     if "clicks" in step:
         _validate_int(step, "clicks", "%s (%s)" % (where, kind), errors, 1, 10)

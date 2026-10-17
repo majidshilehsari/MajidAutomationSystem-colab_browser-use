@@ -729,6 +729,32 @@ class PythonStepTest(EngineTestBase):
         self.assertEqual(self.backend.calls, [("click", 10, 20, "left", 1)])
         self.assertEqual(status["results"][0]["text"], "done 42")
 
+    def test_a_cell_reads_its_settings_in_seconds_and_records_outputs(self):
+        # Round 28, item 1: settings arrive as `params`, S() speaks seconds,
+        # and set_output() lands in the result row for the panel to show.
+        flow = build_flow([{
+            "type": "python",
+            "settings": [{"key": "wait", "kind": "number", "value": 2,
+                          "label": "\u0645\u06a9\u062b (\u062b\u0627\u0646\u06cc\u0647)"}],
+            "code": "set_output('age', 31)\nset_output('pixel', 'x=5,y=7')\n"
+                    "log(S('wait', 1))\nlog(params['wait'])"}])
+        status = self.run_to_completion(flow)
+        self.assertEqual(status["status"], "done")
+        row = status["results"][0]
+        self.assertEqual(row["outputs"], {"age": 31, "pixel": "x=5,y=7"})
+        self.assertIn("2.0", row["text"])
+
+    def test_pause_all_freezes_the_run_until_a_human_resolves_it(self):
+        flow = build_flow([{"type": "python",
+                            "code": "check(pause_all('\u06a9\u067e\u0686\u0627 \u062f\u06cc\u062f\u0647 \u0634\u062f'))"}])
+        self.engine.start(flow)
+        self.assertTrue(wait_until(lambda: self.engine.status()["status"] == "waiting"))
+        pending = self.engine.status()["awaitingConfirmation"]
+        self.assertEqual(pending["kind"], "manual_verification")
+        self.assertIn("\u0633\u0644\u0648\u0644 \u067e\u0627\u06cc\u0634\u06af\u0631", pending["message"])
+        self.engine.confirm(True)
+        self.assertTrue(wait_until(lambda: self.engine.status()["status"] == "done"))
+
     def test_loops_conditions_and_vars_are_ordinary_python(self):
         flow = build_flow([{"type": "python", "code": (
             "total = 0\n"
