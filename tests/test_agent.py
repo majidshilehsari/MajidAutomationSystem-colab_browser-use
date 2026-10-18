@@ -940,6 +940,70 @@ class AiBrowserTest(TempDirCase):
         self.assertIn("AI_BROWSER=1", str(caught.exception),
                       "the fix must be named in the error, not guessed at")
 
+    def test_open_provider_refuses_success_when_cdp_never_answers(self):
+        # Round 29, item 12: the runner may report "navigated", but a dead
+        # port means the open FAILED - no more false rc=0 from open_agent.
+        from automation.ai_browser import AiBrowser, AiBrowserError
+        now = [0.0]
+        calls = []
+
+        class Runner:
+            def goto_url(self, url):
+                calls.append(url)
+                return (0, "", "")
+
+        browser = AiBrowser(FakeCdp(fail=True), port=9223,
+                            providers={"pi": {"url": "https://pi.example/"}},
+                            clock=lambda: now[0],
+                            sleep=lambda s: now.__setitem__(0, now[0] + s),
+                            runner=Runner())
+        with self.assertRaises(AiBrowserError) as ctx:
+            browser.open_provider("pi", wait=3)
+        self.assertEqual(calls, ["https://pi.example/"])
+        self.assertIn("9223", str(ctx.exception))
+        self.assertGreaterEqual(now[0], 3.0)
+
+    def test_open_provider_refuses_a_page_that_is_not_the_wanted_site(self):
+        from automation.ai_browser import AiBrowser, AiBrowserError
+        now = [0.0]
+        state = {"count": 0, "texts": [], "url": "https://other.example/x",
+                 "title": "other"}
+
+        class Runner:
+            def goto_url(self, url):
+                return (0, "", "")
+
+        browser = AiBrowser(FakeCdp(page_states=[state]), port=9223,
+                            providers={"pi": {"url": "https://pi.example/"}},
+                            clock=lambda: now[0],
+                            sleep=lambda s: now.__setitem__(0, now[0] + s),
+                            runner=Runner())
+        with self.assertRaises(AiBrowserError) as ctx:
+            browser.open_provider("pi", wait=3)
+        self.assertIn("never became", str(ctx.exception))
+
+    def test_open_provider_verifies_cdp_url_and_status_before_success(self):
+        from automation.ai_browser import AiBrowser
+        now = [0.0]
+        state = {"count": 0, "texts": [], "url": "https://pi.example/app",
+                 "title": "Pi"}
+
+        class Runner:
+            def goto_url(self, url):
+                return (0, "", "")
+
+        browser = AiBrowser(FakeCdp(page_states=[state]), port=9223,
+                            providers={"pi": {"url": "https://pi.example/"}},
+                            clock=lambda: now[0],
+                            sleep=lambda s: now.__setitem__(0, now[0] + s),
+                            runner=Runner())
+        result = browser.open_provider("pi", wait=5)
+        self.assertTrue(result["verified"])
+        self.assertEqual(result["opened"], "https://pi.example/")
+        self.assertEqual(result["pageUrl"], "https://pi.example/app")
+        self.assertEqual(result["pageTitle"], "Pi")
+
+
     def test_status_reports_the_page_it_found(self):
         info = AiBrowser(FakeCdp(page_states=[page("old answer")]),
                          port=9223).status()
@@ -1814,6 +1878,48 @@ class AgentApiTest(TempDirCase):
                                          "items": ["agent.db"]})
         self.assertEqual(status, 200)
         self.assertEqual(payload["items"], ["agent.db"])
+
+    def test_flows_migrate_backs_up_and_translates_legacy_steps(self):
+        # Round 29, items 7+8: backup first, then every legacy draft and
+        # legacy operation is saved back in the one python language.
+        self.flows.save("Legacy", {"name": "Legacy", "steps": [
+            {"type": "click", "x": 100, "y": 200},
+            {"type": "wait", "ms": 500}]})
+        self.hub.store.create_operation({
+            "name": "old op", "description": "", "tags": [],
+            "steps": [{"type": "click", "x": 1, "y": 2}]})
+        status, payload = self.call("POST", "/agent/flows-migrate", {})
+        self.assertEqual(status, 200)
+        self.assertIn("Legacy", payload["flows"])
+        self.assertIn("old op", payload["operations"])
+        self.assertTrue(str(payload["backup"]).startswith("mas-backup-"),
+                        "migration must run behind a fresh backup")
+        moved = self.flows.get("Legacy")
+        self.assertEqual([step["type"] for step in moved["steps"]],
+                         ["python", "python"])
+        self.assertIn("click(100, 200)", moved["steps"][0]["code"])
+        # the already-python draft was left alone
+        self.assertNotIn("Arena", payload["flows"])
+        ops = {row["name"]: row for row in self.hub.library.list()}
+        self.assertEqual(ops["old op"]["steps"][0]["type"], "python")
+        self.assertIn("click(1, 2)", ops["old op"]["steps"][0]["code"])
+
+    def test_flow_delete_names_the_jobs_that_still_target_the_draft(self):
+        # Round 29, item 8: nothing a scheduler depends on is deleted
+        # silently - the refusal names the blocking jobs, force overrides
+        self.hub.save_job({"name": "nightly arena", "kind": "cron",
+                           "schedule": "0 3 * * *", "target": "Arena",
+                           "enabled": True, "payload": {"action": "flow"}})
+        status, _headers, body = self.api.handle("DELETE", "/flows/Arena",
+                                                 headers=self.headers)
+        self.assertEqual(status, 409)
+        self.assertIn("nightly arena", body.decode("utf-8"))
+        self.assertIsNotNone(self.flows.get("Arena"))
+        status, _headers, body = self.api.handle(
+            "DELETE", "/flows/Arena", query={"force": ["1"]},
+            headers=self.headers)
+        self.assertEqual(status, 200)
+        self.assertIsNone(self.flows.get("Arena"))
 
     def test_ui_preferences_round_trip_through_the_database(self):
         from automation.agent import PLAIN_SETTINGS

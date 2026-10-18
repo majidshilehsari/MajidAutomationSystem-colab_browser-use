@@ -171,6 +171,10 @@ function button(label, onClick, extra = {}) {
 }
 
 function replace(node, ...children) {
+  // Round 29, item 11: the desktop view and the human page poll the same
+  // status but never build the panel shell; a pane that does not exist is a
+  // no-op, not "Cannot set properties of null".
+  if (!node) return node;
   node.textContent = '';
   for (const child of compact(children)) {
     node.appendChild(typeof child === 'string' ? document.createTextNode(child) : child);
@@ -745,6 +749,9 @@ function applyFlowToStages(saved) {
 
 function renderFlow() {
   const pane = document.getElementById('mas-tab-flow');
+  // Round 29, item 11: polling may fire before (or without) the panel shell -
+  // the stages are only drawn when their pane actually exists.
+  if (!pane) return;
   const errors = validateFlow(state.flow);
 
   const nameRow = el('div', { class: 'mas-row' }, [
@@ -770,7 +777,8 @@ function renderFlow() {
   // the section hides the bar with it; nothing to unmount on tab changes).
   const ioRow = el('div', { class: 'mas-flowbar' }, [
     button(t('save'), () => saveFlow(), { class: 'mas-btn mas-primary' }),
-    button(t('load'), loadFlowDialog),
+    button('💾 ' + t('opRegister'), registerFlowAsOperation),
+    button(t('load'), openDraftsModal),
     button('📋 ' + t('copyReport'), copyReport, { class: 'mas-btn' }),
     button('🗑 ' + t('clearAll'), clearAllSteps, { class: 'mas-btn mas-danger' }),
   ]);
@@ -782,34 +790,59 @@ function renderFlow() {
     ])
     : null;
 
+  // Round 29, item 6: saved test flows are DRAFTS of this very tab - they
+  // live here and nowhere else, with one button that unifies any legacy step
+  // language behind a fresh backup.
+  const draftsCard = el('div', { class: 'mas-box mas-card', id: 'mas-drafts-card' }, [
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '🧪 ' + t('draftsTitle') })]),
+    el('p', { class: 'mas-hint', text: t('draftsHint') }),
+    el('div', { id: 'mas-drafts-list' },
+      [el('p', { class: 'mas-empty', text: '…' })]),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('♻️ ' + t('draftsMigrate'), async () => {
+        try {
+          const res = await api('/agent/flows-migrate', { method: 'POST', body: {} });
+          const parts = [
+            `${(res.flows || []).length} ${t('draftsMigFlows')}`,
+            `${(res.operations || []).length} ${t('draftsMigOps')}`,
+          ];
+          if (res.backup) parts.push(`🗄 ${res.backup}`);
+          if (res.backupError) parts.push(`⚠ ${res.backupError}`);
+          toast(`${t('draftsMigrated')}: ${parts.join(' · ')}`, 'ok', { sticky: true });
+          renderFlowDrafts();
+        } catch (error) { toast(error.message, 'error'); }
+      }),
+    ]),
+  ]);
+
   // The action line comes FIRST in the DOM: it is sticky at top:0, so it must
   // start right under the header. When it sat last, sticky anchored it to its
   // natural place - the bottom of the pane - which is exactly where the user
   // kept finding it (round 14).
-  replace(pane, ioRow, nameRow, errorBox, list);
+  replace(pane, ioRow, nameRow, errorBox, list, draftsCard);
+  renderFlowDrafts();
 }
 
 /* ------------------------------------------------------------------ *
- * Saved flows: one place that keeps the runs which worked
+ * Round 29: saved flows are DRAFTS of the stages tab - one official
+ * library (operations) lives in the library tab, and the test flows
+ * live here, inside the stages, under the title «پیش‌نویس‌ها».
  * ------------------------------------------------------------------ */
 
-async function renderLibrary() {
-  const box = document.getElementById('mas-flows-lib');
-  if (!box) return;
-  replace(box, el('p', { class: 'mas-lib-empty', text: '…' }));
+async function fillDraftList(host, onPick) {
   let flows = [];
   try {
-    const data = await api('/flows');
-    flows = data.flows || [];
+    flows = ((await api('/flows')).flows) || [];
   } catch (error) {
-    replace(box, el('p', { class: 'mas-lib-empty', text: error.message }));
+    replace(host, el('p', { class: 'mas-lib-empty', text: error.message || String(error) }));
     return;
   }
   if (!flows.length) {
-    replace(box, el('p', { class: 'mas-lib-empty', text: t('libraryEmpty') }));
+    replace(host, el('p', { class: 'mas-lib-empty', text: t('draftsEmpty') }));
     return;
   }
-  replace(box, el('div', { class: 'mas-library' }, flows.map((item) => el('div', {
+  replace(host, el('div', { class: 'mas-library' }, flows.map((item) => el('div', {
     class: 'mas-lib-row', dataset: { name: item.name },
   }, [
     el('div', { class: 'mas-lib-main' }, compact([
@@ -821,19 +854,77 @@ async function renderLibrary() {
       item.description ? el('span', { class: 'mas-lib-desc', text: item.description }) : null,
     ])),
     el('div', { class: 'mas-lib-actions' }, [
-      button('✎', () => openFlowModal(item), { title: t('flowEditTitle') }),
-      button('⤓', () => openSavedFlow(item.name), { title: t('load') }),
+      button('⤓', async () => {
+        if (onPick) await onPick(item.name); else await openSavedFlow(item.name);
+      }, { title: t('load') }),
       button('▶', () => runSavedFlow(item.name), { class: 'mas-btn mas-primary', title: t('run') }),
+      button('✎', () => openFlowModal(item), { title: t('flowEditTitle') }),
       button('🗑', () => deleteSavedFlow(item.name), { class: 'mas-btn mas-danger', title: t('delete') }),
     ]),
   ]))));
+}
+
+async function renderFlowDrafts() {
+  const box = document.getElementById('mas-drafts-list');
+  if (!box) return;
+  replace(box, el('p', { class: 'mas-empty', text: '…' }));
+  await fillDraftList(box, null);
+}
+
+async function registerFlowAsOperation() {
+  // Round 29, items 2+3: design and test step by step HERE in the stages,
+  // then register the successful run in the ONE official library - the
+  // round-28 modal, prefilled with the flow on stage (legacy steps are
+  // translated on the way).
+  const flow = await toPythonFlow(state.flow || {});
+  const steps = (flow.steps || [])
+    .filter((step) => step && String(step.code || '').trim())
+    .map((step) => ({
+      type: 'python', code: String(step.code || ''),
+      label: String(step.label || ''),
+    }));
+  if (!steps.length) { toast(t('opEmpty'), 'warn'); return; }
+  openOperationModal({
+    id: '', name: String(flow.name || ''),
+    description: String(flow.description || ''),
+    tags: '', scope: 'general', steps,
+  });
+}
+
+function openDraftsModal() {
+  // Round 29, item 6: the flowbar's «بارگذاری» no longer opens a
+  // window.prompt - the drafts list appears as a proper modal.
+  const body = el('div', {}, [el('p', { class: 'mas-empty', text: '…' })]);
+  const close = modalCard([
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '🧪 ' + t('draftsTitle') })]),
+    el('p', { class: 'mas-hint', text: t('draftsHint') }),
+    body,
+    // deferred: `close` is what modalCard returns (a direct reference in a
+    // child handler would be a TDZ crash)
+    el('div', { class: 'mas-row' }, [button('✕ ' + t('supaClose'), () => close())]),
+  ]);
+  fillDraftList(body, async (name) => { close(); await openSavedFlow(name); });
+}
+
+async function toPythonFlow(flow) {
+  // Round 29, item 7: a draft still written in the old JSON step language is
+  // translated by the server before it reaches the stages.
+  if ((flow.steps || []).some((step) => step && step.type !== 'python')) {
+    const converted = await convertFlowServer(flow);
+    if (converted && (converted.steps || []).length) {
+      const norm = normaliseImportedFlow(converted, (state.flow || {}).viewport);
+      if (norm.flow && (norm.flow.steps || []).length) return norm.flow;
+    }
+  }
+  return flow;
 }
 
 async function openSavedFlow(name) {
   try {
     const detail = await api(`/flows/${encodeURIComponent(name)}`);
     if (!detail.flow) throw new Error('empty flow');
-    state.flow = detail.flow;
+    state.flow = await toPythonFlow(detail.flow);
     state.openStepId = null;
     persistFlow();
     renderFlow();
@@ -944,7 +1035,7 @@ async function openFlowModal(item) {
           }
           close();
           toast(t('opSaved'), 'ok');
-          renderLibrary();
+          renderFlowDrafts();
         } catch (error) { toast(error.message, 'error'); }
       }, { class: 'mas-btn mas-primary' }),
       button('▶ ' + t('run'), () => { close(); runSavedFlow(item.name); }),
@@ -954,7 +1045,7 @@ async function openFlowModal(item) {
           await api(`/flows/${encodeURIComponent(item.name)}`, { method: 'DELETE' });
           close();
           toast(t('flowDeleted'), 'ok');
-          renderLibrary();
+          renderFlowDrafts();
         } catch (error) { toast(error.message, 'error'); }
       }, { class: 'mas-btn mas-danger' }),
       button(t('close'), () => close()),
@@ -966,7 +1057,7 @@ async function runSavedFlow(name) {
   try {
     const detail = await api(`/flows/${encodeURIComponent(name)}`);
     if (!detail.flow) throw new Error('empty flow');
-    state.flow = detail.flow;
+    state.flow = await toPythonFlow(detail.flow);
     persistFlow();
     renderFlow();
     await runFlow();
@@ -978,9 +1069,11 @@ async function runSavedFlow(name) {
 async function deleteSavedFlow(name) {
   if (!window.confirm(t('deleteSavedConfirm').replace('{n}', name))) return;
   try {
+    // Round 29, item 8: the server refuses (409) when scheduled jobs still
+    // target this draft - its Persian refusal names the blocking jobs.
     await api(`/flows/${encodeURIComponent(name)}`, { method: 'DELETE' });
     toast(`${t('delete')}: ${name}`, 'ok');
-    renderLibrary();
+    renderFlowDrafts();
   } catch (error) {
     toast(error.message, 'error');
   }
@@ -2005,26 +2098,6 @@ async function saveFlow(name = state.flow.name) {
     state.flow.name = name;
     persistFlow();
     toast(`${t('save')}: ${name}`, 'ok');
-  } catch (error) {
-    toast(error.message, 'error');
-  }
-}
-
-async function loadFlowDialog() {
-  try {
-    const data = await api('/flows');
-    const flows = data.flows || [];
-    if (!flows.length) { toast(t('pagesEmpty'), 'info'); return; }
-    const names = flows.map((f) => `${f.name} (${f.steps})`).join('\n');
-    const choice = window.prompt(`${t('load')}\n\n${names}`, flows[0].name);
-    if (!choice) return;
-    const found = flows.find((f) => f.name === choice || `${f.name} (${f.steps})` === choice);
-    if (!found) { toast('?', 'error'); return; }
-    const detail = await api(`/flows/${encodeURIComponent(found.name)}`);
-    state.flow = detail.flow;
-    persistFlow();
-    renderFlow();
-    toast(`${t('load')}: ${found.name}`, 'ok');
   } catch (error) {
     toast(error.message, 'error');
   }
@@ -3796,8 +3869,15 @@ function renderChat() {
  * ------------------------------------------------------------------ */
 
 function operationSummary(op) {
-  return (op.steps || []).map((step, index) =>
-    `${index + 1}. ${step.label || labelFor(step)}`).join('\n');
+  // Round 29, item 10: the «مرحله‌ها» section of a card shows the actual
+  // python program of every step, not just a count - label first, then the
+  // indented code, so the card answers "what does this operation do?".
+  return (op.steps || []).map((step, index) => {
+    const head = `${index + 1}. ${step.label || labelFor(step) || ''}`.trim();
+    const code = String(step.code || '').trim();
+    if (!code) return head;
+    return `${head}\n${code.split('\n').map((line) => '    ' + line).join('\n')}`;
+  }).join('\n\n');
 }
 
 async function openOperationInStages(op) {
@@ -4059,18 +4139,14 @@ async function renderOperations() {
     el('span', { class: 'mas-hint', text: `${state.operations.length} ${t('opCount')}` }),
   ]);
   const cards = state.operations.map(operationCard);
+  // Round 29, item 5: the library is ONE official list of operations. Saved
+  // test flows are drafts and live in the stages tab - never down here.
   replace(pane,
     el('p', { class: 'mas-hint', text: t('opHint') }),
     head,
     el('div', { class: 'mas-ops' }, cards.length ? cards
       : [el('p', { class: 'mas-empty', text: t('opNone') })]),
-    el('div', { class: 'mas-box mas-card' }, [
-      el('div', { class: 'mas-card-head' }, [el('b', { text: '💾 ' + t('flowsLibTitle') })]),
-      el('p', { class: 'mas-hint', text: t('flowsLibHint') }),
-      el('div', { id: 'mas-flows-lib' }),
-    ]),
   );
-  renderLibrary();
 }
 
 /* ------------------------------------------------------------------ *

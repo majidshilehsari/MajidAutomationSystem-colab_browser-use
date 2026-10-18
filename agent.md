@@ -197,6 +197,20 @@ values with `set_output('key', value)`, and a watchdog cell freezes every
 operation with `pause_all('reason')` until a human resolves the moment. Full
 details: `automation/ai_guide.md` (section «سلول‌ها»).
 
+### One library, drafts in stages (round 29)
+
+The only official operations list is `GET/POST /agent/operations` (the
+library). Saved flows under `/flows` are DRAFTS of the stages tab: build and
+test there, then register the successful operation in the library. Every
+operation - factory, agent-made or brain-only - speaks the same python-step
+schema; only `builtin`, `scope` and `permission` differ. `POST
+/agent/flows-migrate` takes a backup first and then translates every legacy
+JSON step (drafts and operations alike) into python steps. `DELETE
+/flows/{name}` is refused with 409 while a scheduled job still targets that
+draft (pass `force=1` to delete anyway). And `open_agent()` only reports
+success after CDP answers on the agent port AND the wanted site reads back
+from the real page - a dead port is a failure, never rc=0.
+
 ## Stop the browser
 
 Press `Ctrl+C` in the supervising terminal, or run this in another terminal:

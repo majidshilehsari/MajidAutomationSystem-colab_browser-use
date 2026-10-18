@@ -61,6 +61,12 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
           createdAt: '2026-10-14T09:10:10.000Z' },
       ] });
     }
+    if (clean.endsWith('/agent/flows-migrate')) {
+      // Round 29: unify = backup first, then translate the legacy steps
+      return json({ backup: 'mas-backup-mig.tar.gz', backupError: '',
+        flows: ['Google Search'], flowsFailed: [],
+        operations: [], operationsFailed: [] });
+    }
     if (clean.endsWith('/agent/backup-inspect')) {
       // Round 28, item 4: the compatibility table behind every restore
       return json({ name: 'mas-backup-test.tar.gz', createdAtText: '۱۴۰۴/۰۷/۲۵',
@@ -1392,7 +1398,7 @@ test('stop reacts at once and reaches the server', async () => {
   }
 });
 
-test('the saved flow library lists, loads, runs and deletes', async () => {
+test('round 29: saved flows are drafts inside the stages tab, the library is one list', async () => {
   const page = await mount();
   try {
     // The panel opens on the chat tab now, so the stages are drawn on
@@ -1401,25 +1407,26 @@ test('the saved flow library lists, loads, runs and deletes', async () => {
     input.value = VALID_TOKEN;
     page.byText('button', 'ثبت').dispatchEvent(new page.window.Event('click'));
     await page.wait(80);
-    clickTab(page, 'library');
-    const libBox = () => page.doc.getElementById('mas-flows-lib')
-      || { querySelectorAll: () => [] };
-    assert.ok(await page.until(() => libBox().querySelectorAll('.mas-lib-row').length === 2),
-      'the library never listed the flows');
 
-    const box = page.doc.getElementById('mas-flows-lib');
-    const rows = box.querySelectorAll('.mas-lib-row');
+    // the drafts card lives at the bottom of the STAGES pane (item 6)
+    clickTab(page, 'flow');
+    const drafts = () => page.doc.getElementById('mas-drafts-list')
+      || { querySelectorAll: () => [] };
+    assert.ok(await page.until(() => drafts().querySelectorAll('.mas-lib-row').length === 2),
+      'the stages tab never listed the drafts');
+    assert.ok(page.doc.getElementById('mas-tab-flow').textContent.includes('پیش‌نویس‌ها'),
+      'the drafts card is missing its title');
+    const rows = drafts().querySelectorAll('.mas-lib-row');
     assert.equal(rows[0].dataset.name, 'Google Search');
     assert.ok(rows[0].textContent.includes('10'), 'step count is missing');
-    assert.ok(!page.doc.querySelector('#mas-tab-flow .mas-lib-row'),
-      'the flows tab must not carry the library any more');
 
+    // actions: load / run / rename / delete
     const actions = rows[0].querySelectorAll('.mas-lib-actions button');
-    assert.equal(actions.length, 4, 'expected edit / load / run / delete');
+    assert.equal(actions.length, 4, 'expected load / run / edit / delete');
 
-    // editing opens a centred modal, not an inline jump
-    actions[0].dispatchEvent(new page.window.Event('click'));
-    assert.ok(await page.until(() => page.doc.querySelector('.mas-modal')),
+    // renaming opens the same centred modal as before
+    actions[2].dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => !!page.doc.querySelector('.mas-modal')),
       'the edit modal never opened');
     const nameInput = page.doc.querySelector('.mas-modal input.mas-input');
     assert.equal(nameInput.value, 'Google Search');
@@ -1431,12 +1438,38 @@ test('the saved flow library lists, loads, runs and deletes', async () => {
       'the rename never reached the server');
 
     page.window.confirm = () => true;
-    const after = box.querySelectorAll('.mas-lib-row');
+    const after = drafts().querySelectorAll('.mas-lib-row');
     const delBtn = after[0].querySelectorAll('.mas-lib-actions button')[3];
     delBtn.dispatchEvent(new page.window.Event('click'));
-    await page.wait(80);
-    assert.ok(page.requests.some((u) => u.includes('/flows/Google%20Search')),
+    assert.ok(await page.until(() => page.requests.some((u) =>
+      u.includes('/flows/Google%20Search'))),
       'the delete never reached the server');
+
+    // items 2+3: the tested draft registers into the ONE library from here
+    const register = Array.from(page.doc.querySelectorAll('#mas-tab-flow button'))
+      .find((node) => node.textContent.includes('ثبت در کتابخانه'));
+    assert.ok(register, 'the stages flowbar has no register-in-library button');
+
+    // the unify button takes a backup and translates legacy steps (items 7+8)
+    const migrate = Array.from(page.doc.querySelectorAll('#mas-drafts-card button'))
+      .find((node) => node.textContent.includes('یکدست‌سازی'));
+    assert.ok(migrate, 'the drafts card has no unify button');
+    migrate.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts.some((item) =>
+      item.url.endsWith('/agent/flows-migrate'))),
+      'the unify button never reached the server');
+
+    // and the library tab is ONE official list: no second flows library (item 5)
+    clickTab(page, 'library');
+    assert.ok(await page.until(() => !!page.doc.querySelector('#mas-tab-library .mas-ops')),
+      'the operations list never rendered');
+    assert.ok(!page.doc.getElementById('mas-flows-lib'),
+      'the library still carries a second (flows) list');
+    // item 10: a card's «مرحله‌ها» shows the real python code, not just a count
+    const summary = page.doc.querySelector('#mas-tab-library .mas-op-steps pre');
+    assert.ok(summary, 'the steps section of a card is missing');
+    assert.ok(summary.textContent.includes("check(goto('https://lmarena.ai/'))"),
+      'the steps section does not show the python code: ' + summary.textContent);
   } finally {
     await page.cleanup();
   }

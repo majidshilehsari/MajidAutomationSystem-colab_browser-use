@@ -31,6 +31,17 @@ import os
 import subprocess
 import time
 from typing import Any, Dict, List, Optional
+from urllib.parse import urlsplit
+
+
+def _same_site(opened: str, wanted: str) -> bool:
+    """Host-level match: chat sites redirect between their own paths freely,
+    but landing on a different host means the wanted URL never opened."""
+    try:
+        return bool(urlsplit(str(opened)).netloc) and \
+            urlsplit(str(opened)).netloc == urlsplit(str(wanted)).netloc
+    except ValueError:
+        return False
 
 
 class AiBrowserError(Exception):
@@ -225,7 +236,8 @@ class AiBrowser:
 
     # -- navigation -----------------------------------------------------
     def open_provider(self, name: str = "deepseek",
-                        url: Optional[str] = None) -> Dict[str, Any]:
+                        url: Optional[str] = None,
+                        wait: float = 45.0) -> Dict[str, Any]:
         profile = self.profile(name)
         url = url or profile.get("url") or ""
         if not url:
@@ -234,7 +246,35 @@ class AiBrowser:
             self.runner.goto_url(url)
         else:
             self._evaluate("location.href = %s" % json.dumps(url))
-        return {"opened": url}
+        # Round 29, item 12: "opened" is only true when the browser PROVES it.
+        # The runner can report success while Chrome never came up or CDP
+        # never answered (dead port, /ai/status available=false, /ai/shot
+        # 500), so the verdict comes from the port itself: CDP must answer
+        # AND the real page must read back as the wanted site.
+        budget = max(1.0, float(wait))
+        deadline = self._clock() + budget
+        while not self.available():
+            if self._clock() >= deadline:
+                raise AiBrowserError(
+                    "the agent browser never became reachable on port %d "
+                    "(waited %.0fs) - CDP is dead, so this open is a failure"
+                    % (self.port, budget))
+            self._sleep(1.0)
+        info: Dict[str, Any] = {}
+        while True:
+            info = self.status(name)
+            page_url = str(info.get("pageUrl") or "")
+            if info.get("available") and page_url and _same_site(page_url, url):
+                break
+            if self._clock() >= deadline:
+                raise AiBrowserError(
+                    "CDP answers on port %d but the page never became %s "
+                    "(last read: available=%s pageUrl=%s error=%s)"
+                    % (self.port, url, info.get("available"),
+                       page_url or "-", info.get("error") or "-"))
+            self._sleep(1.0)
+        return {"opened": url, "pageUrl": str(info.get("pageUrl") or ""),
+                "pageTitle": str(info.get("pageTitle") or ""), "verified": True}
 
     def new_chat(self, name: str = "deepseek") -> bool:
         """Best-effort: a fresh conversation keeps the context from growing."""

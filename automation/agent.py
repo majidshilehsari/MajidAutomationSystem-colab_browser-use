@@ -32,7 +32,7 @@ import threading
 import time
 from typing import Any, Dict, List, Optional
 
-from automation import schema
+from automation import convert, schema
 from automation.agent_store import AgentStore, SCRIPT_APPROVED
 from automation import browser_info
 from automation.ai_browser import AiBrowser, AiBrowserError
@@ -162,6 +162,8 @@ API_INDEX = [
     ("POST", "/agent/operations", "📚 ساخت یا ویرایش یک عملیات (مراحل با schema "
                                   "اعتبارسنجی می‌شوند).",
      "Create or edit an operation; steps are schema-validated."),
+    ("POST", "/agent/flows-migrate", "🔁 یکدست‌سازی: اول پشتیبان می‌گیرد، بعد هر پیش‌نویس و هر عملیات باقی‌مانده با مراحل JSON قدیمی را به مراحل پایتون ترجمه و ذخیره می‌کند (فقط اپراتور).",
+     "Unify the step language: takes a backup first, then translates and saves every draft and operation still carrying legacy JSON steps into python steps (operator only)."),
     ("POST", "/agent/operation-run", "📚 اجرای یک عملیات، همین حالا.",
      "Run an operation right now."),
     ("GET", "/status", "🖥 وضعیت اجرای فعلی اتوماسیون (قدم چندم از چند، منتظر "
@@ -1795,6 +1797,72 @@ class AgentHub:
         return result
 
     # -- the agent's browser --------------------------------------------
+    def flows_migrate(self, actor: str = "operator") -> Dict[str, Any]:
+        """Round 29, items 7+8: one act that unifies the step language.
+
+        First a backup is taken (migration only happens behind a snapshot),
+        then every saved draft flow and every library operation that still
+        carries legacy JSON steps is translated to python steps and saved
+        back. Nothing is deleted here; deletion stays a separate,
+        dependency-checked act.
+        """
+        backup_name = ""
+        backup_error = ""
+        try:
+            info = self.backup_create(actor=actor, label="پیش از یکدست‌سازی")
+            backup_name = str(info.get("name") or "")
+        except Exception as exc:  # noqa: BLE001 - reported honestly, sweep still runs
+            backup_error = str(exc)
+        flows_done: List[str] = []
+        flows_failed: List[str] = []
+        if self.flows is not None:
+            for row in self.flows.list():
+                name = str(row.get("name") or "")
+                if not name:
+                    continue
+                flow = self.flows.get(name)
+                if not isinstance(flow, dict):
+                    continue
+                if not convert.needs_conversion(flow):
+                    continue
+                try:
+                    converted = convert.convert_flow(flow)
+                    normalized, errors = schema.validate_flow(converted)
+                    if errors:
+                        flows_failed.append(name)
+                        continue
+                    self.flows.save(name, normalized)
+                    flows_done.append(name)
+                except Exception:  # noqa: BLE001 - one bad draft never stops the sweep
+                    flows_failed.append(name)
+        ops_done: List[str] = []
+        ops_failed: List[str] = []
+        for op in self.library.list():
+            steps = op.get("steps") or []
+            if not convert.needs_conversion({"steps": steps}):
+                continue
+            try:
+                converted = convert.convert_flow(
+                    {"name": op.get("name") or "", "steps": steps})
+                data = {"name": op.get("name") or "",
+                        "description": op.get("description") or "",
+                        "tags": op.get("tags") or [],
+                        "steps": converted.get("steps") or [],
+                        "permission": op.get("permission") or "",
+                        "scope": op.get("scope") or ""}
+                self.library.save(data, operation_id=str(op.get("id")),
+                                  actor=actor)
+                ops_done.append(str(op.get("name") or op.get("id")))
+            except Exception:  # noqa: BLE001
+                ops_failed.append(str(op.get("name") or op.get("id")))
+        self.store.audit(actor, "flows.migrated",
+                         "backup=%s flows=%d ops=%d failed=%d"
+                         % (backup_name or "-", len(flows_done), len(ops_done),
+                            len(flows_failed) + len(ops_failed)))
+        return {"backup": backup_name, "backupError": backup_error,
+                "flows": flows_done, "flowsFailed": flows_failed,
+                "operations": ops_done, "operationsFailed": ops_failed}
+
     def ai_status(self) -> Dict[str, Any]:
         if self.ai_browser is None:
             return {"available": False, "reason": "this deployment has no agent browser"}
@@ -1862,6 +1930,8 @@ class AgentHub:
             self.ai_browser.screenshot(path)
         except AiBrowserError as exc:
             raise AgentError(str(exc), 502)
+        except Exception as exc:  # noqa: BLE001 - round 29: an honest 502, never a bare 500
+            raise AgentError("the agent screenshot failed: %s" % exc, 502)
         return path
 
     # -- notes ----------------------------------------------------------

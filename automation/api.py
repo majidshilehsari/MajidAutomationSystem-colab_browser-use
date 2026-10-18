@@ -284,6 +284,7 @@ class AutomationApi:
             # the operations library
             ("GET", "/agent/operations", self.route_agent_operations_list),
             ("POST", "/agent/operations", self.route_agent_operations_create),
+            ("POST", "/agent/flows-migrate", self.route_agent_flows_migrate),
             ("PUT", "/agent/operations/*", self.route_agent_operations_update),
             ("DELETE", "/agent/operations/*", self.route_agent_operations_delete),
             ("POST", "/agent/operation-run", self.route_agent_operation_run),
@@ -568,10 +569,32 @@ class AutomationApi:
         saved = self.store.save(name, normalized)
         return json_response(200, {"ok": True, "flow": saved})
 
-    def route_flow_delete(self, *, params: Dict[str, str], **_: Any) -> Response:
-        if not self.store.delete(params["*"]):
-            raise ApiError(404, "no flow named %r" % params["*"])
-        return json_response(200, {"ok": True})
+    def route_flow_delete(self, *, params: Dict[str, str],
+                          query: Optional[Dict[str, List[str]]] = None,
+                          **_: Any) -> Response:
+        name = params["*"]
+        force = str(((query or {}).get("force") or [""])[0] or "") == "1"
+        # Round 29, item 8: a draft that scheduled jobs still target is never
+        # deleted silently - the refusal names the jobs that depend on it.
+        if not force and self.agent is not None:
+            blockers: List[str] = []
+            try:
+                for job in self.agent.store.list_jobs():
+                    payload = job.get("payload") or {}
+                    if (str(payload.get("action") or "flow") == "flow"
+                            and str(job.get("target") or "") == name
+                            and job.get("enabled") is not False):
+                        blockers.append(str(job.get("name") or job.get("id") or "?"))
+            except Exception:  # noqa: BLE001 - no job info, no blocker list
+                blockers = []
+            if blockers:
+                raise ApiError(409,
+                               "این پیش‌نویس هدفِ کار(های) زمان‌بندی‌شدهٔ %s است؛ "
+                               "اول آن‌ها را بردار یا با force=1 حذف کن."
+                               % "، ".join(blockers))
+        if not self.store.delete(name):
+            raise ApiError(404, "no flow named %r" % name)
+        return json_response(200, {"ok": True, "deleted": name})
 
     def route_convert_flow(self, *, body: bytes = b"", **_: Any) -> Response:
         """Round 26: translate a flow written in the old JSON step language
@@ -1233,6 +1256,13 @@ class AutomationApi:
     def route_agent_operations_create(self, *, body: bytes = b"", **_: Any) -> Response:
         return json_response(201, {"operation":
                                    self.agent.operation_save(self.read_json(body))})
+
+    def route_agent_flows_migrate(self, **_: Any) -> Response:
+        """Round 29, items 7+8: backup first, then translate every legacy
+        draft and operation to python steps. Operator-only: it writes to the
+        live library."""
+        self._require_operator()
+        return json_response(200, self.agent.flows_migrate())
 
     def route_agent_operations_update(self, *, body: bytes = b"",
                                       params: Dict[str, str], **_: Any) -> Response:
