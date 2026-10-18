@@ -1192,6 +1192,10 @@ test('round 28: a cell opens its five-tab workspace and runs on its own', async 
     // round 30, item 1: the cell modal is the wide, headed variant
     assert.ok(page.doc.querySelector('.mas-modal .mas-modal-wide'),
       'the cell modal must open in the wide variant');
+    // round 32, item 1: the layer lives INSIDE #mas-root, otherwise every
+    // `#mas-root .mas-…` rule misses it and dialogs look unstyled
+    assert.ok(page.doc.getElementById('mas-root').querySelector('.mas-modal'),
+      'the modal layer must hang inside #mas-root so panel CSS reaches it');
     const head = page.doc.querySelector('.mas-modal .mas-opmodal-head');
     assert.ok(head.textContent.includes('\u0639\u0645\u0644\u06cc\u0627\u062a \u0633\u0644\u0648\u0644\u06cc'));
     assert.ok(head.textContent.includes('\u0633\u0646 \u0631\u0627 \u0628\u06af\u06cc\u0631'));

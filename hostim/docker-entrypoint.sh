@@ -304,6 +304,7 @@ prepare_desktop() {
   if command -v gsettings >/dev/null 2>&1; then
     gsettings set org.gnome.desktop.wm.preferences button-layout ':minimize,maximize,close' 2>/dev/null || true
   fi
+  write_gtk_decoration_layout
   cat > "$fb_dir/apps" <<'APPS' 2>/dev/null \
     || log "WARN: fluxbox apps file not written"
 [app] (class=Google-chrome)
@@ -543,18 +544,41 @@ start_chrome() {
 # top-left once the window manager has mapped it, leaving room for the fluxbox
 # toolbar. Best effort, exactly like start_colab_browser.sh.
 fix_chrome_geometry() {
-  # Round 31, item 2: Chrome hides its OWN min/max/close buttons whenever
-  # the window carries the maximized state (it then assumes the window
-  # manager provides them - and fluxbox, with Deco NONE, provides nothing).
-  # So: no WM title bar, no maximized state; the window is simply pinned to
-  # the work area, identically on every start, and Chrome keeps drawing its
-  # own buttons in the tab strip.
+  # Round 32, item 2: Chrome hides its OWN window buttons while the window
+  # carries the maximized state (it assumes the WM draws them then), and it
+  # reads WHICH buttons to draw from gtk-decoration-layout (written in
+  # prepare_desktop). So: clear any maximized state fluxbox may have added
+  # at map time, then pin the frame to the work area - windowed, identical
+  # on every start, with Chrome's own min/max/close in the tab strip.
   local _attempt
   for _attempt in {1..40}; do
     wmctrl -lx 2>/dev/null | grep -qi 'chrome' && break
     sleep 0.25
   done
+  wmctrl -r 'Google Chrome' -b remove,maximized_vert,maximized_horz 2>/dev/null || true
   wmctrl -r 'Google Chrome' -e 0,0,0,1366,744 2>/dev/null || true
+}
+
+write_gtk_decoration_layout() {
+  # Chrome is a GTK app: the set of window buttons it draws comes from
+  # gtk-decoration-layout, which is EMPTY in a bare container - that is why
+  # the buttons vanished even with no WM title bar. Write the setting the
+  # file way (no gsettings/dconf needed); existing files are extended,
+  # never clobbered.
+  local gtkv ini dir home_dir
+  home_dir="${HOME:-/home/automation}"
+  for gtkv in gtk-3.0 gtk-4.0; do
+    dir="$home_dir/.config/$gtkv"
+    mkdir -p "$dir" 2>/dev/null || continue
+    ini="$dir/settings.ini"
+    if [[ -f "$ini" ]] && grep -q '^gtk-decoration-layout' "$ini" 2>/dev/null; then
+      sed -i 's/^gtk-decoration-layout=.*/gtk-decoration-layout=:minimize,maximize,close/' "$ini" 2>/dev/null
+    elif [[ -f "$ini" ]] && grep -q '^\[Settings\]' "$ini" 2>/dev/null; then
+      sed -i 's/^\[Settings\]/[Settings]\ngtk-decoration-layout=:minimize,maximize,close/' "$ini" 2>/dev/null
+    else
+      printf '[Settings]\ngtk-decoration-layout=:minimize,maximize,close\n' >"$ini" 2>/dev/null
+    fi
+  done
 }
 
 chrome_alive() {

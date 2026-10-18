@@ -953,7 +953,14 @@ function modalCard(children, extraClass = '') {
   }, [el('div', {
     class: 'mas-modal-card mas-card' + (extraClass ? ' ' + extraClass : ''),
   }, children)]);
-  document.body.appendChild(layer);
+  // Round 32, item 1 - the real reason modals looked "unstyled" for three
+  // rounds: nearly every component rule is scoped `#mas-root .mas-…`, and
+  // the layer used to hang off <body>, OUTSIDE #mas-root, so buttons,
+  // inputs and tabs inside any dialog fell back to browser defaults.
+  // The dialog is position:fixed, so living inside #mas-root changes
+  // nothing about where it sits - only which styles reach it.
+  const host = document.getElementById('mas-root') || document.body;
+  host.appendChild(layer);
   return close;
 }
 

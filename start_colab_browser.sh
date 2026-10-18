@@ -5,10 +5,17 @@ SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 STATE_DIR=${COLAB_BROWSER_STATE_DIR:-"$SCRIPT_DIR/.runtime"}
 LOG_DIR="$STATE_DIR/logs"
 PROFILE_DIR="$STATE_DIR/chrome-profile"
+AI_PROFILE_DIR="$STATE_DIR/ai-profile"
 DISPLAY_ID=:1
 VNC_PORT=5901
 NOVNC_PORT=6080
 CDP_PORT=9222
+# Round 32: the coworker agent's own browser (same layout as the container
+# deployment). AI_BROWSER=0 skips it; the agent still works with an HTTP API key.
+AI_BROWSER=${AI_BROWSER:-1}
+AI_DISPLAY=${AI_DISPLAY:-:2}
+AI_CDP_PORT=${AI_CDP_PORT:-9223}
+AI_START_URL=${AI_START_URL:-https://chat.deepseek.com/}
 WEB_ROOT="$STATE_DIR/www"
 AUTOMATION_DIR="$SCRIPT_DIR/automation"
 
@@ -41,6 +48,47 @@ fi
 mkdir -p "$LOG_DIR" "$PROFILE_DIR" "$WEB_ROOT"
 chmod 700 "$STATE_DIR" "$LOG_DIR" "$PROFILE_DIR"
 
+start_ai_browser() {
+  # Round 32: the coworker agent's OWN browser on a second
+  # display, profile and debugging port. Without it, port 9223 stays dead on
+  # Colab and every open_agent(provider='pi') fails honestly but uselessly.
+  # Never fatal: the automation on :1 is the product, this is its aid.
+  if [[ "$AI_BROWSER" != "1" ]]; then
+    printf 'AI_BROWSER=%s: the agent browser stays off.\n' "$AI_BROWSER"
+    return 0
+  fi
+  mkdir -p "$AI_PROFILE_DIR" 2>/dev/null
+  chmod 700 "$AI_PROFILE_DIR" 2>/dev/null
+  if [[ ! -S "/tmp/.X11-unix/X${AI_DISPLAY#:}" ]]; then
+    nohup Xvfb "$AI_DISPLAY" -screen 0 1366x768x24 -ac -noreset \
+      >"$LOG_DIR/ai-xvfb.log" 2>&1 &
+    printf '%s\n' "$!" >"$STATE_DIR/ai-xvfb.pid"
+    for _ in {1..30}; do
+      [[ -S "/tmp/.X11-unix/X${AI_DISPLAY#:}" ]] && break
+      sleep 0.2
+    done
+  fi
+  if [[ ! -S "/tmp/.X11-unix/X${AI_DISPLAY#:}" ]]; then
+    printf 'Warning: the agent display %s did not start; the agent browser stays off.\n' \
+      "$AI_DISPLAY" >&2
+    return 0
+  fi
+  nohup env DISPLAY="$AI_DISPLAY" google-chrome \
+    --no-sandbox \
+    --test-type \
+    --disable-dev-shm-usage \
+    --use-gl=swiftshader \
+    --enable-unsafe-swiftshader \
+    --no-first-run \
+    --no-default-browser-check \
+    --remote-debugging-port="$AI_CDP_PORT" \
+    --user-data-dir="$AI_PROFILE_DIR" \
+    --window-size=1366,768 \
+    "$AI_START_URL" \
+    >"$LOG_DIR/ai-chrome.log" 2>&1 &
+  printf '%s\n' "$!" >"$STATE_DIR/ai-chrome.pid"
+}
+
 start_chrome() {
   # --test-type hides the "unsupported command-line flag: --no-sandbox"
   # warning bar Chrome would otherwise pin to every window (no-sandbox is
@@ -67,18 +115,41 @@ start_chrome() {
 # has mapped the window, pin its frame to the top-left, leaving room at the
 # bottom for the fluxbox toolbar. Best effort; the desktop is disposable.
 fix_chrome_geometry() {
-  # Round 31, item 2: Chrome hides its OWN min/max/close buttons whenever
-  # the window carries the maximized state (it then assumes the window
-  # manager provides them - and fluxbox, with Deco NONE, provides nothing).
-  # So: no WM title bar, no maximized state; the window is simply pinned to
-  # the work area, identically on every start, and Chrome keeps drawing its
-  # own buttons in the tab strip.
+  # Round 32, item 2: Chrome hides its OWN window buttons while the window
+  # carries the maximized state (it assumes the WM draws them then), and it
+  # reads WHICH buttons to draw from gtk-decoration-layout (written below).
+  # So: clear any maximized state fluxbox may have added at map time, then
+  # pin the frame to the work area - windowed, identical on every start,
+  # with Chrome's own min/max/close in the tab strip.
   for _ in {1..40}; do
     env DISPLAY="$DISPLAY_ID" wmctrl -lx 2>/dev/null | grep -qi 'chrome' && break
     sleep 0.25
   done
   env DISPLAY="$DISPLAY_ID" wmctrl -r 'Google Chrome' \
+    -b remove,maximized_vert,maximized_horz 2>/dev/null || true
+  env DISPLAY="$DISPLAY_ID" wmctrl -r 'Google Chrome' \
     -e 0,0,0,1366,744 2>/dev/null || true
+}
+
+write_gtk_decoration_layout() {
+  # Chrome is a GTK app: the set of window buttons it draws comes from
+  # gtk-decoration-layout, which is EMPTY in a bare container - that is why
+  # the buttons vanished even with no WM title bar. Write the setting the
+  # file way (no gsettings/dconf needed); existing files are extended,
+  # never clobbered.
+  local gtkv ini dir
+  for gtkv in gtk-3.0 gtk-4.0; do
+    dir="${HOME:-/root}/.config/$gtkv"
+    mkdir -p "$dir" 2>/dev/null || continue
+    ini="$dir/settings.ini"
+    if [[ -f "$ini" ]] && grep -q '^gtk-decoration-layout' "$ini" 2>/dev/null; then
+      sed -i 's/^gtk-decoration-layout=.*/gtk-decoration-layout=:minimize,maximize,close/' "$ini" 2>/dev/null
+    elif [[ -f "$ini" ]] && grep -q '^\[Settings\]' "$ini" 2>/dev/null; then
+      sed -i 's/^\[Settings\]/[Settings]\ngtk-decoration-layout=:minimize,maximize,close/' "$ini" 2>/dev/null
+    else
+      printf '[Settings]\ngtk-decoration-layout=:minimize,maximize,close\n' >"$ini" 2>/dev/null
+    fi
+  done
 }
 
 stop_owned_process() {
@@ -261,7 +332,9 @@ nohup x11vnc -display "$DISPLAY_ID" -rfbport "$VNC_PORT" -localhost \
   >"$LOG_DIR/x11vnc.log" 2>&1 &
 printf '%s\n' "$!" >"$STATE_DIR/x11vnc.pid"
 
+write_gtk_decoration_layout
 start_chrome
+start_ai_browser
 
 start_automation_server() {
   nohup python3 "$AUTOMATION_DIR/server.py" \
@@ -271,6 +344,7 @@ start_automation_server() {
     --data-dir "$STATE_DIR/automation" \
     --control-script "$SCRIPT_DIR/browser_control.sh" \
     --display "$DISPLAY_ID" --cdp-port "$CDP_PORT" \
+    --ai-cdp-port "$AI_CDP_PORT" --ai-display "$AI_DISPLAY" \
     --token "$AUTOMATION_TOKEN" \
     >"$LOG_DIR/automation.log" 2>&1 &
   printf '%s\n' "$!" >"$STATE_DIR/automation.pid"
