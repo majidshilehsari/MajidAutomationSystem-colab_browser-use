@@ -14,6 +14,9 @@ import re
 import uuid
 from typing import Any, Dict, Iterable, List, Tuple
 
+from . import convert   # round 26: the old JSON step types arrive here and
+                        # leave as python; convert itself imports nothing.
+
 SCHEMA_VERSION = 1
 
 #: Desktop geometry used by the virtual display (see start_colab_browser.sh).
@@ -26,9 +29,28 @@ _ID_RE = re.compile(r"^[A-Za-z0-9_.:-]{1,64}$")
 # allow everything else. Double quotes must pass because generated labels look
 # like: paste "سلام" and Persian names/labels are ordinary user input.
 _NAME_RE = re.compile(r"^[^\x00-\x1f\x7f/\\<>]{0,120}$", re.UNICODE)
+# A step label is display text, not a filename, so it may contain a slash: the
+# labels this module generates itself look like `goto https://lmarena.ai/`, and
+# a rule that rejects its own output makes validate_flow() non-idempotent - a
+# flow could be saved once and never again. Control characters and angle
+# brackets stay forbidden because labels are rendered into HTML and logs.
+_LABEL_RE = re.compile(r"^[^\x00-\x1f\x7f<>]{0,120}$", re.UNICODE)
 
 # Every step type, its required keys and the optional keys it accepts.
 STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
+    # Round 26: ONE step language. The 23 old JSON types (click, type,
+    # wait_for_text, interactive_form, ...) are translated to python at every
+    # entrance - validate_flow, engine.start, /convert - by automation.convert,
+    # so only python is a step type now. STEP_DOCS below still documents the
+    # old vocabulary for anyone reading an archived flow.
+    "python": {"required": ["code"], "optional": ["timeout"]},
+}
+
+# The vocabulary flows and operations USED to be written in (round 25 and
+# older). It is private: validate_flow still checks incoming legacy steps
+# against it - every old error message stays exactly as it was - and then
+# automation.convert translates them into python. Nothing new may be added.
+_LEGACY_STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     "click": {"required": ["x", "y"], "optional": ["button", "modifiers", "clicks"]},
     "double_click": {"required": ["x", "y"], "optional": []},
     "drag": {"required": ["x1", "y1", "x2", "y2"], "optional": ["button"]},
@@ -49,9 +71,41 @@ STEP_TYPES: Dict[str, Dict[str, List[str]]] = {
     # must stay under direct human control. The engine does not solve it.
     "pause_for_human_verification": {"required": ["prompt"], "optional": []},
     "shell": {"required": ["command"], "optional": []},
+    # Round 25: the coworker agent writes real code. A python step carries a
+    # whole program - conditions, loops, and calls into the desk helpers the
+    # other step types use - and a run_operation step nests a library
+    # operation inside a flow.
+    "run_operation": {"required": ["operation"], "optional": []},
+    # The coworker agent's own browser (Xvfb :2 / CDP 9223): open a chat
+    # provider there, or ask it a question and read the answer back. These are
+    # what make an operation like "prompt DeepSeek and get its message" a
+    # sequence of ordinary, inspectable steps.
+    "agent_open": {"required": [], "optional": ["provider", "url"]},
+    "agent_ask": {"required": ["prompt"],
+                  "optional": ["provider", "timeout", "freshChat", "saveAs"]},
+    # Screenshot the desktop and run the captcha chain on it. The outcome is a
+    # proposal unless captcha.autoClick is on, exactly like the captcha pane.
+    "captcha_solve": {"required": [],
+                      "optional": ["label", "autoClick", "notify", "shot"]},
+    # Round 13 - the interactive human-input family from the coworker
+    # agent's letter: a non-blocking notice, a blocking structured form and
+    # the two secret-aware steps. Only schema and non-sensitive results ever
+    # reach logs; secret values live in automation.vault behind a handle.
+    "progress_notice": {"required": ["title"],
+                        "optional": ["message", "level", "durationMs",
+                                     "dismissible", "position"]},
+    "interactive_form": {"required": ["title", "fields"],
+                         "optional": ["message", "submitLabel", "cancelLabel",
+                                      "position", "timeoutMs", "output"]},
+    "secure_input": {"required": ["title", "fields", "policy"],
+                     "optional": ["message", "position", "timeoutMs", "output"]},
+    # handle OR secretRef: a run-scoped reference like "creds.api_key" keeps
+    # handle text out of the flow entirely (round-14 letter, problem 2).
+    "secure_http_request": {"required": ["method", "url"],
+                            "optional": ["handle", "secretRef", "json", "saveAs",
+                                         "timeout"]},
 }
 
-#: Fields accepted on every step regardless of type.
 COMMON_STEP_FIELDS = [
     "id",
     "type",
@@ -61,9 +115,104 @@ COMMON_STEP_FIELDS = [
     "delayAfterMs",
     "requiresConfirmation",
     "continueOnError",
+    # Round 28, item 1: the cell model - user-tunable settings and the
+    # concrete outputs the cell recorded on its last run.
+    "settings",
+    "outputs",
+    "lastReport",
 ]
 
 _INT_COORD_FIELDS = ("x", "y", "x1", "y1", "x2", "y2")
+
+#: What the library tab shows for each step type: the fields it needs, the
+#: fields it accepts, and one line of plain Persian about what it actually
+#: does on the desktop. Keeping this beside the schema means a new step type
+#: cannot ship without its own documentation.
+STEP_DOCS: Dict[str, Dict[str, str]] = {
+    "click": {"fa": "کلیک روی یک نقطهٔ دسکتاپ (مختصات از شناسایی صفحه).",
+              "en": "Click a desktop point (coordinates from page detection)."},
+    "double_click": {"fa": "دوبار کلیک پشت سر هم روی یک نقطه.",
+                     "en": "Double click a point."},
+    "drag": {"fa": "کشیدن از یک نقطه به نقطهٔ دیگر (جابه‌جایی، انتخاب متن).",
+             "en": "Drag from one point to another."},
+    "move": {"fa": "بردن نشانگر به یک نقطه بدون کلیک.",
+             "en": "Move the pointer without clicking."},
+    "type": {"fa": "تایپ متن؛ متن فارسی خودکار از راه clipboard می‌رود.",
+             "en": "Type text; non-ASCII goes through the clipboard."},
+    "paste": {"fa": "چسباندن متن از clipboard با Ctrl+V.",
+              "en": "Paste text from the clipboard with Ctrl+V."},
+    "key": {"fa": "زدن کلیدها، مثل [\"ctrl\", \"a\"] یا [\"Return\"].",
+            "en": "Press keys, e.g. [\"ctrl\", \"a\"] or [\"Return\"]."},
+    "scroll": {"fa": "اسکرول عمودی؛ مقدار مثبت یعنی پایین.",
+               "en": "Vertical scroll; positive means down."},
+    "wait": {"fa": "صبر به میلی‌ثانیه، بدون دست زدن به چیزی.",
+             "en": "Wait a number of milliseconds."},
+    "wait_for_text": {"fa": "صبر تا متنی روی صفحه پیدا (یا با absent غایب) شود.",
+                      "en": "Wait until a text appears (or with absent, disappears)."},
+    "goto_url": {"fa": "باز کردن یک آدرس در مرورگر اتوماسیون.",
+                 "en": "Open a URL in the automation browser."},
+    "focus_window": {"fa": "آوردن پنجره‌ای با این عنوان به جلو.",
+                     "en": "Raise the window with this title."},
+    "screenshot": {"fa": "اسکرین‌شات از دسکتاپ و ثبتش در اسکرین‌شات‌ها.",
+                   "en": "Take a desktop screenshot and archive it."},
+    "capture_text": {"fa": "خواندن متن دیده‌شدهٔ صفحه برای گزارش اجرا.",
+                     "en": "Read the visible page text into the run report."},
+    "pause_for_human_verification": {
+        "fa": "توقف عمدی برای انسان (کپچا، رمز دوم، رضایت‌نامه). سامانه حل نمی‌کند.",
+        "en": "Deliberate pause for a human (CAPTCHA, MFA, consent). Not solved."},
+    "shell": {"fa": "اجرای یک دستور shell روی دسکتاپ (با احتیاط: بدون sandbox).",
+              "en": "Run a shell command on the desktop (no sandbox)."},
+    "python": {"fa": "اجرای کد پایتون با دسترسی کامل به میز: check(click(...))، تایپ، "
+                     "اسکرین‌شات، capture_text، wait_for_text، human_verify، ask_agent، "
+                     "run_operation و log؛ حلقه و شرط آزاد است و متغیرها بین مرحله‌های "
+                     "پایتونِ یک اجرا می‌مانند. ابزارهای مغز: operations_list، "
+                     "brain_note و brain_suggest.",
+               "en": "Run Python code with full desk access: check(click(...)), typing, "
+                     "screenshots, capture_text, wait_for_text, human_verify, ask_agent, "
+                     "run_operation and log; loops and ifs are free and vars survive "
+                     "across the python steps of a run. Brain tools: operations_list, "
+                     "brain_note and brain_suggest."},
+    "run_operation": {"fa": "اجرای یک عملیات از کتابخانه در دل این عملیات (تودرتو).",
+                      "en": "Run a library operation nested inside this operation."},
+    "agent_open": {"fa": "باز کردن سایت چت در مرورگر اختصاصی ایجنت (نمایش :2).",
+                   "en": "Open a chat site in the agent's own browser (display :2)."},
+    "agent_ask": {"fa": "تایپ پرامپت در چت ایجنت، صبر تا پایان پاسخ و آوردن متنش.",
+                  "en": "Type a prompt into the agent chat and read the answer."},
+    "captcha_solve": {"fa": "اسکرین‌شات + زنجیرهٔ حل کپچا؛ خروجی پیشنهاد است.",
+                      "en": "Screenshot + captcha chain; the outcome is a proposal."},
+    "progress_notice": {
+        "fa": "اعلان پیشرفت غیرمسدودکننده: چه شد و مرحلهٔ بعد چیست، بدون توقف اجرا.",
+        "en": "Non-blocking progress notice: what happened and what comes next."},
+    "interactive_form": {
+        "fa": "فرم تعاملی مسدودکننده: انسان متن/انتخاب/تأیید می‌دهد؛ خروجی در "
+              "${form.namespace.field} مراحل بعد.",
+        "en": "Blocking interactive form: a human supplies text/choices/consent; "
+              "output is readable as ${form.namespace.field} later."},
+    "secure_input": {
+        "fa": "ورودی محرمانه: مقدار فقط به خزانهٔ حافظه‌ای می‌رود و step یک handle "
+              "ماسک‌شده می‌گیرد؛ هرگز در لاگ/گزارش/اسکرین‌شات نیست.",
+        "en": "Confidential input: the value goes only to the memory vault and the "
+              "step receives a masked handle; never in logs/reports/screenshots."},
+    "secure_http_request": {
+        "fa": "درخواست HTTP با handle خزانه یا secretRef (مثل creds.api_key): فقط "
+              "میزبان/مسیر/متد مجاز، بدون redirect، با TTL/maxUses و ثبتِ hash "
+              "به‌جای مقدار.",
+        "en": "HTTP request using a vault handle or a secretRef (like "
+              "creds.api_key): allowed host/path/method only, no redirects, "
+              "TTL/maxUses enforced, hash logged instead of the value."},
+}
+
+
+def step_catalog() -> Dict[str, Dict[str, Any]]:
+    """Every step type with its fields and its one-line description."""
+    catalog: Dict[str, Dict[str, Any]] = {}
+    for kind, spec in STEP_TYPES.items():
+        docs = STEP_DOCS.get(kind, {})
+        catalog[kind] = {"required": list(spec["required"]),
+                         "optional": list(spec["optional"]),
+                         "common": list(COMMON_STEP_FIELDS),
+                         "fa": docs.get("fa", ""), "en": docs.get("en", "")}
+    return catalog
 
 
 class SchemaError(Exception):
@@ -101,12 +250,13 @@ def _validate_step(step: Any, index: int, viewport: Dict[str, int], errors: List
         return {}
 
     kind = step.get("type")
-    if not isinstance(kind, str) or kind not in STEP_TYPES:
+    spec = STEP_TYPES.get(kind) if isinstance(kind, str) else None
+    if spec is None and isinstance(kind, str):
+        spec = _LEGACY_STEP_TYPES.get(kind)   # validated, then translated
+    if spec is None:
         _err(errors, "%s: unknown type %r (expected one of %s)"
              % (where, kind, ", ".join(sorted(STEP_TYPES))))
         return {}
-
-    spec = STEP_TYPES[kind]
     for field in spec["required"]:
         if field not in step or step[field] in (None, ""):
             _err(errors, "%s (%s): missing required field '%s'" % (where, kind, field))
@@ -122,6 +272,25 @@ def _validate_step(step: Any, index: int, viewport: Dict[str, int], errors: List
 
     if "button" in step and str(step["button"]) not in BUTTONS:
         _err(errors, "%s (%s): button must be one of left/middle/right/1-5" % (where, kind))
+
+    if "settings" in step:
+        items = step["settings"]
+        if not isinstance(items, list):
+            _err(errors, "%s (%s): settings must be a list of cell parameters" % (where, kind))
+        else:
+            for pos, item in enumerate(items):
+                if not isinstance(item, dict) or not str(item.get("key") or ""):
+                    _err(errors, "%s (%s): settings[%d] needs a 'key'" % (where, kind, pos))
+                    continue
+                cell_kind = str(item.get("kind") or "text")
+                if cell_kind not in ("number", "text", "select", "bool"):
+                    _err(errors, "%s (%s): settings[%d]: kind must be number/text/select/bool"
+                         % (where, kind, pos))
+                if cell_kind == "select" and not isinstance(item.get("options"), list):
+                    _err(errors, "%s (%s): settings[%d]: a select needs an options list"
+                         % (where, kind, pos))
+    if "outputs" in step and not isinstance(step["outputs"], dict):
+        _err(errors, "%s (%s): outputs must be an object" % (where, kind))
 
     if "clicks" in step:
         _validate_int(step, "clicks", "%s (%s)" % (where, kind), errors, 1, 10)
@@ -160,7 +329,7 @@ def _validate_step(step: Any, index: int, viewport: Dict[str, int], errors: List
         if field in step and not isinstance(step[field], bool):
             _err(errors, "%s (%s): '%s' must be true or false" % (where, kind, field))
 
-    if "label" in step and (not isinstance(step["label"], str) or not _NAME_RE.match(step["label"])):
+    if "label" in step and (not isinstance(step["label"], str) or not _LABEL_RE.match(step["label"])):
         _err(errors, "%s (%s): 'label' must be plain text up to 120 characters" % (where, kind))
 
     step_id = step.get("id")
@@ -202,6 +371,11 @@ def _validate_settings(settings: Any, errors: List[str]) -> Dict[str, Any]:
         "repeat": 1,
         "allowShellSteps": False,
         "stepTimeoutMs": 60000,
+        # Round 25: the dedicated error protocol. A failing step can hand the
+        # desk to one library operation (observe, a captcha attempt, a pause
+        # for the human) and - optionally - be retried once after it.
+        "errorOperation": "",
+        "retryAfterProtocol": False,
     }
     if settings is None:
         return defaults
@@ -219,9 +393,12 @@ def _validate_settings(settings: Any, errors: List[str]) -> Dict[str, Any]:
     if "typingMode" in settings and settings["typingMode"] not in ("low", "normal", "fast"):
         _err(errors, "settings: 'typingMode' must be low, normal, or fast")
     for field in ("screenshotAfterEachStep", "screenshotBeforeEachStep",
-                  "screenshotOnError", "stopOnError", "allowShellSteps"):
+                  "screenshotOnError", "stopOnError", "allowShellSteps",
+                  "retryAfterProtocol"):
         if field in settings and not isinstance(settings[field], bool):
             _err(errors, "settings: '%s' must be true or false" % field)
+    if "errorOperation" in settings and not isinstance(settings["errorOperation"], str):
+        _err(errors, "settings: 'errorOperation' must be a string")
     merged = dict(defaults)
     merged.update({k: v for k, v in settings.items() if k in defaults})
     return merged
@@ -321,6 +498,17 @@ def validate_flow(flow: Any) -> Tuple[Dict[str, Any], List[str]]:
         validated = _validate_step(raw, index, resolved_viewport, errors)
         if not validated:
             continue
+        # Round 26: a step still written in the old JSON vocabulary has just
+        # been validated by its own rules; now it is translated to python, so
+        # everything downstream (engine, panel, archive) speaks one language.
+        if str(validated.get("type") or "") in convert.CONVERTERS:
+            try:
+                validated = convert.convert_step(validated)
+            except Exception as exc:  # noqa: BLE001 - a broken legacy step
+                _err(errors, "steps[%d] (%s): cannot be written as python: %s"
+                     % (index, raw.get("type") if isinstance(raw, dict) else "?",
+                        exc))
+                continue
         step = normalize_step(validated, index)
         if step["id"] in seen_ids:
             step["id"] = new_id()
@@ -330,8 +518,8 @@ def validate_flow(flow: Any) -> Tuple[Dict[str, Any], List[str]]:
     settings = _validate_settings(flow.get("settings"), errors)
 
     if not settings["allowShellSteps"]:
-        for index, step in enumerate(normalized_steps):
-            if step["type"] == "shell":
+        for index, raw in enumerate(steps):
+            if isinstance(raw, dict) and raw.get("type") == "shell":
                 _err(errors, "steps[%d]: shell steps are disabled; set settings.allowShellSteps to enable them" % index)
 
     normalized = {

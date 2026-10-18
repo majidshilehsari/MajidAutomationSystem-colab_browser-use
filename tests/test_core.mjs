@@ -53,18 +53,33 @@ test('every step definition has defaults and a label', () => {
   }
 });
 
+/* ------------------------------------------------------------------ *
+ * Round 26: one step language. The editor knows exactly one type -
+ * python - and everything that arrives in the old JSON vocabulary is
+ * translated by the server (POST /convert) before the panel sees it.
+ * ------------------------------------------------------------------ */
+
+test('the editor knows exactly one step type: python', () => {
+  assert.deepEqual(STEP_DEFS.map((def) => def.type), ['python']);
+  assert.ok(stepDef('python'));
+  for (const legacy of ['agent_open', 'agent_ask', 'captcha_solve', 'click',
+                        'goto_url', 'pause_for_human_verification']) {
+    assert.equal(stepDef(legacy), null, `${legacy} must not be editable anymore`);
+  }
+});
+
 test('labels are readable', () => {
-  assert.equal(labelFor(createStep('click', { x: 10, y: 20 })), 'click 10,20');
-  assert.equal(labelFor(createStep('click', { x: 1, y: 2, button: 'right' })), 'click 1,2 right');
-  assert.equal(labelFor(createStep('key', { keys: ['ctrl', 'l'] })), 'key ctrl+l');
-  assert.equal(labelFor(createStep('wait', { ms: 1500 })), 'wait 1500ms');
-  assert.equal(labelFor(createStep('scroll', { amount: -3 })), 'scroll -3');
-  assert.equal(labelFor(createStep('pause_for_human_verification')),
-               'pause for human verification');
-  assert.equal(labelFor(createStep('goto_url', { url: 'https://example.com' })),
-               'open https://example.com');
-  const long = labelFor(createStep('paste', { text: 'x'.repeat(60) }));
-  assert.ok(long.length < 40, `label should be truncated: ${long}`);
+  assert.equal(labelFor(createStep('python', { code: 'check(click(10, 20))' })),
+               'check(click(10, 20))');
+  // The first real line of code is the label; comments do not count.
+  const multiline = labelFor(createStep('python', {
+    code: '# a note to myself\ncheck(goto(\'https://example.com\'))\nwait(1)',
+  }));
+  assert.equal(multiline, "check(goto('https://example.com'))");
+  assert.equal(labelFor(createStep('python')), 'پایتون',
+               'empty code still reads as something');
+  const long = labelFor(createStep('python', { code: `check(${'x'.repeat(80)})` }));
+  assert.ok(long.length <= 45, `label should be truncated: ${long}`);
 });
 
 test('compact drops the values that must not reach appendChild', () => {
@@ -81,44 +96,33 @@ test('compact drops the values that must not reach appendChild', () => {
 
 test('validateFlow accepts a good flow and rejects a bad one', () => {
   const flow = emptyFlow('ok');
-  flow.steps = [createStep('click', { x: 10, y: 10 }), createStep('key', { keys: ['Return'] })];
+  flow.steps = [createStep('python', { code: 'check(click(10, 10))' }),
+                createStep('python', { code: "check(press_key(['Return']))" })];
   assert.deepEqual(validateFlow(flow, VP), []);
 
   const bad = emptyFlow('bad');
   bad.steps = [
-    createStep('click', { x: 5000, y: 10 }),
+    createStep('python', { code: '   ' }),
     { id: 'x', type: 'teleport' },
-    createStep('key', { keys: [] }),
-    createStep('goto_url', { url: 'example.com' }),
-    createStep('wait', { ms: 0 }),
+    // old vocabulary: the server converts it before it ever reaches here,
+    // so locally it must be refused honestly instead of half-rendered
+    { id: 'y', type: 'click', x: 1, y: 2 },
   ];
   const errors = validateFlow(bad, VP);
-  assert.ok(errors.some((e) => e.includes('outside the 1366x768 desktop')));
-  assert.ok(errors.some((e) => e.includes('unknown step type')));
-  assert.ok(errors.some((e) => e.includes('keys must not be empty')));
-  assert.ok(errors.some((e) => e.includes('scheme')));
-  assert.ok(errors.some((e) => e.includes('ms must be positive')));
+  assert.ok(errors.some((e) => e.includes('code must not be empty')));
+  assert.equal(errors.filter((e) => e.includes('unknown step type')).length, 2);
 });
 
-test('validateFlow accepts fixed typing modes and deliberate human pauses', () => {
-  const good = emptyFlow('safe handoff');
+test('validateFlow still guards the flow-level typing mode', () => {
+  const good = emptyFlow('safe');
   good.settings.typingMode = 'low';
-  good.steps = [
-    createStep('type', { text: 'hello', typingMode: 'fast' }),
-    createStep('pause_for_human_verification', { prompt: 'Review this step yourself.' }),
-  ];
+  good.steps = [createStep('python', { code: "check(type_text('hello', mode='fast'))" })];
   assert.deepEqual(validateFlow(good, VP), []);
 
   const bad = emptyFlow('bad mode');
   bad.settings.typingMode = 'random';
-  bad.steps = [createStep('type', { text: 'hello', typingMode: 'stealth' })];
-  const errors = validateFlow(bad, VP);
-  assert.ok(errors.some((error) => error.includes('settings: typingMode')));
-  assert.ok(errors.some((error) => error.includes('typingMode must be low, normal, or fast')));
-
-  const longPrompt = emptyFlow('long prompt');
-  longPrompt.steps = [createStep('pause_for_human_verification', { prompt: 'x'.repeat(1001) })];
-  assert.ok(validateFlow(longPrompt, VP).some((error) => error.includes('1000 characters')));
+  bad.steps = [createStep('python', { code: 'wait(1)' })];
+  assert.ok(validateFlow(bad, VP).some((error) => error.includes('settings: typingMode')));
 });
 
 test('keysFromText and keysToText round trip', () => {
@@ -139,20 +143,20 @@ test('moveStep reorders and ignores out of range targets', () => {
 test('promptSteps drops schema defaults', () => {
   const flow = emptyFlow();
   flow.steps = [
-    createStep('click', { x: 1, y: 2 }),
-    createStep('click', { x: 3, y: 4, enabled: false }),
-    createStep('paste', { text: 'hi', requiresConfirmation: true }),
+    createStep('python', { code: 'wait(1)' }),
+    createStep('python', { code: 'wait(2)', enabled: false }),
+    createStep('python', { code: 'check(click(1, 2))', requiresConfirmation: true }),
   ];
-  const compact = promptSteps(flow);
-  assert.equal('enabled' in compact[0], false);
-  assert.equal(compact[1].enabled, false);
-  assert.equal(compact[2].requiresConfirmation, true);
-  assert.equal(compact[0].label, 'click 1,2', 'labels stay: they help the AI');
+  const compacted = promptSteps(flow);
+  assert.equal('enabled' in compacted[0], false);
+  assert.equal(compacted[1].enabled, false);
+  assert.equal(compacted[2].requiresConfirmation, true);
+  assert.equal(compacted[0].label, 'wait(1)', 'labels stay: they help the AI');
 });
 
 test('flowAsJson is valid JSON that the server accepts', () => {
   const flow = emptyFlow('demo');
-  flow.steps = [createStep('click', { x: 5, y: 6 })];
+  flow.steps = [createStep('python', { code: 'check(click(5, 6))' })];
   const parsed = JSON.parse(flowAsJson(flow));
   assert.equal(parsed.schema, 1);
   assert.equal(parsed.steps.length, 1);
@@ -173,20 +177,34 @@ test('extractJson survives braces inside strings', () => {
   assert.deepEqual(parsed, { text: 'a } b', n: 1 });
 });
 
-test('normaliseImportedFlow turns an AI reply into a runnable flow', () => {
+test('normaliseImportedFlow turns a converted AI reply into a runnable flow', () => {
   const { flow, errors } = normaliseImportedFlow({
     name: 'search',
     steps: [
-      { type: 'goto_url', url: 'https://example.com' },
-      { type: 'click', x: 100, y: 200 },
-      { type: 'key', keys: 'Return' },
+      { type: 'python', code: "check(goto('https://example.com'))" },
+      { type: 'python', code: 'check(click(100, 200))' },
+      { type: 'python', code: "check(press_key(['Return']))" },
       { type: 'fly' },
     ],
   }, VP);
   assert.equal(flow.name, 'search');
   assert.equal(flow.steps.length, 3, 'the unknown step is dropped');
-  assert.deepEqual(flow.steps[2].keys, ['Return'], 'a string keys value is promoted');
-  assert.ok(flow.steps.every((s) => s.id && s.enabled === true));
+  assert.ok(flow.steps.every((s) => s.id && s.enabled === true && s.label));
+  assert.ok(errors.some((e) => e.includes('unknown type')));
+});
+
+test('normalising drops the old vocabulary honestly', () => {
+  // The panel converts through the server first; if an old flow ever skips
+  // that, the normaliser must say so instead of silently accepting it.
+  const { flow, errors } = normaliseImportedFlow({
+    name: 'اتصال به ایجنت',
+    steps: [
+      { type: 'agent_open', provider: 'lmarena' },
+      { type: 'python', code: 'wait(1.5)' },
+    ],
+  });
+  assert.equal(flow.steps.length, 1);
+  assert.equal(flow.steps[0].type, 'python');
   assert.ok(errors.some((e) => e.includes('unknown type')));
 });
 
@@ -215,4 +233,14 @@ test('translate falls back to English then to the key', () => {
   assert.equal(translate('en', 'run'), 'Run');
   assert.equal(translate('de', 'run'), 'Run');
   assert.equal(translate('fa', 'noSuchKey'), 'noSuchKey');
+});
+
+test('the round-26 wording is in both languages', () => {
+  // «مرحله» replaced «گام», and the scope vocabulary exists on both sides.
+  assert.equal(translate('fa', 'steps'), 'مرحله');
+  assert.equal(translate('fa', 'stepNo'), 'مرحلهٔ');
+  assert.equal(translate('en', 'stepNo'), 'Step');
+  assert.equal(translate('fa', 'scopeBrain'), 'اختصاصی مغز');
+  assert.equal(translate('en', 'scopeBrain'), 'Brain only');
+  assert.ok(translate('fa', 'chatFlowApplied').includes('مستقیم به مراحل'));
 });

@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html lang="fa" dir="rtl" data-theme="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex">
+<title>پنل اقدام انسانی</title>
+<!--
+  Round 27, item 6: the third panel.
+
+  A dedicated page for the moments the automation needs a human: security
+  challenges, confirmations, interactive forms, secret inputs and the brain's
+  open suggestions. It talks to the very same API on the very same port as the
+  desktop view and the big automation panel, and all three read the one
+  run-state - so acting here advances the flow exactly like acting there.
+
+  The asset URLs below get a ?v=<hash> appended by automation/server.py on
+  every start, so a new build is never served from the browser cache.
+-->
+<link rel="stylesheet" href="automation.css">
+</head>
+<body class="mas-human">
+  <script type="module" src="automation.js"></script>
+</body>
+</html>

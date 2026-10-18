@@ -305,8 +305,6 @@ GET    /automation/api/artifact?path=  read a PNG from the runtime directory
 POST   /automation/api/detect          detect the current page
 GET    /automation/api/pages           detected page memory
 GET    /automation/api/pages/ID        one detection in full
-GET    /automation/api/guide           the AI guide as markdown
-POST   /automation/api/prompt          assemble the full AI prompt
 ```
 
 Every route except `info` needs the `X-Automation-Token` header.

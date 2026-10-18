@@ -164,7 +164,6 @@ POST /automation/api/run       {"flow": {...}} validate then start
 POST /automation/api/control   {"action": "pause" | "resume" | "stop" | "confirm"}
 POST /automation/api/detect    screenshot, windows, page text, DOM elements
 GET  /automation/api/pages     every page detected so far
-GET  /automation/api/guide     the AI guide as markdown
 ```
 
 A step with `"requiresConfirmation": true` stops the run in the `waiting` state
@@ -185,6 +184,39 @@ retry consequential actions blindly, because that can duplicate a submission.
 to localhost). When that port is unreachable, detection degrades to a screenshot
 plus the window list plus the clipboard text, and `cdp` is `false` in the
 snapshot.
+
+### Cells (round 28)
+
+The stages tab is a Colab-style cell list: every cell is one python step and
+shows only its title, wearing green (done), yellow (running / watchdog) or red
+(error). Clicking a cell opens five tabs - user settings, the Persian text
+report, the long explanation, the concrete outputs and the script - and each
+cell has its own play/pause/stop. Cell code reads user settings through
+`params` / `S('key', default)` (seconds, never milliseconds), records concrete
+values with `set_output('key', value)`, and a watchdog cell freezes every
+operation with `pause_all('reason')` until a human resolves the moment. Full
+details: `automation/ai_guide.md` (section «سلول‌ها»).
+
+### One library, drafts in stages (round 29)
+
+Round 30 adds the official wish API: `POST /agent/ui/load-flow` with
+`{"name": "<draft>"}` asks the human's panel to open that draft in THEIR
+stages tab (never runs it). The name must exist in `/flows`; the answer is
+`{ok, id, name, queued}` and `GET /agent/ui/load-flow/<id>` reports
+queued/claimed/loaded/rejected/not_found/expired - a human may reject the
+load (unsaved changes), so never assume `loaded`.
+
+The only official operations list is `GET/POST /agent/operations` (the
+library). Saved flows under `/flows` are DRAFTS of the stages tab: build and
+test there, then register the successful operation in the library. Every
+operation - factory, agent-made or brain-only - speaks the same python-step
+schema; only `builtin`, `scope` and `permission` differ. `POST
+/agent/flows-migrate` takes a backup first and then translates every legacy
+JSON step (drafts and operations alike) into python steps. `DELETE
+/flows/{name}` is refused with 409 while a scheduled job still targets that
+draft (pass `force=1` to delete anyway). And `open_agent()` only reports
+success after CDP answers on the agent port AND the wanted site reads back
+from the real page - a dead port is a failure, never rc=0.
 
 ## Stop the browser
 
