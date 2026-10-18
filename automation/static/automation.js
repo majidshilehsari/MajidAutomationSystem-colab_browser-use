@@ -958,6 +958,98 @@ function modalCard(children, extraClass = '') {
 }
 
 /* ------------------------------------------------------------------ *
+ * Round 31, item 3: one Persian first-run dialog for everything the
+ * human pastes once - panel password, Telegram bot token and, behind a
+ * toggle (because sometimes Supabase is not wanted), the connection.
+ * ------------------------------------------------------------------ */
+
+function openOnboardingModal() {
+  let supaOn = true;
+  const tokenInput = el('input', {
+    class: 'mas-input', type: 'password', dir: 'ltr',
+    placeholder: t('onbTokenPh'), id: 'mas-onb-token',
+  });
+  const tgInput = el('input', {
+    class: 'mas-input', dir: 'ltr', placeholder: t('onbTgPh'),
+    id: 'mas-onb-tg',
+  });
+  const supaConn = el('textarea', {
+    class: 'mas-input mas-area', rows: '3', dir: 'ltr',
+    placeholder: t('supaConnPh'), id: 'mas-onb-supa',
+  });
+  const supaWrap = el('label', { class: 'mas-field', id: 'mas-onb-supa-wrap' },
+    [el('span', { text: '☁️ ' + t('onbSupaConn') }), supaConn]);
+  const toggle = button('☁️ ' + t('onbSupaOn'), () => {
+    supaOn = !supaOn;
+    toggle.classList.toggle('mas-primary', supaOn);
+    toggle.textContent = supaOn ? '☁️ ' + t('onbSupaOn') : '☁️ ' + t('onbSupaOff');
+    supaWrap.style.display = supaOn ? '' : 'none';
+  }, { class: 'mas-btn mas-primary', id: 'mas-onb-supa-toggle' });
+
+  function finish() {
+    // the per-page supabase nag must not double up with this dialog
+    supaOnboardTried = true;
+    try { localStorage.setItem('mas.onboardDone', '1'); } catch (error) { /* private mode */ }
+  }
+
+  async function save() {
+    const tok = tokenInput.value.trim();
+    if (!tok) { toast(t('onbTokenEmpty'), 'warn'); return; }
+    setToken(tok);
+    const body = {};
+    if (tgInput.value.trim()) body['telegram.botToken'] = tgInput.value.trim();
+    if (!supaOn) body['supabase.enabled'] = false;
+    try {
+      if (Object.keys(body).length) {
+        await api('/agent/settings', { method: 'POST', body });
+      }
+    } catch (error) { toast(error.message, 'error'); }
+    let restarting = false;
+    if (supaOn && supaConn.value.trim()) {
+      try {
+        const res = await api('/supabase/connect', { method: 'POST',
+          body: { connection: supaConn.value.trim() } });
+        restarting = !!res.restarting;
+        toast(res.restored ? t('supaConnectedRestore') : t('supaConnected'), 'ok');
+      } catch (error) { toast(error.message, 'error'); }
+    }
+    finish();
+    close();
+    toast(t('onbDone'), 'ok');
+    if (restarting) supaReloadSoon();
+  }
+
+  const close = modalCard([
+    el('div', { class: 'mas-opmodal-head' }, [
+      el('span', { class: 'mas-opmodal-ico', text: '🔐' }),
+      el('div', {}, [
+        el('b', { text: t('onbTitle') }),
+        el('p', { class: 'mas-hint', text: t('onbHint') }),
+      ]),
+    ]),
+    el('label', { class: 'mas-field' },
+      [el('span', { text: '🔑 ' + t('onbToken') }), tokenInput]),
+    el('label', { class: 'mas-field' },
+      [el('span', { text: '🤖 ' + t('onbTg') }), tgInput]),
+    el('div', { class: 'mas-row mas-wrap' }, [toggle]),
+    supaWrap,
+    el('div', { class: 'mas-opmodal-foot' }, [
+      button('💾 ' + t('onbSave'), save,
+        { class: 'mas-btn mas-primary', id: 'mas-onb-save' }),
+      button(t('onbSkip'), () => { finish(); close(); }, { id: 'mas-onb-skip' }),
+    ]),
+  ], 'mas-modal-wide');
+  return close;
+}
+
+function maybeOpenOnboarding() {
+  // First run only: no saved panel password and no "done" flag yet.
+  if (state.token) return;
+  try { if (localStorage.getItem('mas.onboardDone')) return; } catch (error) { return; }
+  openOnboardingModal();
+}
+
+/* ------------------------------------------------------------------ *
  * Supabase onboarding: ask for the connection when the panel opens
  * ------------------------------------------------------------------ */
 
@@ -4810,6 +4902,7 @@ function start() {
   setPanelOpen(true);
   selectTab(initialTab());
   consumeFlowUrlParams();
+  maybeOpenOnboarding();
   // Round 28, item 6: a flow still saved in the old JSON step language
   // (round 25 or older) is translated to python the first time the panel
   // opens with a token. The server also translates on every run and save;

@@ -67,16 +67,18 @@ start_chrome() {
 # has mapped the window, pin its frame to the top-left, leaving room at the
 # bottom for the fluxbox toolbar. Best effort; the desktop is disposable.
 fix_chrome_geometry() {
-  # Round 30, item 2: fluxbox draws NO title bar for Chrome (see the apps
-  # file written just before the window manager starts), so the browser's
-  # own tab strip is the only top edge. Keep the window maximized in the
-  # work area on every start, so the look is identical every single time.
+  # Round 31, item 2: Chrome hides its OWN min/max/close buttons whenever
+  # the window carries the maximized state (it then assumes the window
+  # manager provides them - and fluxbox, with Deco NONE, provides nothing).
+  # So: no WM title bar, no maximized state; the window is simply pinned to
+  # the work area, identically on every start, and Chrome keeps drawing its
+  # own buttons in the tab strip.
   for _ in {1..40}; do
     env DISPLAY="$DISPLAY_ID" wmctrl -lx 2>/dev/null | grep -qi 'chrome' && break
     sleep 0.25
   done
   env DISPLAY="$DISPLAY_ID" wmctrl -r 'Google Chrome' \
-    -b add,maximized_vert,maximized_horz 2>/dev/null || true
+    -e 0,0,0,1366,744 2>/dev/null || true
 }
 
 stop_owned_process() {
@@ -230,12 +232,19 @@ fi
 # Round 30, item 2: one consistent desktop - Chrome carries its own tab
 # strip and window buttons everywhere; the window manager never adds a
 # second title bar above it (that bar appeared on some starts, not others).
+# Round 31, item 2: Chrome draws its own window buttons from the GNOME
+# button-layout setting; on a bare container it is empty and the buttons
+# vanish. Best effort - without gsettings the pin above still keeps one
+# identical look on every start.
+if command -v gsettings >/dev/null 2>&1; then
+  gsettings set org.gnome.desktop.wm.preferences button-layout ':minimize,maximize,close' 2>/dev/null || true
+fi
+
 FB_APPS_HOME="${HOME:-/root}"
 mkdir -p "$FB_APPS_HOME/.fluxbox" 2>/dev/null
 cat >"$FB_APPS_HOME/.fluxbox/apps" <<'APPSEOF'
 [app] (class=Google-chrome)
     [Deco] {NONE}
-    [Maximized] {YES}
 [end]
 APPSEOF
 

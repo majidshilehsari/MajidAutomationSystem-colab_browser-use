@@ -2144,34 +2144,35 @@ body.mas-standalone #mas-root .mas-toast {
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
 }
 
-/* Round 30, item 1: the operation editor and the cell modal get room to
-   breathe - one wide card, a headed identity block, numbered step cards
-   with monospace python areas and a footer bar for the save decision. */
+/* Round 30/31, item 1: the operation editor and the cell modal get room to
+   breathe - and they speak the panel's own design language: the same
+   --mas-line borders, --surface-2/-3 fills, mas-btn buttons and 10px radii
+   the rest of the UI uses, just in a wider card. */
 .mas-modal-card.mas-modal-wide {
-  width: min(960px, 100%);
-  max-height: 90vh;
-  padding: 22px 26px;
-  border-radius: 20px;
+  width: min(1080px, 100%);
+  max-height: 92vh;
+  padding: 24px 28px;
+  border-radius: 18px;
 }
 #mas-root .mas-opmodal-head {
   display: flex;
   align-items: center;
   gap: 14px;
-  padding: 4px 2px 14px;
-  margin-bottom: 16px;
-  border-bottom: 1px solid var(--line);
+  padding: 2px 2px 16px;
+  margin-bottom: 18px;
+  border-bottom: 1px solid var(--mas-line);
 }
-#mas-root .mas-opmodal-head b { font-size: 17px; }
-#mas-root .mas-opmodal-head .mas-hint { margin: 2px 0 0; }
+#mas-root .mas-opmodal-head b { font-size: 18px; color: var(--mas-text); }
+#mas-root .mas-opmodal-head .mas-hint { margin: 3px 0 0; }
 #mas-root .mas-opmodal-ico {
   display: grid;
   place-items: center;
-  width: 44px;
-  height: 44px;
+  width: 46px;
+  height: 46px;
   font-size: 22px;
-  border-radius: 14px;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface-3);
+  border: 1px solid var(--mas-line);
 }
 #mas-root .mas-opmodal-grid {
   display: grid;
@@ -2188,25 +2189,28 @@ body.mas-standalone #mas-root .mas-toast {
   gap: 12px;
   margin: 18px 0 10px;
 }
+#mas-root .mas-opmodal-steps-head b { color: var(--mas-text); }
 #mas-root .mas-opmodal-steps {
   display: flex;
   flex-direction: column;
   gap: 12px;
-  max-height: 46vh;
+  max-height: 56vh;
   overflow: auto;
   padding: 2px;
 }
 #mas-root .mas-opmodal-step {
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  background: var(--surface);
+  border: 1px solid var(--mas-line);
+  border-radius: 10px;
+  background: var(--surface-2);
   padding: 12px 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
 }
 #mas-root .mas-opmodal-step-head {
   display: flex;
   align-items: center;
   gap: 10px;
-  margin-bottom: 10px;
 }
 #mas-root .mas-opmodal-step-head .mas-input { flex: 1; }
 #mas-root .mas-opmodal-no {
@@ -2214,19 +2218,20 @@ body.mas-standalone #mas-root .mas-toast {
   place-items: center;
   min-width: 28px;
   height: 28px;
-  border-radius: 999px;
-  background: var(--surface-2);
-  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--surface-3);
+  border: 1px solid var(--mas-line);
   font-weight: 700;
+  color: var(--mas-text);
 }
 #mas-root .mas-opmodal-code {
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
   direction: ltr;
   text-align: left;
   font-size: 12.5px;
-  line-height: 1.55;
+  line-height: 1.6;
   background: var(--bg-solid);
-  border-radius: 10px;
+  border-radius: 8px;
+  min-height: 96px;
 }
 #mas-root .mas-opmodal-foot {
   display: flex;
@@ -2234,7 +2239,7 @@ body.mas-standalone #mas-root .mas-toast {
   gap: 10px;
   margin-top: 16px;
   padding-top: 14px;
-  border-top: 1px solid var(--line);
+  border-top: 1px solid var(--mas-line);
 }
 
 

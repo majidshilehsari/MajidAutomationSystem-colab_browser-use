@@ -301,11 +301,13 @@ prepare_desktop() {
   mkdir -p "$fb_dir" 2>/dev/null || true
   # Round 30, item 2: Chrome carries its own tab strip and window buttons on
   # every start; fluxbox never stacks a second title bar above the browser.
+  if command -v gsettings >/dev/null 2>&1; then
+    gsettings set org.gnome.desktop.wm.preferences button-layout ':minimize,maximize,close' 2>/dev/null || true
+  fi
   cat > "$fb_dir/apps" <<'APPS' 2>/dev/null \
     || log "WARN: fluxbox apps file not written"
 [app] (class=Google-chrome)
     [Deco] {NONE}
-    [Maximized] {YES}
 [end]
 APPS
   if [[ -f "$APP_DIR/hostim/fluxbox-style" ]]; then
@@ -541,16 +543,18 @@ start_chrome() {
 # top-left once the window manager has mapped it, leaving room for the fluxbox
 # toolbar. Best effort, exactly like start_colab_browser.sh.
 fix_chrome_geometry() {
-  # Round 30, item 2: fluxbox draws NO title bar for Chrome (see the apps
-  # file written in prepare_desktop), so the browser's own tab strip is the
-  # only top edge; keep the window maximized in the work area instead of
-  # pinning a hand-measured geometry.
+  # Round 31, item 2: Chrome hides its OWN min/max/close buttons whenever
+  # the window carries the maximized state (it then assumes the window
+  # manager provides them - and fluxbox, with Deco NONE, provides nothing).
+  # So: no WM title bar, no maximized state; the window is simply pinned to
+  # the work area, identically on every start, and Chrome keeps drawing its
+  # own buttons in the tab strip.
   local _attempt
   for _attempt in {1..40}; do
     wmctrl -lx 2>/dev/null | grep -qi 'chrome' && break
     sleep 0.25
   done
-  wmctrl -r 'Google Chrome' -b add,maximized_vert,maximized_horz 2>/dev/null || true
+  wmctrl -r 'Google Chrome' -e 0,0,0,1366,744 2>/dev/null || true
 }
 
 chrome_alive() {

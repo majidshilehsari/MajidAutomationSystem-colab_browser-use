@@ -518,7 +518,7 @@ async function mount({ readyStateComplete = true, standalone = true, flow = null
                       status: statusPayload = null, noAgent = false,
                       clipText = null, supaEmpty = false, supaOn = false,
                       uiPrefs = null, token = null, human = false,
-                      pageUrl = null, loadQueue = null } = {}) {
+                      pageUrl = null, loadQueue = null, onboard = false } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -580,6 +580,9 @@ async function mount({ readyStateComplete = true, standalone = true, flow = null
   // The sidebar reads its flow from localStorage at import time, so seed first.
   if (flow) window.localStorage.setItem('mas.flow', JSON.stringify(flow));
   if (token) window.localStorage.setItem('mas.token', token);
+  // Round 31: every old test is a "returning user"; only the onboarding
+  // tests ask for the true first-run experience.
+  if (!onboard) window.localStorage.setItem('mas.onboardDone', '1');
 
   const moduleUrl = `../automation/static/automation.js?run=${Math.random()}`;
   let importError = null;
@@ -3837,6 +3840,73 @@ test('round 30: panel.html?tab=flow&flow=<name> opens that draft once', async ()
     assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'flow');
     assert.ok(!page.posts.some((p) => p.url.endsWith('/run')),
       'a URL parameter must never run anything');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 31: first run opens the Persian onboarding modal with a supabase toggle', async () => {
+  const page = await mount({ onboard: true });
+  try {
+    assert.ok(await page.until(() => !!page.doc.querySelector('.mas-modal')),
+      'the onboarding modal never opened on first run');
+    const modal = page.doc.querySelector('.mas-modal');
+    assert.ok(modal.textContent.includes('خوش آمدی'),
+      'the onboarding must greet in Persian');
+    assert.ok(modal.querySelector('.mas-modal-wide'),
+      'the onboarding must use the wide, designed card');
+    const toggle = page.doc.getElementById('mas-onb-supa-toggle');
+    assert.ok(toggle, 'the supabase toggle is missing');
+    assert.ok(toggle.classList.contains('mas-primary'),
+      'supabase must default to ON (the common case)');
+    // toggle OFF: the connection field hides and enabled:false persists
+    toggle.dispatchEvent(new page.window.Event('click'));
+    assert.ok(!page.doc.getElementById('mas-onb-supa-toggle')
+      .classList.contains('mas-primary'), 'the toggle must flip off');
+    assert.equal(page.doc.getElementById('mas-onb-supa-wrap').style.display,
+      'none', 'with the toggle off the connection field must hide');
+    page.doc.getElementById('mas-onb-token').value = VALID_TOKEN;
+    page.doc.getElementById('mas-onb-save')
+      .dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => !page.doc.querySelector('.mas-modal')),
+      'saving must close the onboarding');
+    assert.equal(page.window.localStorage.getItem('mas.token'), VALID_TOKEN,
+      'the panel password must land in localStorage');
+    assert.ok(await page.until(() => page.posts.some((p) =>
+      p.url.endsWith('/agent/settings')
+      && JSON.parse(p.body)['supabase.enabled'] === false)),
+      'the OFF toggle must persist supabase.enabled=false');
+    assert.ok(!page.posts.some((p) => p.url.endsWith('/supabase/connect')),
+      'with the toggle off nothing may connect to supabase');
+    assert.equal(page.window.localStorage.getItem('mas.onboardDone'), '1',
+      'the dialog must never nag a second time');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 31: onboarding with supabase ON sends the connection string', async () => {
+  const page = await mount({ onboard: true });
+  try {
+    assert.ok(await page.until(() => !!page.doc.querySelector('.mas-modal')),
+      'the onboarding modal never opened');
+    page.doc.getElementById('mas-onb-token').value = VALID_TOKEN;
+    page.doc.getElementById('mas-onb-tg').value = '123:ABC';
+    page.doc.getElementById('mas-onb-supa').value = 'https://x.supabase.co|sb_key';
+    page.doc.getElementById('mas-onb-save')
+      .dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts.some((p) =>
+      p.url.endsWith('/supabase/connect')
+      && String(JSON.parse(p.body).connection).includes('sb_key'))),
+      'the connection string must reach /supabase/connect');
+    assert.ok(await page.until(() => page.posts.some((p) =>
+      p.url.endsWith('/agent/settings')
+      && JSON.parse(p.body)['telegram.botToken'] === '123:ABC')),
+      'the telegram token must persist through /agent/settings');
+    assert.ok(await page.until(() => !page.doc.querySelector('.mas-modal')),
+      'saving must close the onboarding');
     assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
