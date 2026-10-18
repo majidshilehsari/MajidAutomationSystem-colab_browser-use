@@ -199,6 +199,13 @@ details: `automation/ai_guide.md` (section «سلول‌ها»).
 
 ### One library, drafts in stages (round 29)
 
+Round 30 adds the official wish API: `POST /agent/ui/load-flow` with
+`{"name": "<draft>"}` asks the human's panel to open that draft in THEIR
+stages tab (never runs it). The name must exist in `/flows`; the answer is
+`{ok, id, name, queued}` and `GET /agent/ui/load-flow/<id>` reports
+queued/claimed/loaded/rejected/not_found/expired - a human may reject the
+load (unsaved changes), so never assume `loaded`.
+
 The only official operations list is `GET/POST /agent/operations` (the
 library). Saved flows under `/flows` are DRAFTS of the stages tab: build and
 test there, then register the successful operation in the library. Every

@@ -164,6 +164,14 @@ API_INDEX = [
      "Create or edit an operation; steps are schema-validated."),
     ("POST", "/agent/flows-migrate", "🔁 یکدست‌سازی: اول پشتیبان می‌گیرد، بعد هر پیش‌نویس و هر عملیات باقی‌مانده با مراحل JSON قدیمی را به مراحل پایتون ترجمه و ذخیره می‌کند (فقط اپراتور).",
      "Unify the step language: takes a backup first, then translates and saves every draft and operation still carrying legacy JSON steps into python steps (operator only)."),
+    ("POST", "/agent/ui/load-flow", "📥 صفِ درخواست «این پیش‌نویس را در تب مراحلِ کاربر باز کن»؛ نام باید در /flows وجود داشته باشد. خودکار اجرا نمی‌کند (ایجنت و اپراتور).",
+     "Queue a 'open this draft in the human's stages tab' request; the name must exist in /flows. Never runs anything (agent and operator)."),
+    ("GET", "/agent/ui/load-flow", "📥 فهرست درخواست‌های در صفِ بارگذاری پیش‌نویس (پنل poll می‌کند).",
+     "The queued load-flow requests (the panel polls this)."),
+    ("GET", "/agent/ui/load-flow/*", "📥 وضعیت یک درخواست بارگذاری: queued/claimed/loaded/rejected/not_found/expired.",
+     "Status of one load-flow request: queued/claimed/loaded/rejected/not_found/expired."),
+    ("POST", "/agent/ui/load-flow/*", "📥 پنل: claim (برندهٔ صف شدن) یا finish با نتیجهٔ loaded/rejected/not_found.",
+     "Panel side: claim (win the queue) or finish with loaded/rejected/not_found."),
     ("POST", "/agent/operation-run", "📚 اجرای یک عملیات، همین حالا.",
      "Run an operation right now."),
     ("GET", "/status", "🖥 وضعیت اجرای فعلی اتوماسیون (قدم چندم از چند، منتظر "
@@ -1797,6 +1805,58 @@ class AgentHub:
         return result
 
     # -- the agent's browser --------------------------------------------
+    # -- round 30: the coworker agent asks the panel to open a draft -------
+    UI_REQUEST_TTL = 900.0
+
+    def ui_request_load_flow(self, name: str) -> Dict[str, Any]:
+        """Queue one 'open this draft in the human's stages tab' wish.
+
+        The name must exist in the real /flows list; the panel picks the
+        request up by polling, converts legacy steps, shows every python
+        step and NEVER runs anything by itself.
+        """
+        name = str(name or "").strip()
+        if not name:
+            raise AgentError("a flow name is required", 400)
+        if self.flows is None or self.flows.get(name) is None:
+            raise AgentError(
+                "پیش‌نویسی به نام «%s» در فهرست جریان‌ها وجود ندارد" % name, 404)
+        self.store.expire_ui_requests(self._clock() - self.UI_REQUEST_TTL)
+        row = self.store.create_ui_request("load-flow", name)
+        self.store.audit("agent", "ui.loadflow.queued", name)
+        return {"ok": True, "id": row["id"], "name": name, "queued": True}
+
+    def ui_load_flow_queue(self) -> Dict[str, Any]:
+        self.store.expire_ui_requests(self._clock() - self.UI_REQUEST_TTL)
+        return {"requests": self.store.list_ui_requests("load-flow", "queued")}
+
+    def ui_load_flow_status(self, request_id: str) -> Dict[str, Any]:
+        self.store.expire_ui_requests(self._clock() - self.UI_REQUEST_TTL)
+        row = self.store.get_ui_request(request_id)
+        if row is None:
+            raise AgentError("no such ui request: %s" % request_id, 404)
+        return row
+
+    def ui_load_flow_claim(self, request_id: str) -> Dict[str, Any]:
+        row = self.store.claim_ui_request(request_id)
+        if row is None:
+            current = self.store.get_ui_request(request_id)
+            raise AgentError(
+                "request %s is not queued any more (%s)"
+                % (request_id, (current or {}).get("status") or "gone"), 409)
+        return row
+
+    def ui_load_flow_finish(self, request_id: str, result: str,
+                            detail: str = "") -> Dict[str, Any]:
+        if result not in ("loaded", "rejected", "not_found"):
+            raise AgentError("result must be loaded, rejected or not_found", 400)
+        row = self.store.finish_ui_request(request_id, result, detail)
+        if row is None:
+            raise AgentError("request %s was not claimed" % request_id, 409)
+        self.store.audit("agent", "ui.loadflow.%s" % result,
+                         "%s %s" % (row.get("name") or "", detail or ""))
+        return row
+
     def flows_migrate(self, actor: str = "operator") -> Dict[str, Any]:
         """Round 29, items 7+8: one act that unifies the step language.
 

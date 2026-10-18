@@ -2144,6 +2144,99 @@ body.mas-standalone #mas-root .mas-toast {
   box-shadow: 0 18px 50px rgba(0, 0, 0, 0.35);
 }
 
+/* Round 30, item 1: the operation editor and the cell modal get room to
+   breathe - one wide card, a headed identity block, numbered step cards
+   with monospace python areas and a footer bar for the save decision. */
+.mas-modal-card.mas-modal-wide {
+  width: min(960px, 100%);
+  max-height: 90vh;
+  padding: 22px 26px;
+  border-radius: 20px;
+}
+#mas-root .mas-opmodal-head {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 4px 2px 14px;
+  margin-bottom: 16px;
+  border-bottom: 1px solid var(--line);
+}
+#mas-root .mas-opmodal-head b { font-size: 17px; }
+#mas-root .mas-opmodal-head .mas-hint { margin: 2px 0 0; }
+#mas-root .mas-opmodal-ico {
+  display: grid;
+  place-items: center;
+  width: 44px;
+  height: 44px;
+  font-size: 22px;
+  border-radius: 14px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+}
+#mas-root .mas-opmodal-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 12px 18px;
+}
+@media (max-width: 720px) {
+  #mas-root .mas-opmodal-grid { grid-template-columns: 1fr; }
+}
+#mas-root .mas-opmodal-steps-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin: 18px 0 10px;
+}
+#mas-root .mas-opmodal-steps {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  max-height: 46vh;
+  overflow: auto;
+  padding: 2px;
+}
+#mas-root .mas-opmodal-step {
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  background: var(--surface);
+  padding: 12px 14px;
+}
+#mas-root .mas-opmodal-step-head {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 10px;
+}
+#mas-root .mas-opmodal-step-head .mas-input { flex: 1; }
+#mas-root .mas-opmodal-no {
+  display: grid;
+  place-items: center;
+  min-width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  font-weight: 700;
+}
+#mas-root .mas-opmodal-code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  direction: ltr;
+  text-align: left;
+  font-size: 12.5px;
+  line-height: 1.55;
+  background: var(--bg-solid);
+  border-radius: 10px;
+}
+#mas-root .mas-opmodal-foot {
+  display: flex;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 16px;
+  padding-top: 14px;
+  border-top: 1px solid var(--line);
+}
+
 
 /* ================================================================== *
  * Phase 13 — the flow action line becomes sticky INSIDE the scrolling

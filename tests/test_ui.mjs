@@ -25,7 +25,9 @@ const VALID_TOKEN = 'tok123';
 /** Stands in for the server: /info is open, everything else needs the token. */
 function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
                 supaEmpty = false, supaOn = false, uiPrefs = null,
-                 clipText = null) {
+                 clipText = null, loadQueue = null) {
+  const uiQueue = loadQueue || [];
+  const uiOutcomes = {};
   return async (url, options = {}) => {
     const path = String(url);
     const clean = path.split('?')[0];
@@ -448,6 +450,65 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
         { name: 'Arena', steps: 4, updatedAt: 1759990000, description: '' },
       ] });
     }
+    // Round 30: one saved draft, readable by name, so a load-flow wish (or a
+    // ?flow= URL parameter) can pour real python steps into the editor
+    const flowMatch = clean.match(/\/flows\/([^/]+)$/);
+    if (flowMatch) {
+      const name = decodeURIComponent(flowMatch[1]);
+      const fixtures = {
+        'Google Search': {
+          name: 'Google Search', viewport: { width: 1366, height: 768 },
+          steps: Array.from({ length: 10 }, (_unused, i) => ({
+            id: 'gs-' + i, type: 'python',
+            code: `check(click(${10 + i}, ${20 + i}))`,
+            label: 'مرحلهٔ ' + (i + 1),
+          })),
+        },
+      };
+      const method = (options.method || 'GET').toUpperCase();
+      if (method === 'GET') {
+        const found = fixtures[name];
+        if (!found) {
+          return { ok: false, status: 404,
+            text: async () => JSON.stringify({ error: 'no flow named ' + name }) };
+        }
+        return json({ flow: found });
+      }
+      return json({ ok: true, flow: fixtures[name] || {} });
+    }
+    // Round 30: the load-flow wish queue (create / poll / claim / finish)
+    if (clean.endsWith('/agent/ui/load-flow')) {
+      const method = (options.method || 'GET').toUpperCase();
+      if (method === 'POST') {
+        const body = JSON.parse(options.body || '{}');
+        const id = 'uif-' + (uiQueue.length + 1);
+        uiQueue.push({ id, name: body.name, status: 'queued' });
+        return json({ ok: true, id, name: body.name, queued: true });
+      }
+      return json({ requests: uiQueue.filter((item) => item.status === 'queued') });
+    }
+    const uiMatch = clean.match(/\/agent\/ui\/load-flow\/([^/]+)$/);
+    if (uiMatch) {
+      const id = uiMatch[1];
+      const req = uiQueue.find((item) => item.id === id);
+      const method = (options.method || 'GET').toUpperCase();
+      if (method === 'POST') {
+        const body = JSON.parse(options.body || '{}');
+        if (body.action === 'claim') {
+          if (!req || req.status !== 'queued') {
+            return { ok: false, status: 409,
+              text: async () => JSON.stringify({ error: 'not queued any more' }) };
+          }
+          req.status = 'claimed';
+          return json({ id, name: req.name, status: 'claimed' });
+        }
+        if (req) req.status = body.result;
+        uiOutcomes[id] = body.result;
+        return json({ id, name: req ? req.name : '', status: body.result });
+      }
+      return json({ id, name: req ? req.name : '',
+        status: uiOutcomes[id] || (req ? req.status : 'expired') });
+    }
     return json({});
   };
 }
@@ -456,7 +517,8 @@ function fakeApi(requests, posts = [], statusPayload = null, noAgent = false,
 async function mount({ readyStateComplete = true, standalone = true, flow = null,
                       status: statusPayload = null, noAgent = false,
                       clipText = null, supaEmpty = false, supaOn = false,
-                      uiPrefs = null, token = null, human = false } = {}) {
+                      uiPrefs = null, token = null, human = false,
+                      pageUrl = null, loadQueue = null } = {}) {
   const requests = [];
   const posts = [];
   const errors = [];
@@ -465,7 +527,7 @@ async function mount({ readyStateComplete = true, standalone = true, flow = null
   virtualConsole.on('error', (...args) => errors.push(args.join(' ')));
 
   const dom = new JSDOM(NOVNC_HTML, {
-    url: 'https://example.trycloudflare.com/vnc.html',
+    url: pageUrl || 'https://example.trycloudflare.com/vnc.html',
     pretendToBeVisual: true,
     virtualConsole,
   });
@@ -498,7 +560,8 @@ async function mount({ readyStateComplete = true, standalone = true, flow = null
     }),
     requestAnimationFrame: window.requestAnimationFrame
       ? window.requestAnimationFrame.bind(window) : (fn) => setTimeout(fn, 0),
-    fetch: fakeApi(requests, posts, statusPayload, noAgent, supaEmpty, supaOn, uiPrefs, clipText),
+    fetch: fakeApi(requests, posts, statusPayload, noAgent, supaEmpty, supaOn,
+      uiPrefs, clipText, loadQueue),
     // Tracked so cleanup() can stop the sidebar's poll loops, otherwise the
     // test process never exits. Bound to the originals: referencing the global
     // here would recurse into this very wrapper.
@@ -1121,9 +1184,12 @@ test('round 28: a cell opens its five-tab workspace and runs on its own', async 
 
     // clicking the cell opens the modal titled with the operation name
     row.querySelector('.mas-step-label').dispatchEvent(new page.window.Event('click'));
-    const opened = await page.until(() => page.doc.querySelector('.mas-modal .mas-card-head'));
+    const opened = await page.until(() => page.doc.querySelector('.mas-modal .mas-opmodal-head'));
     assert.ok(opened, 'the cell modal never opened');
-    const head = page.doc.querySelector('.mas-modal .mas-card-head');
+    // round 30, item 1: the cell modal is the wide, headed variant
+    assert.ok(page.doc.querySelector('.mas-modal .mas-modal-wide'),
+      'the cell modal must open in the wide variant');
+    const head = page.doc.querySelector('.mas-modal .mas-opmodal-head');
     assert.ok(head.textContent.includes('\u0639\u0645\u0644\u06cc\u0627\u062a \u0633\u0644\u0648\u0644\u06cc'));
     assert.ok(head.textContent.includes('\u0633\u0646 \u0631\u0627 \u0628\u06af\u06cc\u0631'));
     const tabs = Array.from(page.doc.querySelectorAll('#mas-cell-tabs [data-celltab]'))
@@ -3672,6 +3738,106 @@ test('changing theme, tab or language writes the preference to the database', as
     assert.ok(bodies().some((body) => body['ui.lang'] === 'en'),
       'the language choice never reached the database');
     assert.equal(page.window.localStorage.getItem('mas.lang'), 'en');
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 30: the agent can ask the panel to open a draft in the stages tab', async () => {
+  const queue = [{ id: 'uif-1', name: 'Google Search', status: 'queued' }];
+  const page = await mount({ loadQueue: queue });
+  try {
+    await authenticate(page);
+    // the panel polls the queue and consumes the wish without any click
+    assert.ok(await page.until(() => page.posts.some((p) =>
+      p.url.endsWith('/agent/ui/load-flow/uif-1')
+      && JSON.parse(p.body).action === 'claim')),
+      'the panel never claimed the queued wish');
+    assert.ok(await page.until(() => page.posts.some((p) =>
+      p.url.endsWith('/agent/ui/load-flow/uif-1')
+      && JSON.parse(p.body).action === 'finish'
+      && JSON.parse(p.body).result === 'loaded')),
+      'the loaded outcome was never reported back');
+    // every python step is on stage, the tab is active, and NOTHING ran
+    const pane = page.doc.getElementById('mas-tab-flow');
+    assert.ok(await page.until(() => pane.querySelectorAll('.mas-step').length === 10),
+      'the draft steps never rendered in the editor');
+    assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'flow');
+    assert.ok(!page.posts.some((p) => p.url.endsWith('/run')),
+      'a load-flow wish must never run anything');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 30: unsaved changes raise the three-way guard before a wish loads', async () => {
+  const queue = [{ id: 'uif-1', name: 'Google Search', status: 'queued' }];
+  const page = await mount({ loadQueue: queue });
+  try {
+    await authenticate(page);
+    assert.ok(await page.until(() => page.posts.some((p) =>
+      p.url.endsWith('/agent/ui/load-flow/uif-1')
+      && JSON.parse(p.body).action === 'finish')),
+      'the first wish never settled');
+    // dirty the stage: rename the flow that is on it
+    const nameInput = page.doc.getElementById('mas-tab-flow')
+      .querySelector('input.mas-input');
+    nameInput.value = 'dirty name';
+    nameInput.dispatchEvent(new page.window.Event('input'));
+    await page.wait(20);
+    queue.push({ id: 'uif-2', name: 'Google Search', status: 'queued' });
+    assert.ok(await page.until(() => !!page.doc.querySelector('.mas-modal')),
+      'the unsaved-changes guard never appeared');
+    const modal = page.doc.querySelector('.mas-modal');
+    assert.ok(modal.textContent.includes('تغییر ذخیره‌نشده'),
+      'the guard must name the problem in Persian');
+    // cancel keeps the stage exactly as it was and reports rejected
+    const cancel = Array.from(modal.querySelectorAll('button'))
+      .find((node) => node.textContent.includes('لغو'));
+    cancel.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts.some((p) =>
+      p.url.endsWith('/agent/ui/load-flow/uif-2')
+      && JSON.parse(p.body).action === 'finish'
+      && JSON.parse(p.body).result === 'rejected')),
+      'cancelling must report rejected');
+    assert.equal(page.doc.getElementById('mas-tab-flow')
+      .querySelector('input.mas-input').value, 'dirty name',
+      'cancel must keep the stage untouched');
+    // «save and load» PUTs the draft first, then loads the wished one
+    queue.push({ id: 'uif-3', name: 'Google Search', status: 'queued' });
+    assert.ok(await page.until(() => !!page.doc.querySelector('.mas-modal')),
+      'the guard never appeared for the third wish');
+    const saveLoad = Array.from(page.doc.querySelectorAll('.mas-modal button'))
+      .find((node) => node.textContent.includes('ذخیره و بارگذاری'));
+    saveLoad.dispatchEvent(new page.window.Event('click'));
+    assert.ok(await page.until(() => page.posts.some((p) =>
+      p.url.includes('/flows/dirty%20name'))),
+      '«save and load» must PUT the draft first');
+    assert.ok(await page.until(() => page.posts.some((p) =>
+      p.url.endsWith('/agent/ui/load-flow/uif-3')
+      && JSON.parse(p.body).action === 'finish'
+      && JSON.parse(p.body).result === 'loaded')),
+      'the third wish never settled as loaded');
+    assert.deepEqual(page.errors, []);
+  } finally {
+    await page.cleanup();
+  }
+});
+
+test('round 30: panel.html?tab=flow&flow=<name> opens that draft once', async () => {
+  const page = await mount({
+    pageUrl: 'https://example.trycloudflare.com/panel.html?tab=flow&flow=Google%20Search',
+  });
+  try {
+    await authenticate(page);
+    const pane = page.doc.getElementById('mas-tab-flow');
+    assert.ok(await page.until(() => pane.querySelectorAll('.mas-step').length === 10),
+      'the URL-named draft never opened');
+    assert.equal(page.doc.querySelector('.mas-tab.is-active').dataset.tab, 'flow');
+    assert.ok(!page.posts.some((p) => p.url.endsWith('/run')),
+      'a URL parameter must never run anything');
+    assert.deepEqual(page.errors, []);
   } finally {
     await page.cleanup();
   }

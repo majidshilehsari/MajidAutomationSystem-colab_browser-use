@@ -67,13 +67,16 @@ start_chrome() {
 # has mapped the window, pin its frame to the top-left, leaving room at the
 # bottom for the fluxbox toolbar. Best effort; the desktop is disposable.
 fix_chrome_geometry() {
+  # Round 30, item 2: fluxbox draws NO title bar for Chrome (see the apps
+  # file written just before the window manager starts), so the browser's
+  # own tab strip is the only top edge. Keep the window maximized in the
+  # work area on every start, so the look is identical every single time.
   for _ in {1..40}; do
     env DISPLAY="$DISPLAY_ID" wmctrl -lx 2>/dev/null | grep -qi 'chrome' && break
     sleep 0.25
   done
   env DISPLAY="$DISPLAY_ID" wmctrl -r 'Google Chrome' \
-    -b remove,maximized_vert,maximized_horz 2>/dev/null || true
-  env DISPLAY="$DISPLAY_ID" wmctrl -r 'Google Chrome' -e 0,0,0,1366,744 2>/dev/null || true
+    -b add,maximized_vert,maximized_horz 2>/dev/null || true
 }
 
 stop_owned_process() {
@@ -223,6 +226,18 @@ MENUEOF
 else
   printf 'Warning: the kb-set helper could not be written.\n' >&2
 fi
+
+# Round 30, item 2: one consistent desktop - Chrome carries its own tab
+# strip and window buttons everywhere; the window manager never adds a
+# second title bar above it (that bar appeared on some starts, not others).
+FB_APPS_HOME="${HOME:-/root}"
+mkdir -p "$FB_APPS_HOME/.fluxbox" 2>/dev/null
+cat >"$FB_APPS_HOME/.fluxbox/apps" <<'APPSEOF'
+[app] (class=Google-chrome)
+    [Deco] {NONE}
+    [Maximized] {YES}
+[end]
+APPSEOF
 
 nohup env DISPLAY="$DISPLAY_ID" dbus-launch --exit-with-session fluxbox \
   >"$LOG_DIR/fluxbox.log" 2>&1 &

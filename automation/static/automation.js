@@ -51,6 +51,10 @@ const state = {
   token: localStorage.getItem(LS.token) || '',
   theme: localStorage.getItem(LS.theme) || 'dark',
   flow: loadFlow(),
+  // Round 30: the last explicitly saved/loaded snapshot of the flow on
+  // stage; anything newer is "unsaved changes" the guard dialog protects
+  flowBaseline: '',
+  pendingUrlFlow: '',
   info: null,
   status: { status: 'idle', entries: [] },
   pages: [],
@@ -740,6 +744,7 @@ function applyFlowToStages(saved) {
     return false;
   }
   state.flow = flow;
+  setFlowBaseline();
   persistFlow();
   renderFlow();
   selectTab('flow');
@@ -926,22 +931,28 @@ async function openSavedFlow(name) {
     if (!detail.flow) throw new Error('empty flow');
     state.flow = await toPythonFlow(detail.flow);
     state.openStepId = null;
+    setFlowBaseline();
     persistFlow();
     renderFlow();
     toast(`${t('load')}: ${name}`, 'ok');
   } catch (error) {
-    toast(error.message, 'error');
+    toast(error.status === 404
+      ? t('flowMissing').replace('{n}', name) : error.message, 'error');
   }
 }
 
-function modalCard(children) {
+function modalCard(children, extraClass = '') {
   // One centred dialog layer; clicking the dim backdrop closes it.
+  // `extraClass` lets a dialog ask for more room (the operation editor and
+  // the cell modal do - round 30, item 1).
   let layer = null;
   const close = () => { if (layer) layer.remove(); layer = null; };
   layer = el('div', {
     class: 'mas-modal',
     onClick: (event) => { if (event.target === layer) close(); },
-  }, [el('div', { class: 'mas-modal-card mas-card' }, children)]);
+  }, [el('div', {
+    class: 'mas-modal-card mas-card' + (extraClass ? ' ' + extraClass : ''),
+  }, children)]);
   document.body.appendChild(layer);
   return close;
 }
@@ -1058,6 +1069,7 @@ async function runSavedFlow(name) {
     const detail = await api(`/flows/${encodeURIComponent(name)}`);
     if (!detail.flow) throw new Error('empty flow');
     state.flow = await toPythonFlow(detail.flow);
+    setFlowBaseline();
     persistFlow();
     renderFlow();
     await runFlow();
@@ -1302,15 +1314,21 @@ function openCellModal(step, index) {
     replace(body, cellTabPane(step, index, active, draw));
   };
   const close = modalCard([
-    el('div', { class: 'mas-card-head' }, [el('b', {
-      text: '🧩 ' + (state.flow.name || '') + ' — ' + (step.label || labelFor(step)),
-    })]),
+    el('div', { class: 'mas-opmodal-head' }, [
+      el('span', { class: 'mas-opmodal-ico', text: '🧩' }),
+      el('div', {}, [
+        el('b', {
+          text: (state.flow.name || '') + ' — ' + (step.label || labelFor(step)),
+        }),
+        el('p', { class: 'mas-hint', text: t('cellModalHint') }),
+      ]),
+    ]),
     tabBar,
     body,
     el('div', { class: 'mas-row mas-wrap' }, [
       button(t('closeBtn'), () => close()),
     ]),
-  ]);
+  ], 'mas-modal-wide');
   draw();
 }
 
@@ -1618,6 +1636,114 @@ function setToken(value) {
   refreshStatus();
 }
 
+/* ------------------------------------------------------------------ *
+ * Round 30: the coworker agent can ask THIS panel to open a draft in
+ * the stages tab. The wish travels through the server queue; the panel
+ * polls it, claims it atomically (with two panels open exactly one
+ * wins), protects unsaved changes with a three-way dialog and reports
+ * the final status back. Nothing is ever run automatically.
+ * ------------------------------------------------------------------ */
+
+function setFlowBaseline() { state.flowBaseline = JSON.stringify(state.flow); }
+
+function flowDirty() {
+  if (state.flowBaseline === '') setFlowBaseline();
+  return JSON.stringify(state.flow) !== state.flowBaseline;
+}
+
+async function pollLoadFlowRequests() {
+  // Only a panel that actually owns a stages pane may consume a wish: the
+  // desktop stage and the human page poll the same server but have nowhere
+  // to show the steps.
+  if (!state.token || !document.getElementById('mas-tab-flow')) return;
+  let data;
+  try {
+    data = await api('/agent/ui/load-flow');
+  } catch (error) { return; }
+  for (const req of (data.requests || [])) {
+    // sequential on purpose: one wish at a time keeps the dialog honest
+    await handleLoadFlowRequest(req);
+  }
+}
+
+async function handleLoadFlowRequest(req) {
+  let claimed;
+  try {
+    claimed = await api(`/agent/ui/load-flow/${encodeURIComponent(req.id)}`,
+      { method: 'POST', body: { action: 'claim' } });
+  } catch (error) { return; }  // another panel won the race: not ours to load
+  const finish = async (result, detail = '') => {
+    try {
+      await api(`/agent/ui/load-flow/${encodeURIComponent(req.id)}`,
+        { method: 'POST', body: { action: 'finish', result, detail } });
+      // read the final status back, so closure is verifiable
+      await api(`/agent/ui/load-flow/${encodeURIComponent(req.id)}`);
+    } catch (error) { /* reporting stays best effort */ }
+  };
+  const load = async () => {
+    try {
+      const detail = await api(`/flows/${encodeURIComponent(req.name)}`);
+      if (!detail.flow) throw new Error('empty flow');
+      state.flow = await toPythonFlow(detail.flow);
+      state.openStepId = null;
+      setFlowBaseline();
+      persistFlow();
+      renderFlow();
+      selectTab('flow');
+      toast(`${t('load')}: ${req.name}`, 'ok');
+      await finish('loaded');
+    } catch (error) {
+      toast(error.status === 404
+        ? t('flowMissing').replace('{n}', req.name) : error.message, 'error');
+      await finish('not_found', String(error.message || ''));
+    }
+  };
+  if (flowDirty()) {
+    openUnsavedFlowDialog(req.name, load,
+      () => finish('rejected', 'unsaved changes kept'));
+    return;
+  }
+  await load();
+}
+
+function openUnsavedFlowDialog(name, onLoad, onCancel) {
+  // The stage holds edits that were never saved as a draft; replacing them
+  // silently would eat the human's work, so three honest choices appear.
+  const close = modalCard([
+    el('div', { class: 'mas-card-head' },
+      [el('b', { text: '⚠️ ' + t('unsavedTitle') })]),
+    el('p', { class: 'mas-hint', text: t('unsavedHint').replace('{n}', name) }),
+    el('div', { class: 'mas-row mas-wrap' }, [
+      button('💾 ' + t('unsavedSaveLoad'), async () => {
+        close();
+        await saveFlow();
+        await onLoad();
+      }, { class: 'mas-btn mas-primary' }),
+      button('⤓ ' + t('unsavedLoad'), async () => { close(); await onLoad(); }),
+      button('✕ ' + t('unsavedCancel'), async () => { close(); await onCancel(); },
+        { class: 'mas-btn mas-danger' }),
+    ]),
+  ]);
+  return close;
+}
+
+function consumeFlowUrlParams() {
+  // Round 30 supplement: panel.html?tab=flow&flow=<name> opens that draft
+  // right after auth. sessionStorage marks the parameter consumed, so a
+  // refresh never replays it (the flow itself survives in localStorage).
+  let params = null;
+  try { params = new URLSearchParams(window.location.search); } catch (error) { return; }
+  const tab = String(params.get('tab') || '');
+  if (tab && document.querySelector(`.mas-tab[data-tab="${tab}"]`)) selectTab(tab);
+  const name = String(params.get('flow') || '');
+  if (!name) return;
+  try {
+    if (window.sessionStorage.getItem('mas-flow-url-consumed') === name) return;
+    window.sessionStorage.setItem('mas-flow-url-consumed', name);
+  } catch (error) { /* storage blocked: consume once per page load anyway */ }
+  state.pendingUrlFlow = name;
+}
+
 async function refreshStatus() {
   // /info needs no token, so it is always safe to ask. Everything else does,
   // and knocking on those before the human has typed a token only produces a
@@ -1677,6 +1803,13 @@ async function refreshStatus() {
     mergeCellResults(state.status);
     // Never close an editor the human has open; the badges catch up later.
     if (currentTab() === 'flow' && !state.openStepId) renderFlow();
+  }
+  // Round 30: consume queued load-flow wishes and the one-shot URL param
+  pollLoadFlowRequests();
+  if (state.pendingUrlFlow) {
+    const name = state.pendingUrlFlow;
+    state.pendingUrlFlow = '';
+    openSavedFlow(name);
   }
 }
 
@@ -2097,6 +2230,7 @@ async function saveFlow(name = state.flow.name) {
     await api(`/flows/${encodeURIComponent(name)}`, { method: 'PUT', body: { flow: state.flow } });
     state.flow.name = name;
     persistFlow();
+    setFlowBaseline();
     toast(`${t('save')}: ${name}`, 'ok');
   } catch (error) {
     toast(error.message, 'error');
@@ -3889,6 +4023,7 @@ async function openOperationInStages(op) {
     return;
   }
   state.flow = flow;
+  setFlowBaseline();
   persistFlow();
   renderFlow();
   selectTab('flow');
@@ -3993,69 +4128,85 @@ function openOperationModal(draft) {
   const body = el('div', { id: 'mas-op-modal-body' });
   const draw = () => replace(body, operationEditor(draft, draw, close));
   const close = modalCard([
-    el('div', { class: 'mas-card-head' }, [el('b', {
-      text: '💾 ' + (draft.id ? t('opEdit') : t('opNew')),
-    })]),
+    el('div', { class: 'mas-opmodal-head' }, [
+      el('span', { class: 'mas-opmodal-ico', text: draft.id ? '✎' : '🧩' }),
+      el('div', {}, [
+        el('b', { text: draft.id ? t('opEdit') : t('opNew') }),
+        el('p', { class: 'mas-hint', text: t('opModalHint') }),
+      ]),
+    ]),
     body,
-  ]);
+  ], 'mas-modal-wide');
   draw();
 }
 
 function operationEditor(draft, redraw = renderOperations, onClose = null) {
   // Round 26: every step of an operation is a python program with a Persian
   // description; no type picker and no JSON fields remain.
-  const stepRows = (draft.steps || []).map((row, index) => el('div', { class: 'mas-op-steprow mas-op-steprow-code' }, [
-    el('span', { class: 'mas-step-no', text: `${t('stepNo')} ${index + 1}` }),
-    el('input', {
-      class: 'mas-input', value: row.label || '', placeholder: t('opStepLabel'),
-      onInput: (event) => { row.label = event.target.value; },
-    }),
+  // Round 30, item 1: and the modal is a proper little editor now - identity
+  // fields in a two-column grid, then numbered step cards with a monospace
+  // python area each, then one footer bar carrying the save decision.
+  const stepRows = (draft.steps || []).map((row, index) => el('div', {
+    class: 'mas-opmodal-step',
+  }, [
+    el('div', { class: 'mas-opmodal-step-head' }, [
+      el('span', { class: 'mas-opmodal-no', text: String(index + 1) }),
+      el('input', {
+        class: 'mas-input', value: row.label || '', placeholder: t('opStepLabel'),
+        onInput: (event) => { row.label = event.target.value; },
+      }),
+      button('🗑', () => { draft.steps.splice(index, 1); redraw(); },
+        { class: 'mas-btn mas-danger', title: t('delete') }),
+    ]),
     el('textarea', {
-      class: 'mas-input mas-area', rows: '4', value: row.code || '',
-      spellcheck: 'false', placeholder: 'check(click(512, 300))',
+      class: 'mas-input mas-area mas-opmodal-code', rows: '5',
+      value: row.code || '', spellcheck: 'false',
+      placeholder: 'check(click(512, 300))',
       onInput: (event) => { row.code = event.target.value; },
     }),
-    button('🗑', () => { draft.steps.splice(index, 1); redraw(); }),
   ]));
 
-  return el('div', { class: 'mas-box mas-op-editor' }, [
-    el('b', { text: draft.id ? t('opEdit') : t('opNew') }),
-    agentField(t('opName'), el('input', {
-      class: 'mas-input', value: draft.name || '', placeholder: t('opNameHint'),
-      onInput: (event) => { draft.name = event.target.value; },
-    })),
-    agentField(t('opDescription'), el('input', {
-      class: 'mas-input', value: draft.description || '',
-      onInput: (event) => { draft.description = event.target.value; },
-    })),
-    agentField(t('opTags'), el('input', {
-      class: 'mas-input', value: draft.tags || '', placeholder: t('opTagsHint'),
-      onInput: (event) => { draft.tags = event.target.value; },
-    })),
-    agentField(t('opScope'), el('select', {
-      class: 'mas-input',
-      onChange: (event) => { draft.scope = event.target.value; },
-    }, [
-      el('option', {
-        value: 'general', selected: (draft.scope || 'general') !== 'brain',
-      }, '🌐 ' + t('scopeGeneral')),
-      el('option', {
-        value: 'brain', selected: draft.scope === 'brain',
-      }, '🧠 ' + t('scopeBrain')),
-    ])),
+  return el('div', { class: 'mas-opmodal' }, [
+    el('div', { class: 'mas-opmodal-grid' }, [
+      agentField(t('opName'), el('input', {
+        class: 'mas-input', value: draft.name || '', placeholder: t('opNameHint'),
+        onInput: (event) => { draft.name = event.target.value; },
+      })),
+      agentField(t('opScope'), el('select', {
+        class: 'mas-input',
+        onChange: (event) => { draft.scope = event.target.value; },
+      }, [
+        el('option', {
+          value: 'general', selected: (draft.scope || 'general') !== 'brain',
+        }, '🌐 ' + t('scopeGeneral')),
+        el('option', {
+          value: 'brain', selected: draft.scope === 'brain',
+        }, '🧠 ' + t('scopeBrain')),
+      ])),
+      agentField(t('opDescription'), el('input', {
+        class: 'mas-input', value: draft.description || '',
+        onInput: (event) => { draft.description = event.target.value; },
+      })),
+      agentField(t('opTags'), el('input', {
+        class: 'mas-input', value: draft.tags || '', placeholder: t('opTagsHint'),
+        onInput: (event) => { draft.tags = event.target.value; },
+      })),
+    ]),
     el('p', { class: 'mas-hint', text: t('opScopeHint') }),
-    el('div', { class: 'mas-row mas-wrap' }, [
-      el('b', { text: `${t('opSteps')} (${stepRows.length})` }),
+    el('div', { class: 'mas-opmodal-steps-head' }, [
+      el('b', { text: `🧩 ${t('opSteps')} (${stepRows.length})` }),
       button('＋ ' + t('opAddStep'), () => {
         draft.steps = draft.steps || [];
         draft.steps.push({ type: 'python', code: '', label: '' });
         redraw();
       }),
     ]),
-    el('div', {}, stepRows),
+    el('div', { class: 'mas-opmodal-steps' }, stepRows.length ? stepRows
+      : [el('p', { class: 'mas-hint', text: t('opEmpty') })]),
     el('p', { class: 'mas-hint', text: t('opFieldsHint') }),
-    el('div', { class: 'mas-row mas-wrap' }, [
-      button('💾 ' + t('opSave'), () => saveOperation(draft, onClose), { class: 'mas-btn mas-primary' }),
+    el('div', { class: 'mas-opmodal-foot' }, [
+      button('💾 ' + t('opSave'), () => saveOperation(draft, onClose),
+        { class: 'mas-btn mas-primary' }),
       button(t('opCancel'), () => {
         state.editingOperation = null;
         if (onClose) onClose(); else renderOperations();
@@ -4658,6 +4809,7 @@ function start() {
   wireStandaloneHead();
   setPanelOpen(true);
   selectTab(initialTab());
+  consumeFlowUrlParams();
   // Round 28, item 6: a flow still saved in the old JSON step language
   // (round 25 or older) is translated to python the first time the panel
   // opens with a token. The server also translates on every run and save;
@@ -4667,6 +4819,7 @@ function start() {
       if (!converted || !(converted.steps || []).length) return;
       if (!(converted.steps || []).some((s) => s && s.type !== 'python')) {
         state.flow = converted;
+        setFlowBaseline();
         persistFlow();
         renderFlow();
       }

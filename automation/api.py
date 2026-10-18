@@ -285,6 +285,10 @@ class AutomationApi:
             ("GET", "/agent/operations", self.route_agent_operations_list),
             ("POST", "/agent/operations", self.route_agent_operations_create),
             ("POST", "/agent/flows-migrate", self.route_agent_flows_migrate),
+            ("POST", "/agent/ui/load-flow", self.route_ui_load_flow),
+            ("GET", "/agent/ui/load-flow", self.route_ui_load_flow_queue),
+            ("GET", "/agent/ui/load-flow/*", self.route_ui_load_flow_status),
+            ("POST", "/agent/ui/load-flow/*", self.route_ui_load_flow_action),
             ("PUT", "/agent/operations/*", self.route_agent_operations_update),
             ("DELETE", "/agent/operations/*", self.route_agent_operations_delete),
             ("POST", "/agent/operation-run", self.route_agent_operation_run),
@@ -1256,6 +1260,33 @@ class AutomationApi:
     def route_agent_operations_create(self, *, body: bytes = b"", **_: Any) -> Response:
         return json_response(201, {"operation":
                                    self.agent.operation_save(self.read_json(body))})
+
+    def route_ui_load_flow(self, *, body: bytes = b"", **_: Any) -> Response:
+        """Round 30: the coworker agent (or the operator) asks the human's
+        panel to open one draft in the stages tab. Authenticated, and the
+        agent key is enough on purpose - it only queues a wish, never runs."""
+        payload = self.read_json(body)
+        return json_response(202, self.agent.ui_request_load_flow(
+            str(payload.get("name") or "")))
+
+    def route_ui_load_flow_queue(self, **_: Any) -> Response:
+        return json_response(200, self.agent.ui_load_flow_queue())
+
+    def route_ui_load_flow_status(self, *, params: Dict[str, str],
+                                  **_: Any) -> Response:
+        return json_response(200, self.agent.ui_load_flow_status(params["*"]))
+
+    def route_ui_load_flow_action(self, *, params: Dict[str, str],
+                                  body: bytes = b"", **_: Any) -> Response:
+        payload = self.read_json(body)
+        action = str(payload.get("action") or "")
+        if action == "claim":
+            return json_response(200, self.agent.ui_load_flow_claim(params["*"]))
+        if action == "finish":
+            return json_response(200, self.agent.ui_load_flow_finish(
+                params["*"], str(payload.get("result") or ""),
+                str(payload.get("detail") or "")))
+        raise ApiError(400, "action must be 'claim' or 'finish'")
 
     def route_agent_flows_migrate(self, **_: Any) -> Response:
         """Round 29, items 7+8: backup first, then translate every legacy

@@ -1904,6 +1904,62 @@ class AgentApiTest(TempDirCase):
         self.assertEqual(ops["old op"]["steps"][0]["type"], "python")
         self.assertIn("click(1, 2)", ops["old op"]["steps"][0]["code"])
 
+    def test_ui_load_flow_queue_claim_finish_and_expiry(self):
+        # Round 30: the agent queues a wish, one panel claims it atomically,
+        # the outcome is readable, and old wishes expire instead of
+        # surprising a refresh.
+        status, payload = self.call("POST", "/agent/ui/load-flow",
+                                    {"name": "Arena"})
+        self.assertEqual(status, 202)
+        self.assertTrue(payload["queued"])
+        request_id = payload["id"]
+        # an unknown draft is refused before it ever reaches the queue
+        status, payload = self.call("POST", "/agent/ui/load-flow",
+                                    {"name": "no-such-draft"})
+        self.assertEqual(status, 404)
+        self.assertIn("no-such-draft", str(payload.get("error")))
+        # the queue hands it to exactly one panel
+        status, payload = self.call("GET", "/agent/ui/load-flow", {})
+        self.assertEqual([row["id"] for row in payload["requests"]],
+                         [request_id])
+        status, claimed = self.call(
+            "POST", "/agent/ui/load-flow/%s" % request_id, {"action": "claim"})
+        self.assertEqual(status, 200)
+        self.assertEqual(claimed["status"], "claimed")
+        status, payload = self.call(
+            "POST", "/agent/ui/load-flow/%s" % request_id, {"action": "claim"})
+        self.assertEqual(status, 409)
+        status, payload = self.call("GET", "/agent/ui/load-flow", {})
+        self.assertEqual(payload["requests"], [])
+        status, done = self.call(
+            "POST", "/agent/ui/load-flow/%s" % request_id,
+            {"action": "finish", "result": "loaded"})
+        self.assertEqual(status, 200)
+        self.assertEqual(done["status"], "loaded")
+        status, row = self.call(
+            "GET", "/agent/ui/load-flow/%s" % request_id, {})
+        self.assertEqual(row["status"], "loaded")
+        # a rejected wish (unsaved changes kept) is readable by the agent too
+        status, payload = self.call("POST", "/agent/ui/load-flow",
+                                    {"name": "Arena"})
+        second = payload["id"]
+        self.call("POST", "/agent/ui/load-flow/%s" % second, {"action": "claim"})
+        status, done = self.call(
+            "POST", "/agent/ui/load-flow/%s" % second,
+            {"action": "finish", "result": "rejected",
+             "detail": "unsaved changes kept"})
+        self.assertEqual(done["status"], "rejected")
+        self.assertEqual(done["detail"], "unsaved changes kept")
+        # expiry: an old queued wish dies instead of replaying after refresh
+        status, payload = self.call("POST", "/agent/ui/load-flow",
+                                    {"name": "Arena"})
+        third = payload["id"]
+        self.clock.now += 901
+        status, row = self.call("GET", "/agent/ui/load-flow/%s" % third, {})
+        self.assertEqual(row["status"], "expired")
+        status, payload = self.call("GET", "/agent/ui/load-flow", {})
+        self.assertEqual(payload["requests"], [])
+
     def test_flow_delete_names_the_jobs_that_still_target_the_draft(self):
         # Round 29, item 8: nothing a scheduler depends on is deleted
         # silently - the refusal names the blocking jobs, force overrides

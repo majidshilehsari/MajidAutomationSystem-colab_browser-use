@@ -174,6 +174,16 @@ CREATE TABLE IF NOT EXISTS brain_memory (
     text      TEXT NOT NULL DEFAULT ''
 );
 
+CREATE TABLE IF NOT EXISTS ui_requests (
+    id         TEXT PRIMARY KEY,
+    kind       TEXT NOT NULL DEFAULT 'load-flow',
+    name       TEXT NOT NULL DEFAULT '',
+    status     TEXT NOT NULL DEFAULT 'queued',
+    created_at REAL NOT NULL,
+    updated_at REAL NOT NULL,
+    detail     TEXT NOT NULL DEFAULT ''
+);
+
 CREATE TABLE IF NOT EXISTS letters (
     id        INTEGER PRIMARY KEY AUTOINCREMENT,
     at        REAL NOT NULL,
@@ -592,6 +602,72 @@ class AgentStore:
                                " ORDER BY created_at DESC LIMIT ?", (kind, limit))
         return self._query("SELECT * FROM notes ORDER BY created_at DESC LIMIT ?",
                            (limit,))
+
+    # -- round 30: UI requests (the coworker agent asks the human panel) ----
+    def create_ui_request(self, kind: str, name: str) -> Dict[str, Any]:
+        now = self._clock()
+        request_id = "uif-%s" % uuid.uuid4().hex[:12]
+        self._execute(
+            "INSERT INTO ui_requests (id, kind, name, status, created_at,"
+            " updated_at, detail) VALUES (?,?,?,?,?,?,?)",
+            (request_id, str(kind or "load-flow"), str(name or ""),
+             "queued", now, now, ""))
+        return {"id": request_id, "kind": str(kind or "load-flow"),
+                "name": str(name or ""), "status": "queued",
+                "createdAt": now, "updatedAt": now, "detail": ""}
+
+    def get_ui_request(self, request_id: str) -> Optional[Dict[str, Any]]:
+        rows = self._query("SELECT * FROM ui_requests WHERE id = ?",
+                           (str(request_id or ""),))
+        return dict(rows[0]) if rows else None
+
+    def list_ui_requests(self, kind: str = "", status: str = "") -> List[Dict[str, Any]]:
+        sql = "SELECT * FROM ui_requests"
+        where: List[str] = []
+        args: List[Any] = []
+        if kind:
+            where.append("kind = ?")
+            args.append(str(kind))
+        if status:
+            where.append("status = ?")
+            args.append(str(status))
+        if where:
+            sql += " WHERE " + " AND ".join(where)
+        sql += " ORDER BY created_at DESC LIMIT 50"
+        return [dict(row) for row in self._query(sql, tuple(args))]
+
+    def claim_ui_request(self, request_id: str) -> Optional[Dict[str, Any]]:
+        """queued -> claimed, atomically: with two panels open exactly one
+        of them wins the race and the other one simply sees 'claimed'."""
+        now = self._clock()
+        changed = self._execute(
+            "UPDATE ui_requests SET status = 'claimed', updated_at = ?"
+            " WHERE id = ? AND status = 'queued'",
+            (now, str(request_id or "")))
+        if not changed:
+            # someone else (another panel) claimed it first - the race has
+            # exactly one winner
+            return None
+        return self.get_ui_request(request_id)
+
+    def finish_ui_request(self, request_id: str, status: str,
+                          detail: str = "") -> Optional[Dict[str, Any]]:
+        now = self._clock()
+        self._execute(
+            "UPDATE ui_requests SET status = ?, detail = ?, updated_at = ?"
+            " WHERE id = ? AND status = 'claimed'",
+            (str(status), str(detail or "")[:500], now, str(request_id or "")))
+        return self.get_ui_request(request_id)
+
+    def expire_ui_requests(self, older_than: float) -> int:
+        """Queued or claimed requests older than the cutoff become
+        'expired', so a refresh never replays an old wish onto the stages."""
+        now = self._clock()
+        self._execute(
+            "UPDATE ui_requests SET status = 'expired', updated_at = ?"
+            " WHERE status IN ('queued', 'claimed') AND created_at < ?",
+            (now, float(older_than)))
+        return 0
 
     def delete_note(self, note_id: str, actor: str = "operator") -> bool:
         removed = self._execute("DELETE FROM notes WHERE id = ?", (note_id,))

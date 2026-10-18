@@ -299,6 +299,15 @@ prepare_desktop() {
   local home_dir="${HOME:-/home/automation}"
   local fb_dir="$home_dir/.fluxbox"
   mkdir -p "$fb_dir" 2>/dev/null || true
+  # Round 30, item 2: Chrome carries its own tab strip and window buttons on
+  # every start; fluxbox never stacks a second title bar above the browser.
+  cat > "$fb_dir/apps" <<'APPS' 2>/dev/null \
+    || log "WARN: fluxbox apps file not written"
+[app] (class=Google-chrome)
+    [Deco] {NONE}
+    [Maximized] {YES}
+[end]
+APPS
   if [[ -f "$APP_DIR/hostim/fluxbox-style" ]]; then
     cp -f "$APP_DIR/hostim/fluxbox-style" "$fb_dir/mas-style" 2>/dev/null || true
     # The style ships with a MasFont placeholder: fluxbox draws its menus and
@@ -532,13 +541,16 @@ start_chrome() {
 # top-left once the window manager has mapped it, leaving room for the fluxbox
 # toolbar. Best effort, exactly like start_colab_browser.sh.
 fix_chrome_geometry() {
+  # Round 30, item 2: fluxbox draws NO title bar for Chrome (see the apps
+  # file written in prepare_desktop), so the browser's own tab strip is the
+  # only top edge; keep the window maximized in the work area instead of
+  # pinning a hand-measured geometry.
   local _attempt
   for _attempt in {1..40}; do
     wmctrl -lx 2>/dev/null | grep -qi 'chrome' && break
     sleep 0.25
   done
-  wmctrl -r 'Google Chrome' -b remove,maximized_vert,maximized_horz 2>/dev/null || true
-  wmctrl -r 'Google Chrome' -e 0,0,0,1366,744 2>/dev/null || true
+  wmctrl -r 'Google Chrome' -b add,maximized_vert,maximized_horz 2>/dev/null || true
 }
 
 chrome_alive() {
